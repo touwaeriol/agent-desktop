@@ -243,7 +243,10 @@ export const startSubagent = {
   name: 'start_subagent',
   title: 'Start a subagent',
   description:
-    'Start a subagent (a separate pi process) that works on a task in this project. With ' +
+    'Start a subagent (a separate pi process) that works on a task in this project. It starts ' +
+    'blind, so the task must carry the goal, paths and constraints. Worth it for self-contained ' +
+    'work that would flood this context (broad exploration, long test loops, a diff review) and ' +
+    'for independent slices run in parallel; do small or context-dependent work yourself. With ' +
     '`mode: "sync"` it returns the final answer when it finishes; with `mode: "background"` it ' +
     'returns immediately, and a notice is appended to this session when it finishes (`notify`). ' +
     'Every parameter overrides the preset: model, tools, mode, cwd.',

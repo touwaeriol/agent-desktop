@@ -312,14 +312,38 @@ export function rankAgents(
   return (hits.length > 0 ? hits : fallback).slice(0, Math.max(1, limit))
 }
 
+/**
+ * When to delegate, shared by both exposures. A bare catalog tells the model what exists but not
+ * why it would pay off, and models default to doing everything in the main context.
+ */
+const SUBAGENT_USAGE = [
+  'Subagents run in their own pi process with their own context. They cannot see this conversation,',
+  'cannot ask the user, and cannot start more subagents. You get back a short final answer.',
+  '',
+  'Delegate when the work is self-contained and would otherwise flood this context:',
+  '- broad exploration ("where is X handled", reading many files) — keep file contents out of here;',
+  '- long verification loops (run the suite, fix, rerun) where only the verdict matters;',
+  '- a review of the diff before you commit to an approach;',
+  '- several independent slices that can run at once — one subagent each, mode "background".',
+  '',
+  'Do it yourself when it is a few tool calls, when it needs this conversation\'s context, when a',
+  'decision only the user can make is involved (use `ask_user_question`), or when the next step is',
+  'irreversible and needs your own control.',
+  '',
+  'A subagent starts blind: give it the goal, the paths, the constraints and what "done" means.',
+  'Never write "as we discussed" or refer to earlier turns.'
+].join('\n')
+
 /** The `<agents>` system prompt section, or undefined when nothing should be listed. */
 export function renderAgentsSection(settings: AgentSettings): string | undefined {
   if (settings.exposure === 'hidden') return undefined
   if (settings.exposure === 'lazy') {
-    return (
-      'Subagent presets are available: call `search_agents` to find one, then `start_subagent` ' +
-      'with `agent: "<id>"`. Any parameter (model, tools, mode, cwd) overrides the preset.'
-    )
+    return [
+      SUBAGENT_USAGE,
+      '',
+      'Call `search_agents` to find a preset, then `start_subagent` with `agent: "<id>"`. Any',
+      'parameter (model, tools, mode, cwd) overrides the preset.'
+    ].join('\n')
   }
   const all = settings.presets
   const listed =
@@ -338,7 +362,9 @@ export function renderAgentsSection(settings: AgentSettings): string | undefined
     return `- ${preset.id} (${mode}, ${ability}): ${preset.description}`
   })
   return [
-    'Subagents you can start with `start_subagent`:',
+    SUBAGENT_USAGE,
+    '',
+    'Presets you can start with `start_subagent`:',
     ...lines,
     '',
     'Pass `agent: "<id>"`; any parameter (model, tools, mode, cwd) overrides the preset.',
