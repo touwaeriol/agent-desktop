@@ -548,15 +548,38 @@ export async function resolveModelChoice(
   }
 
   const matches = models.filter((model) => model.id === id)
-  const usable = matches.filter((model) => configured.has(model.provider))
-  if (usable.length === 1) return { model: { provider: usable[0].provider, id: id as string } }
+  const owners = [...new Set(matches.map((model) => model.provider))]
+  const usable = owners.filter((owner) => configured.has(owner))
+
+  // Exactly one provider offers this id: use it, and let the credential check speak for itself.
+  if (owners.length === 1) {
+    const [owner] = owners
+    if (!configured.has(owner)) {
+      return {
+        error: {
+          code: 'PROVIDER_NOT_CONFIGURED',
+          message: `模型 ${id} 只属于 ${owner}，但 ${owner} 还没有配置凭据，先在 设置 → 服务商 登录或填 API key`
+        }
+      }
+    }
+    return { model: { provider: owner, id: id as string } }
+  }
+
+  // Several providers offer it: a single configured one wins, otherwise the caller must choose.
+  if (usable.length === 1) return { model: { provider: usable[0], id: id as string } }
   if (usable.length > 1) {
     return {
       error: {
         code: 'AMBIGUOUS_MODEL',
-        message: `模型 ${id} 在多个服务商下存在，请同时指定 provider：${usable
-          .map((model) => model.provider)
-          .join(', ')}`
+        message: `模型 ${id} 在多个已配置的服务商下存在，请同时指定 provider：${usable.join(', ')}`
+      }
+    }
+  }
+  if (owners.length > 1) {
+    return {
+      error: {
+        code: 'AMBIGUOUS_MODEL',
+        message: `模型 ${id} 在多个服务商下存在（都未配置凭据），请同时指定 provider：${owners.join(', ')}`
       }
     }
   }
