@@ -741,7 +741,8 @@ export default function App(): React.JSX.Element {
    * Deliberately depends on the run status only: adding an item must not trigger a send, otherwise
    * the second item races the first one into pi while `isStreaming` is still false. `queueTick` is
    * bumped after a queued command finishes, because a command (e.g. `/clear`) does not change
-   * `isStreaming` and the remaining items would otherwise wait for the next run to end.
+   * `isStreaming` and the remaining items would otherwise wait for the next run to end. `btwChat`
+   * is here for the same reason: closing the side chat is what unblocks the queue.
    */
   useEffect(() => {
     // `compacting` counts as busy: pi refuses prompts while it rewrites the context.
@@ -764,7 +765,7 @@ export default function App(): React.JSX.Element {
     void deliver(next.text, next.images).then((ok) => {
       if (!ok) restore()
     })
-  }, [status.isStreaming, status.compacting, status.phase, deliver, runCommand, queueTick])
+  }, [status.isStreaming, status.compacting, status.phase, deliver, runCommand, queueTick, btwChat])
 
   const askBtw = useCallback(async () => {
     const text = btwDraft.trim()
