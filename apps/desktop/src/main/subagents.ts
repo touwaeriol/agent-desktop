@@ -450,10 +450,11 @@ export class SubagentManager {
     return internal.record
   }
 
-  stopAll(): void {
+  stopAll(sync = false): void {
     for (const internal of this.items.values()) {
       if (internal.record.status === 'stopped') continue
-      internal.rpc.stop()
+      if (sync) internal.rpc.killNow()
+      else internal.rpc.stop()
       internal.record.status = 'stopped'
       this.finish(internal)
     }

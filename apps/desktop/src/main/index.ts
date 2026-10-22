@@ -877,6 +877,31 @@ function registerIpc(): void {
 
   ipcMain.handle('mcp:state', () => buildMcpState())
 
+  ipcMain.handle('subagents:list', () => subagents?.list().map((record) => serializeSubagent(record)) ?? [])
+  ipcMain.handle('subagents:get', (_event, id: string) => {
+    const record = subagents?.get(id)
+    return record ? serializeSubagent(record) : null
+  })
+  ipcMain.handle('subagents:stop', async (_event, id: string) => {
+    try {
+      await subagents?.stop(id)
+      return true
+    } catch {
+      return false
+    }
+  })
+  ipcMain.handle(
+    'subagents:prompt',
+    async (_event, id: string, text: string, mode: 'interrupt' | 'steer' | 'follow-up') => {
+      try {
+        await subagents?.prompt(id, text, mode)
+        return true
+      } catch {
+        return false
+      }
+    }
+  )
+
   ipcMain.handle('workspace:files', () => listWorkspaceFiles(status.cwd))
 
   ipcMain.handle('mcp:set-enabled', async (_event, enabled: boolean) => {
@@ -1421,16 +1446,17 @@ async function startBridge(): Promise<void> {
 
 app.on('window-all-closed', () => {
   cancelPendingAsks('桌面窗口已关闭')
-  rpc.stop()
-  gateway.stopAll()
+  rpc.killNow()
+  subagents?.stopAll(true)
+  gateway.stopAll(true)
   status = { ...status, phase: 'stopped' }
   if (process.platform !== 'darwin') app.quit()
 })
 
 app.on('before-quit', () => {
   bridge.cancelAllAsks('桌面端已退出')
-  subagents?.stopAll()
-  gateway.stopAll()
+  subagents?.stopAll(true)
+  gateway.stopAll(true)
   bridge.stopBridge()
-  rpc.stop()
+  rpc.killNow()
 })

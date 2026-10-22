@@ -5,7 +5,8 @@ import type {
   AskRequest,
   McpState,
   PiStatus,
-  SessionSummary
+  SessionSummary,
+  SubagentView
 } from '@shared/types'
 import { Conversation } from './components/Conversation'
 import { Composer } from './components/Composer'
@@ -15,6 +16,7 @@ import { TabBar } from './components/TabBar'
 import { SettingsModal } from './components/SettingsModal'
 import { SessionNavigator } from './components/SessionNavigator'
 import { AskQuestionPanel } from './components/AskQuestionPanel'
+import { SubagentsPanel } from './components/SubagentsPanel'
 import { Markdown } from './components/Markdown'
 import type { DraftImage } from './lib/images'
 
@@ -23,6 +25,10 @@ export interface BtwAnswer {
   answer?: string
   error?: string
   loading?: boolean
+}
+
+function isSubagentRunning(record: SubagentView): boolean {
+  return record.status === 'starting' || record.status === 'streaming'
 }
 
 export interface QueuedMessage {
@@ -127,6 +133,8 @@ export default function App(): React.JSX.Element {
   const [queued, setQueued] = useState<QueuedMessage[]>([])
   const [btw, setBtw] = useState<BtwAnswer | undefined>(undefined)
   const [mcpOpen, setMcpOpen] = useState(false)
+  const [subagentsOpen, setSubagentsOpen] = useState(false)
+  const [subagents, setSubagents] = useState<SubagentView[]>([])
   const [mcpState, setMcpState] = useState<McpState | undefined>(undefined)
   const queueRef = useRef<QueuedMessage[]>([])
   useEffect(() => {
@@ -426,6 +434,22 @@ export default function App(): React.JSX.Element {
       offAskCleared()
     }
   }, [handleEvent])
+
+  useEffect(() => {
+    void window.pi
+      .listSubagents()
+      .then(setSubagents)
+      .catch(() => undefined)
+    return window.pi.onSubagentUpdate((record) => {
+      setSubagents((prev) => {
+        const index = prev.findIndex((item) => item.id === record.id)
+        if (index === -1) return [record, ...prev]
+        const next = prev.slice()
+        next[index] = record
+        return next
+      })
+    })
+  }, [])
 
   useEffect(() => {
     if (status.phase !== 'ready') setAskQueue([])
@@ -801,8 +825,11 @@ export default function App(): React.JSX.Element {
           status={status}
           streaming={Boolean(status.isStreaming)}
           sidebarOpen={sidebarOpen}
+          subagentsRunning={subagents.filter(isSubagentRunning).length}
+          subagentsFinished={subagents.filter((record) => record.status === 'idle').length}
           onNew={() => void newSession()}
           onToggleSidebar={() => setSidebarOpen((value) => !value)}
+          onOpenSubagents={() => setSubagentsOpen(true)}
         />
 
         {status.phase === 'error' && (
@@ -958,6 +985,10 @@ export default function App(): React.JSX.Element {
           status={status}
           onChooseWorkspace={() => void chooseWorkspace()}
         />
+
+        {subagentsOpen && (
+          <SubagentsPanel records={subagents} onClose={() => setSubagentsOpen(false)} />
+        )}
 
         {mcpOpen && (
           <div

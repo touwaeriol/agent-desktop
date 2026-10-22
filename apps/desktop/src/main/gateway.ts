@@ -11,6 +11,7 @@
  */
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import type { McpEngineId } from '../shared/types'
+import { killTree } from './proc'
 import { WARPGREP_TOOL, WarpGrep, WarpGrepError } from './warpgrep'
 
 export interface EngineTarget {
@@ -179,9 +180,9 @@ class Upstream {
     this.notify('notifications/cancelled', { requestId: id, reason: 'client cancelled' })
   }
 
-  stop(): void {
+  stop(sync = false): void {
     this.failAll('网关已停止')
-    this.child?.kill()
+    if (this.child) killTree(this.child, sync)
     this.child = null
   }
 }
@@ -269,8 +270,8 @@ class EngineGateway {
     if (id !== undefined) this.upstream.cancel(id)
   }
 
-  stop(): void {
-    this.upstream.stop()
+  stop(sync = false): void {
+    this.upstream.stop(sync)
     this.tools = null
     this.inflight.clear()
   }
@@ -420,7 +421,7 @@ interface Gateway {
   readonly error: string | undefined
   handle(message: Record<string, unknown>): Promise<unknown>
   cancel(requestId: string): void
-  stop(): void
+  stop(sync?: boolean): void
 }
 
 const gateways = new Map<McpEngineId, Gateway>()
@@ -501,7 +502,7 @@ export async function handleMessage(
   }
 }
 
-export function stopAll(): void {
-  for (const gateway of gateways.values()) gateway.stop()
+export function stopAll(sync = false): void {
+  for (const gateway of gateways.values()) gateway.stop(sync)
   gateways.clear()
 }

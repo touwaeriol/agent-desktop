@@ -5239,3 +5239,311 @@ button:disabled {
   color: var(--faint);
   font-size: 10.4px;
 }
+
+/* ---------- subagents panel ---------- */
+
+.subagent-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 24px;
+  padding: 0 7px;
+  border-radius: 7px;
+  border: 1px solid transparent;
+  color: var(--faint);
+  font-size: 11px;
+}
+
+.subagent-btn:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+.subagent-btn.running {
+  border-color: var(--border-strong);
+  color: var(--text);
+  background: var(--bg-hover);
+}
+
+.subagents-card {
+  width: min(880px, 94%);
+  height: min(560px, 82%);
+}
+
+.subagents-count {
+  margin-left: 6px;
+  padding: 0 6px;
+  border-radius: 5px;
+  background: var(--bg-hover);
+  color: var(--text-dim);
+  font-size: 10.5px;
+}
+
+.subagents-body {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 232px 1fr;
+}
+
+.subagents-list {
+  overflow-y: auto;
+  padding: 6px;
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.subagent-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  padding: 6px 8px;
+  border-radius: 7px;
+  text-align: left;
+  color: var(--text-dim);
+}
+
+.subagent-row:hover {
+  background: var(--bg-hover);
+}
+
+.subagent-row.active {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+.subagent-dot {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--faint);
+}
+
+.subagent-dot.streaming,
+.subagent-dot.starting {
+  background: var(--warn-text, #d9a441);
+  animation: pulse 1.4s ease-in-out infinite;
+}
+
+.subagent-dot.idle {
+  background: var(--ok-text);
+}
+
+.subagent-dot.error {
+  background: var(--danger-text);
+}
+
+.subagent-row-main {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.subagent-row-head {
+  display: flex;
+  align-items: baseline;
+  gap: 5px;
+  font-size: 11.8px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.subagent-row-id {
+  color: var(--faint);
+  font-family: 'Cascadia Code', 'Consolas', monospace;
+  font-size: 9.8px;
+}
+
+.subagent-row-sub {
+  color: var(--faint);
+  font-size: 10.2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.subagent-detail {
+  min-width: 0;
+  overflow-y: auto;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+}
+
+.subagent-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+  color: var(--faint);
+  font-size: 10.6px;
+}
+
+.subagent-status {
+  padding: 0 6px;
+  border-radius: 5px;
+  background: var(--bg-hover);
+  color: var(--text-dim);
+}
+
+.subagent-status.streaming,
+.subagent-status.starting {
+  color: var(--warn-text, #d9a441);
+}
+
+.subagent-status.idle {
+  color: var(--ok-text);
+}
+
+.subagent-status.error {
+  color: var(--danger-text);
+}
+
+.subagent-cwd {
+  color: var(--faint);
+  font-size: 10.2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.subagent-section {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.subagent-section-head {
+  color: var(--faint);
+  font-size: 10.4px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.subagent-final {
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg-sidebar);
+  font-size: 12px;
+  line-height: 1.65;
+}
+
+.subagent-empty {
+  color: var(--faint);
+  font-size: 11px;
+}
+
+.subagent-files {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.subagent-file {
+  padding: 2px 6px;
+  border-radius: 5px;
+  background: var(--bg-hover);
+  color: var(--text-dim);
+  font-family: 'Cascadia Code', 'Consolas', monospace;
+  font-size: 10.2px;
+}
+
+.subagent-toggle {
+  align-self: flex-start;
+  color: var(--text-dim);
+  font-size: 10.8px;
+  padding: 2px 0;
+}
+
+.subagent-toggle:hover {
+  color: var(--text);
+}
+
+.subagent-messages {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+.subagent-message {
+  display: flex;
+  gap: 7px;
+  padding: 5px 7px;
+  border-radius: 6px;
+  background: var(--bg-sidebar);
+  border: 1px solid var(--border);
+  font-size: 11px;
+  line-height: 1.55;
+}
+
+.subagent-message-role {
+  flex: none;
+  color: var(--faint);
+  font-size: 10px;
+}
+
+.subagent-message-text {
+  min-width: 0;
+  color: var(--text-dim);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 96px;
+  overflow: hidden;
+}
+
+.subagent-actions {
+  margin-top: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+
+.subagent-modes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.subagent-modes .ghost {
+  padding: 3px 7px;
+  font-size: 10.4px;
+}
+
+.subagent-compose {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.subagent-compose input {
+  flex: 1;
+  min-width: 0;
+  height: 28px;
+  padding: 0 9px;
+  border-radius: 7px;
+  border: 1px solid var(--border-strong);
+  background: var(--bg-input);
+  color: var(--text);
+  font-size: 11.5px;
+}
+
+.subagent-compose .ghost.danger {
+  border-color: rgba(224, 108, 91, 0.4);
+  color: var(--danger-text);
+}
+
+.subagent-compose .ghost:disabled {
+  opacity: 0.45;
+}

@@ -2,6 +2,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { EventEmitter } from 'node:events'
 import { existsSync } from 'node:fs'
 import path from 'node:path'
+import { killTree } from './proc'
 
 const PI_RELATIVE = path.join(
   'node_modules',
@@ -122,8 +123,25 @@ export class PiRpcClient extends EventEmitter {
       // ignore
     }
     setTimeout(() => {
-      if (!child.killed) child.kill()
+      if (!child.killed) killTree(child)
     }, 1500)
+  }
+
+  /**
+   * Quit path: the 1.5s grace period above never runs because the app is already exiting, so the
+   * tree (pi plus the MCP servers it spawned) is killed synchronously.
+   */
+  killNow(): void {
+    const child = this.child
+    this.child = null
+    if (!child) return
+    this.failAll(new Error('pi stopped'))
+    try {
+      child.stdin.end()
+    } catch {
+      // ignore
+    }
+    killTree(child, true)
   }
 
   request<T = Record<string, unknown>>(

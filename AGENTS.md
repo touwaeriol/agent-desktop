@@ -157,6 +157,8 @@ npm run typecheck    # node + web 两个 tsconfig 分别检查
 - 渲染层只认 `customType === 'subagent_notice'`：`toChatItems` 和 `App.tsx` 的 `message_end` 都把它变成 `role: 'system'` 的条目，`Conversation.tsx` 画成虚线条（`.system-notice`），**不要**让它变成用户气泡。`noticeText()` 负责剥掉 `<system-reminder>` 外壳。
 - 父会话重启（换模型）时扩展重新加载、长轮询重连，队列里没投递的事件会补发；所以事件队列在**主进程**里，不要在扩展里缓存。
 - 控制语义映射到 pi：`interrupt` = `abort` + `prompt`，`steer` = `prompt(..., streamingBehavior: 'steer')`，`follow-up` = `'followUp'`。
-- 限制：并发 4（超出报 `SUBAGENT_LIMIT`，不排队）、单次总运行 15 分钟、空闲 30 分钟回收、sync 最长等 300s 后转后台、应用退出 `stopAll()`。**主会话重启（换模型等）不杀子代理**，它们本来就是独立进程。
+- 限制：并发 4（超出报 `SUBAGENT_LIMIT`，不排队）、单次总运行 15 分钟、空闲 30 分钟回收、sync 最长等 300s 后转后台、应用退出 `stopAll(true)`。**主会话重启（换模型等）不杀子代理**，它们本来就是独立进程。
+- **子代理界面**：顶栏 `.subagent-btn`（运行中显示数字并高亮，否则显示已完成数）打开 `SubagentsPanel.tsx` 浮层，左侧列表 + 右侧详情（结论 Markdown、改动文件、过程消息、引导/追加/打断 + 停止）。数据来自 IPC `subagents:list|get|stop|prompt` 与事件 `subagents:update`（`serializeSubagent`）；**记录只在内存里**，应用重启后列表清空，会话文件仍留在 `subagents/` 目录。
+- **退出必须杀进程树**：`apps/desktop/src/main/proc.ts` 的 `killTree(child, sync)` 在 Windows 上走 `taskkill /pid <pid> /T /F`（`child.kill()` 只杀直接子进程，会留下 pi 拉起的 `mcp-core/server.mjs` 和 CodeGraph worker）。`window-all-closed` / `before-quit` 用 `rpc.killNow()` + `gateway.stopAll(true)` + `subagents.stopAll(true)`，因为退出时 `stop()` 里那个 1.5s 的兜底定时器根本来不及跑。MCP 设置变更仍走 `reloadPiConfig()` → `startPi()` → `mcpLaunch()`（重建引擎目标、`gateway.configure()` 差分启停），所以"改设置后 MCP 跟着重启"本来就是这条路，别另起一套。
 - 工具调用记录取自 `tool_execution_start` 的参数（`path` / `command` / `pattern`），不要用工具输出首行猜路径——`read` 的输出首行是内容，会把路径解析成 `{`。
 - 服务器连接是异步的，扩展在加载后 2.5s / 8s 各补报一次工具清单（`POST /tools`），否则设置页只会看到连接完成前的那部分工具。

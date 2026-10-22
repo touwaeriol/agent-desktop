@@ -10,7 +10,8 @@ import type {
   PiStatus,
   PromptImage,
   ProviderAuthType,
-  SessionSummary
+  SessionSummary,
+  SubagentView
 } from '../shared/types'
 const bridge: PiBridge = {
   getStatus: () => ipcRenderer.invoke('pi:get-status') as Promise<PiStatus>,
@@ -144,6 +145,17 @@ const bridge: PiBridge = {
     const handler = (_event: Electron.IpcRendererEvent, next: PiStatus): void => listener(next)
     ipcRenderer.on('pi:status', handler)
     return () => ipcRenderer.removeListener('pi:status', handler)
+  },
+  listSubagents: () => ipcRenderer.invoke('subagents:list'),
+  getSubagent: (id: string) => ipcRenderer.invoke('subagents:get', id),
+  stopSubagent: (id: string) => ipcRenderer.invoke('subagents:stop', id),
+  promptSubagent: (id: string, text: string, mode) =>
+    ipcRenderer.invoke('subagents:prompt', id, text, mode),
+  onSubagentUpdate: (listener) => {
+    const handler = (_event: Electron.IpcRendererEvent, record: SubagentView): void =>
+      listener(record)
+    ipcRenderer.on('subagents:update', handler)
+    return () => ipcRenderer.removeListener('subagents:update', handler)
   }
 }
 

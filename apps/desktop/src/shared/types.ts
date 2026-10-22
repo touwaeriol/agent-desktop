@@ -315,6 +315,31 @@ export interface SubagentState {
   configPath: string
 }
 
+/** One subagent as the window sees it: no process handle, timestamps as numbers. */
+export interface SubagentView {
+  id: string
+  label?: string
+  agent?: string
+  mode: 'sync' | 'background'
+  cwd: string
+  status: 'starting' | 'idle' | 'streaming' | 'error' | 'stopped'
+  model?: { provider: string; id: string }
+  tools?: string[]
+  messages: Array<{
+    role: 'assistant' | 'user'
+    text: string
+    ts: number
+    toolCalls?: string[]
+  }>
+  calls: Array<{ tool: string; ts: number; ok: boolean; summary?: string }>
+  finalText?: string
+  tokens?: number
+  runtimeMs?: number
+  createdAt: number
+  notify: 'queue' | 'wake' | 'none'
+  error?: string
+}
+
 export interface McpState {
   enabled: boolean
   desktopTool: boolean
@@ -424,4 +449,9 @@ export interface PiBridge {
   cancelQuestion(id: string, reason?: string): Promise<void>
   onEvent(listener: (record: Record<string, unknown>) => void): () => void
   onStatus(listener: (status: PiStatus) => void): () => void
+  listSubagents(): Promise<SubagentView[]>
+  getSubagent(id: string): Promise<SubagentView | null>
+  stopSubagent(id: string): Promise<boolean>
+  promptSubagent(id: string, text: string, mode: 'interrupt' | 'steer' | 'follow-up'): Promise<boolean>
+  onSubagentUpdate(listener: (record: SubagentView) => void): () => void
 }
