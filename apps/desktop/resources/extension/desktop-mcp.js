@@ -35,6 +35,19 @@ const BATCH_GUIDELINES = [
 ]
 
 /**
+ * Search failures are the most common wasted turn: `bash grep -rn` walks `node_modules` and an
+ * installed app's unpacked bundles, which takes minutes on Windows and then hits whatever timeout
+ * the model guessed. pi's own `grep`/`find` tools run ripgrep and skip `.gitignore`, so the same
+ * query is ~180x faster here (78ms vs 14s over this repository, warm cache).
+ */
+const SEARCH_GUIDELINES = [
+  'Search with the `grep` and `find` tools, not `bash grep -rn` / `bash find`: they run ripgrep, skip whatever .gitignore hides (node_modules, dist, out) and answer in milliseconds. Keep bash for builds, tests and one-off commands.',
+  'Never search node_modules, .git, dist, out or an installed app\'s resources by hand. If a command needs a timeout to survive, it is the wrong command — narrow it instead.'
+]
+
+const EXTRA_GUIDELINES = [...BATCH_GUIDELINES, ...SEARCH_GUIDELINES]
+
+/**
  * Guidance for the model. An MCP server cannot supply a system prompt: pi only uses a server's
  * `instructions` for codemode namespaces and the `mcp_servers` section, and neither applies to a
  * server exposed as `direct`. So the extension injects the section instead, and only while the
@@ -213,11 +226,11 @@ export default function desktopMcp(pi) {  const url = process.env.AGENT_DESKTOP_
       sections[WEB_SECTION] = WEB_GUIDANCE
     } else delete sections[WEB_SECTION]
 
-    // Unconditional: batching is about how the run uses whatever tools it has. Guidelines land in
+    // Unconditional: these are about how the run uses whatever tools it has. Guidelines land in
     // `<rules>`; pushing the same strings twice would duplicate them, so check first.
     const guidelines = event.systemPromptOptions.promptGuidelines
     if (Array.isArray(guidelines)) {
-      for (const rule of BATCH_GUIDELINES) {
+      for (const rule of EXTRA_GUIDELINES) {
         if (!guidelines.includes(rule)) guidelines.push(rule)
       }
     }
