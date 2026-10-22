@@ -135,6 +135,16 @@ function Thinking({ text }: { text: string }) {
 }
 
 function Message({ item }: { item: ChatItem }) {
+  if (item.role === 'system') {
+    return (
+      <article className="message system" data-message-id={item.id}>
+        <div className="system-notice">
+          <span className="system-notice-tag">子代理</span>
+          <span className="system-notice-text">{item.text}</span>
+        </div>
+      </article>
+    )
+  }
   if (item.role === 'user') {
     return (
       <article

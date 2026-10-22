@@ -241,7 +241,7 @@ export const startSubagent = {
   description:
     'Start a subagent (a separate pi process) that works on a task in this project. With ' +
     '`mode: "sync"` it returns the final answer when it finishes; with `mode: "background"` it ' +
-    'returns immediately and you collect the answer later with `wait_subagent` / `get_subagent`. ' +
+    'returns immediately, and a notice is appended to this session when it finishes (`notify`). ' +
     'Every parameter overrides the preset: model, tools, mode, cwd.',
   inputSchema: {
     type: 'object',
@@ -261,6 +261,14 @@ export const startSubagent = {
       label: { type: 'string', description: 'Short name for the subagent.' },
       timeoutMs: { type: 'integer', description: 'Hard runtime limit. Default 15 minutes.' },
       waitMs: { type: 'integer', description: 'How long sync mode waits. Default 120s, max 300s.' },
+      notify: {
+        type: 'string',
+        enum: ['queue', 'wake', 'none'],
+        description:
+          'How you learn it finished. queue: a notice is appended to this session and you see it ' +
+          'on your next turn (default for background). wake: also starts a turn for you right away. ' +
+          'none: only wait_subagent / get_subagent report it (default for sync).'
+      },
       format: { type: 'string', enum: ['md', 'json'], default: 'md' }
     },
     required: ['task'],
@@ -268,7 +276,18 @@ export const startSubagent = {
   },
   async call(args, context) {
     const payload = { task: args?.task }
-    for (const key of ['agent', 'mode', 'provider', 'model', 'thinking', 'cwd', 'label', 'timeoutMs', 'waitMs']) {
+    for (const key of [
+      'agent',
+      'mode',
+      'provider',
+      'model',
+      'thinking',
+      'cwd',
+      'label',
+      'timeoutMs',
+      'waitMs',
+      'notify'
+    ]) {
       if (args?.[key] !== undefined) payload[key] = args[key]
     }
     if (Array.isArray(args?.tools)) payload.tools = args.tools
@@ -286,7 +305,15 @@ export const startSubagent = {
       return text(lines.join('\n'))
     }
     if (record.mode === 'background') {
-      lines.push('', '后台运行中。完成后用 `wait_subagent` 取结论。')
+      const notify = record.notify ?? 'queue'
+      lines.push(
+        '',
+        notify === 'none'
+          ? '后台运行中。完成后用 `wait_subagent` 取结论。'
+          : notify === 'wake'
+            ? '后台运行中。结束后会唤醒你继续，不必轮询。'
+            : '后台运行中。结束后本会话会收到一条通知，下个回合即可看到；也可用 `wait_subagent`。'
+      )
       return text(lines.join('\n'))
     }
     lines.push('', '### 结论', record.finalText ? truncate(record.finalText) : '（没有结论）')

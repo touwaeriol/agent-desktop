@@ -16,6 +16,15 @@ import type { AgentMode, AgentPreset } from './agents'
 
 export type SubagentStatus = 'starting' | 'idle' | 'streaming' | 'error' | 'stopped'
 
+/**
+ * How the parent agent learns that a subagent finished a turn.
+ *
+ * - `queue`: append a notice to the parent session; the parent reads it on its next turn
+ * - `wake`: also start a parent turn right away
+ * - `none`: only the `get_subagent` / `wait_subagent` tools can see the result
+ */
+export type NotifyMode = 'queue' | 'wake' | 'none'
+
 export interface SubagentMessage {
   role: 'assistant' | 'user'
   text: string
@@ -49,6 +58,7 @@ export interface SubagentRecord {
   tokens?: number
   runtimeMs?: number
   timeoutMs: number
+  notify: NotifyMode
 }
 
 export interface StartOptions {
@@ -64,6 +74,7 @@ export interface StartOptions {
   timeoutMs?: number
   waitMs?: number
   desktopTools?: boolean
+  notify?: NotifyMode
 }
 
 export interface StartResult {
@@ -97,6 +108,9 @@ interface Internal {
   totalTimer?: NodeJS.Timeout
   idleTimer?: NodeJS.Timeout
   settled: boolean
+  /** Incremented per turn, so one settle is reported once even though two events fire. */
+  runId: number
+  notifiedRun: number
 }
 
 export class SubagentManager {
@@ -108,6 +122,8 @@ export class SubagentManager {
       userData: string
       /** Called when a record changes, for the settings/UI side. */
       onUpdate?: (record: SubagentRecord) => void
+      /** Called once per finished turn when `notify` is not `none`. */
+      onSettle?: (record: SubagentRecord) => void
       resolveModel?: (provider: string, id: string) => Promise<boolean>
     }
   ) {}
@@ -175,10 +191,20 @@ export class SubagentManager {
       tools,
       messages: [],
       calls: [],
-      timeoutMs: options.timeoutMs ?? preset?.timeoutMs ?? DEFAULT_TIMEOUT_MS
+      timeoutMs: options.timeoutMs ?? preset?.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+      // Sync mode already returns the answer, so only background runs notify by default.
+      notify: options.notify ?? (mode === 'background' ? 'queue' : 'none')
     }
     const rpc = new PiRpcClient()
-    const internal: Internal = { record, rpc, pendingCalls: new Map(), waiters: [], settled: false }
+    const internal: Internal = {
+      record,
+      rpc,
+      pendingCalls: new Map(),
+      waiters: [],
+      settled: false,
+      runId: 0,
+      notifiedRun: 0
+    }
     this.items.set(id, internal)
     this.prune()
 
@@ -248,6 +274,7 @@ export class SubagentManager {
     const record = internal.record
     switch (event.type) {
       case 'agent_start':
+        internal.runId += 1
         record.status = 'streaming'
         this.emit(record)
         return
@@ -322,8 +349,18 @@ export class SubagentManager {
     record.settledAt = Date.now()
     record.runtimeMs = record.startedAt ? Date.now() - record.startedAt : undefined
     this.emit(record)
+    this.notifySettle(internal)
     this.resetIdle(internal)
     this.releaseWaiters(internal)
+  }
+
+  /** Tell the parent agent that a turn finished, once per run. */
+  private notifySettle(internal: Internal): void {
+    const record = internal.record
+    if (record.notify === 'none') return
+    if (internal.notifiedRun === internal.runId) return
+    internal.notifiedRun = internal.runId
+    this.options.onSettle?.(record)
   }
 
   private resetIdle(internal: Internal): void {
@@ -345,6 +382,7 @@ export class SubagentManager {
     if (internal.totalTimer) clearTimeout(internal.totalTimer)
     if (internal.idleTimer) clearTimeout(internal.idleTimer)
     this.emit(internal.record)
+    if (internal.record.status === 'error') this.notifySettle(internal)
     this.releaseWaiters(internal)
   }
 

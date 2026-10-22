@@ -33,6 +33,8 @@ export interface QueuedMessage {
 import { updateStatusText } from './lib/updates'
 import {
   imagesFromBlocks,
+  NOTICE_TYPE,
+  noticeText,
   textFromBlocks,
   thinkingFromBlocks,
   toChatItems,
@@ -303,7 +305,24 @@ export default function App(): React.JSX.Element {
         break
       }
       case 'message_end': {
-        const message = record.message as { role?: string; content?: unknown } | undefined
+        const message = record.message as
+          | { role?: string; content?: unknown; customType?: string }
+          | undefined
+        if (message?.role === 'custom') {
+          if (message.customType !== NOTICE_TYPE) break
+          const text = noticeText(textFromBlocks(message.content))
+          if (!text) break
+          setItems((prev) => [
+            ...prev,
+            {
+              id: `notice-${Date.now()}-${prev.length}`,
+              role: 'system',
+              text,
+              toolCalls: []
+            }
+          ])
+          break
+        }
         if (message?.role === 'assistant') {
           setItems((prev) =>
             patchLastAssistant(prev, (item) => {

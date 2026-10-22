@@ -110,6 +110,10 @@ export function createApiHandler(deps: ApiDeps): (request: ApiRequest) => Promis
           label: typeof body.label === 'string' ? body.label : undefined,
           timeoutMs: typeof body.timeoutMs === 'number' ? body.timeoutMs : undefined,
           waitMs: typeof body.waitMs === 'number' ? body.waitMs : undefined,
+          notify:
+            body.notify === 'queue' || body.notify === 'wake' || body.notify === 'none'
+              ? body.notify
+              : undefined,
           desktopTools: deps.desktopTools()
         })
         return ok({

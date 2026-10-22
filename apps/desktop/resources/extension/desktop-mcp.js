@@ -61,8 +61,7 @@ function hiddenTools(toggles, server) {
   )
 }
 
-export default function desktopMcp(pi) {
-  const url = process.env.AGENT_DESKTOP_MCP_URL
+export default function desktopMcp(pi) {  const url = process.env.AGENT_DESKTOP_MCP_URL
   const token = process.env.AGENT_DESKTOP_MCP_TOKEN ?? ''
   const coreScript = process.env.AGENT_DESKTOP_MCP_CORE_SCRIPT
   const engines = parseJson(process.env.AGENT_DESKTOP_MCP_ENGINES, [])
@@ -148,6 +147,8 @@ export default function desktopMcp(pi) {
   setTimeout(reportTools, 2500)
   setTimeout(reportTools, 8000)
 
+  if (subagentsEnabled) void pumpEvents(pi, url, token)
+
   pi.on('before_agent_start', (event) => {
     // Only while the desktop MCP server is connected and its tool is declared to the model, so a
     // disabled MCP, a disabled desktop tool, a hidden tool, or a failed server leaves the prompt
@@ -164,4 +165,52 @@ export default function desktopMcp(pi) {
 
     reportTools()
   })
+}
+
+/**
+ * Collect subagent notices from the app and hand them to the model.
+ *
+ * A tool call cannot be resumed after it returned, so a finished background subagent has no way
+ * back into the conversation. The app therefore queues a notice and this loop delivers it as a
+ * custom message: it stays a `custom` entry in the session (not something the user said), and
+ * `triggerTurn` decides whether the parent starts a turn now or reads it on its next one.
+ */
+async function pumpEvents(pi, url, token) {
+  let backoff = 2000
+  while (true) {
+    try {
+      const response = await fetch(`${url}/events?wait=25000`, {
+        headers: { 'x-agent-desktop-token': token }
+      })
+      if (!response.ok) throw new Error(`events ${response.status}`)
+      const payload = await response.json()
+      backoff = 2000
+      for (const event of payload.events ?? []) deliverNotice(pi, event)
+    } catch {
+      await new Promise((resolve) => setTimeout(resolve, backoff))
+      backoff = Math.min(backoff * 2, 30000)
+    }
+  }
+}
+
+function deliverNotice(pi, event) {
+  if (!event || event.type !== 'subagent_settled' || typeof event.text !== 'string') return
+  const text = [
+    '<system-reminder source="agent-desktop">',
+    'A subagent you started has finished a turn. This is not a message from the user.',
+    event.text,
+    '</system-reminder>'
+  ].join('\n')
+  try {
+    pi.sendMessage(
+      {
+        customType: 'subagent_notice',
+        display: true,
+        content: [{ type: 'text', text }]
+      },
+      event.wake ? { triggerTurn: true } : {}
+    )
+  } catch {
+    // pi is shutting down or the session is between runs; the notice stays in the app's queue.
+  }
 }

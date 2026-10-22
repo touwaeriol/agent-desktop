@@ -43,6 +43,7 @@ interface RawMessage {
   toolCallId?: string
   toolName?: string
   isError?: boolean
+  customType?: string
 }
 
 function blockText(block: RawBlock): string {
@@ -72,11 +73,37 @@ function argsText(value: unknown): string {
   }
 }
 
+/** Custom entries the app injects; only these are shown, other custom types stay hidden. */
+export const NOTICE_TYPE = 'subagent_notice'
+
+/** Strip the `<system-reminder>` wrapper so the window shows the notice itself. */
+export function noticeText(value: string): string {
+  const match = /<system-reminder[^>]*>([\s\S]*?)<\/system-reminder>/i.exec(value)
+  const inner = (match ? match[1] : value).trim()
+  return inner.replace(/^A subagent you started has finished a turn\. This is not a message from the user\.\n?/, '').trim()
+}
+
 export function toChatItems(messages: RawMessage[]): ChatItem[] {
   const items: ChatItem[] = []
   const toolIndex = new Map<string, ToolCallView>()
 
   for (const message of messages) {
+    if (message.role === 'custom') {
+      if (message.customType !== NOTICE_TYPE) continue
+      const text =
+        typeof message.content === 'string'
+          ? message.content
+          : (message.content ?? []).map(blockText).filter(Boolean).join('\n')
+      if (!text.trim()) continue
+      items.push({
+        id: `n-${message.timestamp ?? items.length}-${items.length}`,
+        role: 'system',
+        text: noticeText(text),
+        toolCalls: [],
+        timestamp: message.timestamp
+      })
+      continue
+    }
     if (message.role === 'user') {
       const text =
         typeof message.content === 'string'

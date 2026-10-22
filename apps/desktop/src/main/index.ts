@@ -203,11 +203,59 @@ function subagentManager(): SubagentManager {
   if (!subagents) {
     subagents = new SubagentManager({
       userData: app.getPath('userData'),
-      onUpdate: (record) => mainWindow?.webContents.send('subagents:update', serializeSubagent(record))
+      onUpdate: (record) => mainWindow?.webContents.send('subagents:update', serializeSubagent(record)),
+      onSettle: (record) => {
+        bridge.publishEvent({
+          type: 'subagent_settled',
+          text: subagentNotice(record),
+          wake: record.notify === 'wake'
+        })
+      }
     })
     subagents.setMaxConcurrent(subagentConfig().maxConcurrent)
   }
   return subagents
+}
+
+/** Three lines at most: the parent reads this inside its own transcript. */
+function subagentNotice(record: SubagentRecord): string {
+  const changed = new Set(
+    record.calls
+      .filter(
+        (call) =>
+          (call.tool === 'edit' || call.tool === 'write' || call.tool === 'apply_patch') &&
+          typeof call.summary === 'string' &&
+          call.summary
+      )
+      .map((call) => call.summary as string)
+  )
+  const head = [
+    `子代理 ${record.id}`,
+    record.agent ? `· ${record.agent}` : '',
+    `· ${record.status}`,
+    record.runtimeMs ? `· ${formatSpan(record.runtimeMs)}` : '',
+    record.tokens ? `· ${formatTokens(record.tokens)}` : '',
+    changed.size > 0 ? `· 改动 ${changed.size} 个文件` : ''
+  ]
+    .filter(Boolean)
+    .join(' ')
+  const conclusion = record.error
+    ? `错误：${record.error}`
+    : (record.finalText ?? '').replace(/\s+/g, ' ').trim().slice(0, 240) || '（没有结论）'
+  return [
+    head,
+    `结论：${conclusion}`,
+    `详情用 mcp__desktop__get_subagent（id ${record.id}），不要重复询问。`
+  ].join('\n')
+}
+
+function formatSpan(ms: number): string {
+  if (ms < 60_000) return `${Math.round(ms / 1000)}s`
+  return `${Math.floor(ms / 60_000)}m${Math.round((ms % 60_000) / 1000)}s`
+}
+
+function formatTokens(count: number): string {
+  return count >= 1000 ? `${(count / 1000).toFixed(1)}k tokens` : `${count} tokens`
 }
 
 /** Wire shape of a subagent: no rpc handle, timestamps kept as numbers. */
@@ -227,6 +275,7 @@ function serializeSubagent(record: SubagentRecord): Record<string, unknown> {
     tokens: record.tokens,
     runtimeMs: record.runtimeMs,
     createdAt: record.createdAt,
+    notify: record.notify,
     error: record.error
   }
 }

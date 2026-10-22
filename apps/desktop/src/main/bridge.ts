@@ -44,6 +44,72 @@ export function getBridgeToken(): string {
   return token
 }
 
+/**
+ * Events the extension running inside pi collects for the model: subagent settlements today.
+ * The extension long-polls `GET /events`, so a notice queued while pi restarts is delivered once
+ * the new process connects.
+ */
+export interface BridgeEvent {
+  type: string
+  text: string
+  ts: number
+  /** Let the parent start a turn immediately instead of waiting for its next message. */
+  wake?: boolean
+}
+
+const EVENT_LIMIT = 20
+const EVENT_MAX_AGE_MS = 10 * 60 * 1000
+const eventQueue: BridgeEvent[] = []
+const eventWaiters = new Set<() => void>()
+
+export function publishEvent(event: Omit<BridgeEvent, 'ts'> & { ts?: number }): void {
+  eventQueue.push({ ...event, ts: event.ts ?? Date.now() })
+  while (eventQueue.length > EVENT_LIMIT) eventQueue.shift()
+  for (const wake of [...eventWaiters]) wake()
+}
+
+function pruneEvents(): void {
+  const now = Date.now()
+  while (eventQueue.length > 0 && now - eventQueue[0].ts > EVENT_MAX_AGE_MS) eventQueue.shift()
+}
+
+function takeEvents(): BridgeEvent[] {
+  pruneEvents()
+  return eventQueue.splice(0)
+}
+
+/** Long-poll: returns as soon as an event exists, or with an empty list after `wait` ms. */
+async function handleEvents(
+  request: http.IncomingMessage,
+  response: http.ServerResponse
+): Promise<void> {
+  const presented =
+    typeof request.headers.authorization === 'string'
+      ? request.headers.authorization.replace(/^Bearer\s+/i, '')
+      : String(request.headers['x-agent-desktop-token'] ?? '')
+  if (token && presented !== token) {
+    respond(response, 401, { events: [], error: '桥接令牌无效' })
+    return
+  }
+  const parsed = new URL(request.url ?? '/', 'http://127.0.0.1')
+  const requested = Number(parsed.searchParams.get('wait') ?? 20_000)
+  const wait = Number.isFinite(requested) ? Math.min(Math.max(requested, 0), 60_000) : 20_000
+  pruneEvents()
+  if (eventQueue.length === 0 && wait > 0) {
+    await new Promise<void>((resolve) => {
+      const done = (): void => {
+        clearTimeout(timer)
+        eventWaiters.delete(done)
+        resolve()
+      }
+      const timer = setTimeout(done, wait)
+      eventWaiters.add(done)
+      request.once('close', done)
+    })
+  }
+  respond(response, 200, { events: takeEvents() })
+}
+
 export function setAskListener(listener: ((request: AskRequest) => void) | null): void {
   askListener = listener
 }
@@ -391,6 +457,15 @@ function createHandler(): http.RequestListener {
     }
     if (request.method === 'GET' && url === '/health') {
       respond(response, 200, { ok: true, pending: pending.size })
+      return
+    }
+    if (request.method === 'GET' && apiPath === '/events') {
+      void handleEvents(request, response).catch((error: unknown) => {
+        respond(response, 500, {
+          events: [],
+          error: error instanceof Error ? error.message : String(error)
+        })
+      })
       return
     }
     if (request.method === 'POST' && url === '/tools') {
