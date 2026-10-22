@@ -1,0 +1,90 @@
+import { contextBridge, ipcRenderer } from 'electron'
+import type {
+  AgentMessage,
+  AppUpdateSnapshot,
+  LoginMessage,
+  PiBridge,
+  PiStatus,
+  ProviderAuthType,
+  SessionSummary
+} from '../shared/types'
+const bridge: PiBridge = {
+  getStatus: () => ipcRenderer.invoke('pi:get-status') as Promise<PiStatus>,
+  restart: (cwd?: string) => ipcRenderer.invoke('pi:restart', cwd) as Promise<PiStatus>,
+  newProjectSession: (cwd: string) =>
+    ipcRenderer.invoke('pi:new-project-session', cwd) as Promise<PiStatus>,
+  openSession: (sessionPath: string, cwd: string) =>
+    ipcRenderer.invoke('pi:open-session', sessionPath, cwd) as Promise<PiStatus>,
+  getDesktopConfig: () => ipcRenderer.invoke('desktop:config'),
+  setSessionMode: (mode: 'shared' | 'isolated') =>
+    ipcRenderer.invoke('desktop:set-session-mode', mode) as Promise<PiStatus>,
+  getUpdateSnapshot: () =>
+    ipcRenderer.invoke('updates:snapshot') as Promise<AppUpdateSnapshot>,
+  checkForUpdates: () => ipcRenderer.invoke('updates:check') as Promise<AppUpdateSnapshot>,
+  installUpdate: () => ipcRenderer.invoke('updates:install') as Promise<AppUpdateSnapshot>,
+  cancelUpdateDownload: () =>
+    ipcRenderer.invoke('updates:cancel') as Promise<AppUpdateSnapshot>,
+  setAutoUpdateCheck: (enabled: boolean) =>
+    ipcRenderer.invoke('updates:auto', enabled) as Promise<AppUpdateSnapshot>,
+  onUpdate: (listener) => {
+    const handler = (_event: Electron.IpcRendererEvent, snapshot: AppUpdateSnapshot): void =>
+      listener(snapshot)
+    ipcRenderer.on('app-update', handler)
+    return () => ipcRenderer.removeListener('app-update', handler)
+  },
+  getProxyInfo: () => ipcRenderer.invoke('app:proxy'),
+  chooseWorkspace: () => ipcRenderer.invoke('pi:choose-workspace') as Promise<PiStatus | null>,
+  prompt: (message: string, streamingBehavior?: 'steer' | 'followUp') =>
+    ipcRenderer.invoke('pi:prompt', message, streamingBehavior),
+  abort: () => ipcRenderer.invoke('pi:abort') as Promise<void>,
+  newSession: () => ipcRenderer.invoke('pi:new-session'),
+  switchSession: (sessionPath: string) => ipcRenderer.invoke('pi:switch-session', sessionPath),
+  getMessages: () => ipcRenderer.invoke('pi:get-messages') as Promise<AgentMessage[]>,
+  listSessions: () => ipcRenderer.invoke('pi:list-sessions') as Promise<SessionSummary[]>,
+  openAgentDir: () => ipcRenderer.invoke('pi:open-agent-dir') as Promise<void>,
+  openExternal: (url: string) => ipcRenderer.invoke('app:open-external', url) as Promise<void>,
+  setTheme: (theme: 'dark' | 'light') =>
+    ipcRenderer.invoke('app:set-theme', theme) as Promise<void>,
+  listModels: () => ipcRenderer.invoke('pi:list-models'),
+  setModel: (provider: string, modelId: string) =>
+    ipcRenderer.invoke('pi:set-model', provider, modelId),
+  listThinkingLevels: () => ipcRenderer.invoke('pi:list-thinking-levels'),
+  setThinkingLevel: (level: string) => ipcRenderer.invoke('pi:set-thinking-level', level),
+  listProviderModels: (providerId: string) =>
+    ipcRenderer.invoke('providers:list-provider-models', providerId),
+  setProviderModels: (providerId: string, enabledIds: string[]) =>
+    ipcRenderer.invoke('providers:set-provider-models', providerId, enabledIds),
+  listProviders: () => ipcRenderer.invoke('providers:list'),
+  startLogin: (providerId: string, type: ProviderAuthType, loginId: string) =>
+    ipcRenderer.invoke('providers:start-login', providerId, type, loginId),
+  answerLogin: (loginId: string, promptId: string, value: string) =>
+    ipcRenderer.invoke('providers:answer-login', loginId, promptId, value),
+  cancelLogin: (loginId: string) => ipcRenderer.invoke('providers:cancel-login', loginId),
+  logoutProvider: (providerId: string) => ipcRenderer.invoke('providers:logout', providerId),
+  onLoginMessage: (listener) => {
+    const handler = (_event: Electron.IpcRendererEvent, message: LoginMessage): void =>
+      listener(message)
+    ipcRenderer.on('providers:login-message', handler)
+    return () => ipcRenderer.removeListener('providers:login-message', handler)
+  },
+  getModelsJson: () => ipcRenderer.invoke('providers:models-json'),
+  saveModelsJson: (content: string) =>
+    ipcRenderer.invoke('providers:save-models-json', content),
+  openModelsJson: () => ipcRenderer.invoke('providers:open-models-json') as Promise<void>,
+  getAppSettings: () => ipcRenderer.invoke('settings:get'),
+  saveAppSettings: (patch) => ipcRenderer.invoke('settings:save', patch),
+  listModelChoices: () => ipcRenderer.invoke('settings:models'),
+  onEvent: (listener) => {
+    const handler = (_event: Electron.IpcRendererEvent, record: Record<string, unknown>): void =>
+      listener(record)
+    ipcRenderer.on('pi:event', handler)
+    return () => ipcRenderer.removeListener('pi:event', handler)
+  },
+  onStatus: (listener) => {
+    const handler = (_event: Electron.IpcRendererEvent, next: PiStatus): void => listener(next)
+    ipcRenderer.on('pi:status', handler)
+    return () => ipcRenderer.removeListener('pi:status', handler)
+  }
+}
+
+contextBridge.exposeInMainWorld('pi', bridge)

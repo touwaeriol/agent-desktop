@@ -1,0 +1,411 @@
+import { promises as fs } from 'node:fs'
+import { randomUUID } from 'node:crypto'
+import os from 'node:os'
+import path from 'node:path'
+import { shell } from 'electron'
+import type { ModelRuntime } from '@earendil-works/pi-coding-agent'
+import type {
+  AppSettings,
+  LoginEvent,
+  LoginMessage,
+  LoginPrompt,
+  ModelChoice,
+  ModelsJsonFile,
+  ProviderAuthOption,
+  ProviderAuthType,
+  ProviderInfo,
+  ProviderModelOption
+} from '../shared/types'
+
+const AGENT_DIR = path.join(os.homedir(), '.pi', 'agent')
+export const AUTH_PATH = path.join(AGENT_DIR, 'auth.json')
+export const MODELS_PATH = path.join(AGENT_DIR, 'models.json')
+export const SETTINGS_PATH = path.join(AGENT_DIR, 'settings.json')
+
+const DEFAULT_MODELS_JSON = JSON.stringify(
+  {
+    $schema: 'https://pi.dev/schemas/models.schema.json',
+    providers: {}
+  },
+  null,
+  2
+)
+
+let runtimePromise: Promise<ModelRuntime> | null = null
+let builtinIdsPromise: Promise<Set<string>> | null = null
+
+async function getBuiltinProviderIds(): Promise<Set<string>> {
+  if (!builtinIdsPromise) {
+    builtinIdsPromise = (async () => {
+      const sdk = await import('@earendil-works/pi-coding-agent')
+      const baseline = await sdk.ModelRuntime.create({
+        modelsPath: null,
+        refreshOnCreate: false
+      })
+      return new Set(baseline.getProviders().map((provider) => provider.id))
+    })()
+    builtinIdsPromise.catch(() => {
+      builtinIdsPromise = null
+    })
+  }
+  return builtinIdsPromise
+}
+
+export function getRuntime(): Promise<ModelRuntime> {
+  if (!runtimePromise) {
+    const pending = (async () => {
+      const sdk = await import('@earendil-works/pi-coding-agent')
+      return sdk.ModelRuntime.create({
+        authPath: AUTH_PATH,
+        modelsPath: MODELS_PATH,
+        refreshOnCreate: false
+      })
+    })()
+    runtimePromise = pending
+    pending.catch(() => {
+      runtimePromise = null
+    })
+  }
+  return runtimePromise
+}
+
+function resetRuntime(): void {
+  runtimePromise = null
+}
+
+async function configuredProviderIds(runtime: ModelRuntime): Promise<Set<string>> {
+  const entries = await Promise.all(
+    runtime.getProviders().map(async (provider) => {
+      const check = await runtime.checkAuth(provider.id).catch(() => undefined)
+      return [provider.id, Boolean(check)] as const
+    })
+  )
+  return new Set(entries.filter(([, configured]) => configured).map(([id]) => id))
+}
+
+export async function listProviders(): Promise<ProviderInfo[]> {
+  const runtime = await getRuntime()
+  const credentials = await runtime.listCredentials().catch(() => [])
+  const configured = await configuredProviderIds(runtime)
+  const builtinIds = await getBuiltinProviderIds().catch(() => new Set<string>())
+  const stored = new Map(credentials.map((credential) => [credential.providerId, credential.type]))
+  const providers: ProviderInfo[] = []
+
+  for (const provider of runtime.getProviders()) {
+    const isConfigured = configured.has(provider.id)
+    const options: ProviderAuthOption[] = []
+    if (provider.auth.oauth) {
+      options.push({
+        type: 'oauth',
+        label: provider.auth.oauth.loginLabel ?? 'OAuth 登录'
+      })
+    }
+    if (provider.auth.apiKey?.login) {
+      options.push({ type: 'api_key', label: 'API Key' })
+    }
+    if (options.length === 0 && !isConfigured) continue
+    providers.push({
+      id: provider.id,
+      name: provider.name,
+      modelCount: provider.getModels().length,
+      options,
+      configured: isConfigured,
+      builtin: builtinIds.has(provider.id),
+      source: stored.has(provider.id) ? 'stored' : undefined,
+      sourceLabel: stored.has(provider.id) ? '已保存凭据' : undefined,
+      storedType: stored.get(provider.id) as ProviderAuthType | undefined
+    })
+  }
+
+  return providers.sort(
+    (a, b) => Number(b.configured) - Number(a.configured) || a.name.localeCompare(b.name)
+  )
+}
+
+interface PendingPrompt {
+  resolve: (value: string) => void
+  reject: (error: Error) => void
+}
+
+interface LoginSession {
+  controller: AbortController
+  pending: Map<string, PendingPrompt>
+}
+
+const sessions = new Map<string, LoginSession>()
+
+type LoginInteraction = Parameters<ModelRuntime['login']>[2]
+
+export async function startLogin(
+  providerId: string,
+  type: ProviderAuthType,
+  loginId: string,
+  emit: (message: LoginMessage) => void,
+  onChanged: () => void,
+  options: { deviceId?: string } = {}
+): Promise<{ loginId?: string; error?: string }> {
+  const runtime = await getRuntime().catch((error: unknown) => {
+    throw new Error(`无法加载 pi 模型运行时：${error instanceof Error ? error.message : String(error)}`)
+  })
+  const provider = runtime.getProvider(providerId)
+  if (!provider) return { error: '未知服务商' }
+  if (type === 'oauth' && !provider.auth.oauth) return { error: '该服务商不支持 OAuth 登录' }
+  if (type === 'api_key' && !provider.auth.apiKey?.login) {
+    return { error: '该服务商不支持 API Key 登录' }
+  }
+
+  const controller = new AbortController()
+  const pending = new Map<string, PendingPrompt>()
+  sessions.set(loginId, { controller, pending })
+
+  const interaction = {
+    signal: controller.signal,
+    prompt: (prompt: LoginPrompt) =>
+      new Promise<string>((resolve, reject) => {
+        const promptId = randomUUID()
+        const onAbort = (): void => {
+          pending.delete(promptId)
+          reject(new Error('登录已取消'))
+        }
+        controller.signal.addEventListener('abort', onAbort, { once: true })
+        pending.set(promptId, {
+          resolve: (value) => {
+            controller.signal.removeEventListener('abort', onAbort)
+            resolve(value)
+          },
+          reject
+        })
+        emit({ kind: 'prompt', loginId, promptId, prompt })
+      }),
+    notify: (event: LoginEvent) => {
+      if (event.type === 'auth_url') void shell.openExternal(event.url)
+      if (event.type === 'device_code') void shell.openExternal(event.verificationUri)
+      emit({ kind: 'event', loginId, event })
+    }
+  } as unknown as LoginInteraction
+
+  void runtime
+    .login(providerId, type, interaction, {
+      agentName: 'pi desktop',
+      ...(options.deviceId ? { getDeviceId: () => options.deviceId! } : {})
+    })
+    .then((credential) => {
+      sessions.delete(loginId)
+      emit({ kind: 'done', loginId, ok: true, credentialType: credential.type })
+      onChanged()
+    })
+    .catch((error: unknown) => {
+      sessions.delete(loginId)
+      emit({
+        kind: 'done',
+        loginId,
+        ok: false,
+        error: error instanceof Error ? error.message : String(error)
+      })
+    })
+
+  return { loginId }
+}
+
+export function answerLogin(loginId: string, promptId: string, value: string): void {
+  const session = sessions.get(loginId)
+  const pending = session?.pending.get(promptId)
+  if (!session || !pending) return
+  session.pending.delete(promptId)
+  pending.resolve(value)
+}
+
+export function cancelLogin(loginId: string): void {
+  const session = sessions.get(loginId)
+  if (!session) return
+  sessions.delete(loginId)
+  session.controller.abort()
+  for (const pending of session.pending.values()) {
+    pending.reject(new Error('登录已取消'))
+  }
+  session.pending.clear()
+}
+
+export async function logoutProvider(providerId: string): Promise<void> {
+  const runtime = await getRuntime()
+  await runtime.logout(providerId)
+}
+
+export async function getModelsJson(): Promise<ModelsJsonFile> {
+  try {
+    return { path: MODELS_PATH, content: await fs.readFile(MODELS_PATH, 'utf8') }
+  } catch {
+    return { path: MODELS_PATH, content: DEFAULT_MODELS_JSON }
+  }
+}
+
+export async function saveModelsJson(content: string): Promise<void> {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(content)
+  } catch (error) {
+    throw new Error(`JSON 解析失败：${error instanceof Error ? error.message : String(error)}`)
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('models.json 顶层必须是 JSON 对象')
+  }
+  await fs.mkdir(AGENT_DIR, { recursive: true })
+  await fs.writeFile(MODELS_PATH, `${JSON.stringify(parsed, null, 2)}\n`)
+  resetRuntime()
+}
+
+interface RawSettings {
+  defaultProvider?: unknown
+  defaultModel?: unknown
+  defaultThinkingLevel?: unknown
+  enabledModels?: unknown
+  [key: string]: unknown
+}
+
+function matchesPattern(value: string, pattern: string): boolean {
+  const source = pattern
+    .split('')
+    .map((char) => {
+      if (char === '*') return '.*'
+      if (char === '?') return '.'
+      if (/[.+^${}()|[\]\\]/.test(char)) return `\\${char}`
+      return char
+    })
+    .join('')
+  try {
+    return new RegExp(`^${source}$`, 'i').test(value)
+  } catch {
+    return value === pattern
+  }
+}
+
+function readEnabledModels(raw: RawSettings): string[] {
+  return Array.isArray(raw.enabledModels)
+    ? raw.enabledModels.filter((value): value is string => typeof value === 'string')
+    : []
+}
+
+export async function getEnabledModelPatterns(): Promise<string[]> {
+  return readEnabledModels(await readRawSettings())
+}
+
+export function isModelEnabled(
+  model: { provider: string; id: string },
+  patterns: string[]
+): boolean {
+  if (patterns.length === 0) return true
+  return patterns.some(
+    (pattern) =>
+      matchesPattern(`${model.provider}/${model.id}`, pattern) || matchesPattern(model.id, pattern)
+  )
+}
+
+async function readRawSettings(): Promise<RawSettings> {
+  try {
+    const parsed = JSON.parse(await fs.readFile(SETTINGS_PATH, 'utf8')) as RawSettings
+    return parsed && typeof parsed === 'object' ? parsed : {}
+  } catch {
+    return {}
+  }
+}
+
+export async function getAppSettings(): Promise<AppSettings> {
+  const raw = await readRawSettings()
+  return {
+    defaultProvider:
+      typeof raw.defaultProvider === 'string' ? raw.defaultProvider : undefined,
+    defaultModel: typeof raw.defaultModel === 'string' ? raw.defaultModel : undefined,
+    defaultThinkingLevel:
+      typeof raw.defaultThinkingLevel === 'string' ? raw.defaultThinkingLevel : undefined,
+    enabledModels: readEnabledModels(raw),
+    settingsPath: SETTINGS_PATH,
+    modelsPath: MODELS_PATH,
+    authPath: AUTH_PATH
+  }
+}
+
+export async function saveAppSettings(
+  patch: Partial<
+    Pick<
+      AppSettings,
+      'defaultProvider' | 'defaultModel' | 'defaultThinkingLevel' | 'enabledModels'
+    >
+  >
+): Promise<void> {
+  const raw = await readRawSettings()
+  for (const key of ['defaultProvider', 'defaultModel', 'defaultThinkingLevel'] as const) {
+    const value = patch[key]
+    if (value === undefined) continue
+    if (value === '') delete raw[key]
+    else raw[key] = value
+  }
+  if (patch.enabledModels !== undefined) {
+    if (patch.enabledModels.length === 0) delete raw.enabledModels
+    else raw.enabledModels = [...new Set(patch.enabledModels)]
+  }
+  await fs.mkdir(AGENT_DIR, { recursive: true })
+  await fs.writeFile(SETTINGS_PATH, `${JSON.stringify(raw, null, 2)}\n`)
+}
+
+export async function listProviderModels(providerId: string): Promise<ProviderModelOption[]> {
+  const runtime = await getRuntime()
+  const provider = runtime.getProvider(providerId)
+  if (!provider) return []
+  const patterns = readEnabledModels(await readRawSettings())
+  return provider.getModels().map((model) => ({
+    id: `${model.provider}/${model.id}`,
+    modelId: model.id,
+    name: model.name,
+    contextWindow: model.contextWindow,
+    reasoning: Boolean(model.reasoning),
+    enabled: isModelEnabled(model, patterns)
+  }))
+}
+
+export async function setProviderModels(
+  providerId: string,
+  enabledIds: string[]
+): Promise<void> {
+  const runtime = await getRuntime()
+  const allModels = runtime.getModels()
+  const raw = await readRawSettings()
+  const patterns = readEnabledModels(raw)
+  const enabled = new Set(
+    allModels
+      .filter((model) => isModelEnabled(model, patterns))
+      .map((model) => `${model.provider}/${model.id}`)
+  )
+  const prefix = `${providerId}/`
+  for (const id of [...enabled]) {
+    if (id.startsWith(prefix)) enabled.delete(id)
+  }
+  for (const id of enabledIds) {
+    if (id.startsWith(prefix)) enabled.add(id)
+  }
+  const allIds = allModels.map((model) => `${model.provider}/${model.id}`)
+  const allEnabled = allIds.length > 0 && allIds.every((id) => enabled.has(id))
+  if (allEnabled) delete raw.enabledModels
+  else raw.enabledModels = [...enabled].sort()
+  await fs.mkdir(AGENT_DIR, { recursive: true })
+  await fs.writeFile(SETTINGS_PATH, `${JSON.stringify(raw, null, 2)}\n`)
+}
+
+export async function listModelChoices(): Promise<ModelChoice[]> {
+  const runtime = await getRuntime()
+  const providers = new Map(runtime.getProviders().map((provider) => [provider.id, provider]))
+  const configured = await configuredProviderIds(runtime)
+  const patterns = readEnabledModels(await readRawSettings())
+  return runtime
+    .getModels()
+    .filter((model) => isModelEnabled(model, patterns))
+    .map((model) => {
+      const provider = providers.get(model.provider)
+      return {
+        provider: model.provider,
+        providerName: provider?.name ?? model.provider,
+        id: model.id,
+        name: model.name,
+        configured: configured.has(model.provider)
+      }
+    })
+}

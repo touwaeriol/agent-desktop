@@ -1,0 +1,19 @@
+{
+  "name": "agent-desktop",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Agent desktop client",
+  "author": "eriol touwa",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "npm run dev -w @agent-desktop/desktop",
+    "start": "npm run start -w @agent-desktop/desktop",
+    "build": "npm run build -w @agent-desktop/desktop",
+    "dist": "npm run dist -w @agent-desktop/desktop",
+    "release": "npm run release -w @agent-desktop/desktop",
+    "typecheck": "npm run typecheck -w @agent-desktop/desktop"
+  }
+}

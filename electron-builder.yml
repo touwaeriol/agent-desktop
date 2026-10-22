@@ -1,0 +1,26 @@
+appId: dev.agent.desktop
+productName: Agent Desktop
+directories:
+  app: apps/desktop
+  output: release
+  buildResources: apps/desktop/build
+files:
+  - out/**/*
+  - package.json
+asarUnpack:
+  - "**/node_modules/@earendil-works/**"
+  - "**/node_modules/quickjs-wasi/**"
+  - "**/node_modules/@silvia-odwyer/**"
+win:
+  target:
+    - nsis
+  artifactName: Agent-Desktop-${version}-Setup.${ext}
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  perMachine: false
+  deleteAppDataOnUninstall: false
+publish:
+  provider: github
+  owner: touwaeriol
+  repo: agent-desktop

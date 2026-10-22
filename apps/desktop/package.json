@@ -1,0 +1,36 @@
+{
+  "name": "@agent-desktop/desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Agent desktop client",
+  "main": "./out/main/index.js",
+  "scripts": {
+    "dev": "node ../../scripts/electron-vite.mjs dev",
+    "start": "node ../../scripts/electron-vite.mjs preview",
+    "build": "electron-vite build",
+    "dist": "npm run build && cd ../.. && electron-builder --config electron-builder.yml --win --publish never",
+    "release": "npm run build && cd ../.. && electron-builder --config electron-builder.yml --win --publish always",
+    "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json"
+  },
+  "dependencies": {
+    "@earendil-works/pi-coding-agent": "^1.4.0",
+    "electron-updater": "^6.8.9",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1",
+    "undici": "^8.10.2"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.0",
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
+    "@vitejs/plugin-react": "^5.2.0",
+    "electron": "45.0.0",
+    "electron-builder": "^26.15.3",
+    "electron-vite": "^6.0.0",
+    "typescript": "~5.9.3",
+    "vite": "^7.1.0"
+  },
+  "author": "eriol touwa"
+}
