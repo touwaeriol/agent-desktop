@@ -100,7 +100,7 @@ npm run typecheck    # node + web 两个 tsconfig 分别检查
 - 运行中（`status.isStreaming` 或 `status.compacting`）发消息**默认进队列**，不再直接 `steer`：队列在渲染层（`App.tsx` 的 `queued`），输入框上方显示「N 条排队消息」，每条可编辑（放回输入框）、删除、立即发送。
 - 「立即发送」和 `Ctrl+Enter` 是**强制引导**：走 `prompt(text, 'steer')` 注入当前回合，不等待本轮结束。
 - 回合结束后自动按顺序发送队列里的下一条。**flush 的 effect 只能依赖 `status.isStreaming` / `status.compacting` / `status.phase`，不能依赖 `queued`**——否则加入第二条时会和第一条抢跑（`isStreaming` 还没变 true 就再发一次），实测第二条会被 pi 拒绝并丢失。
-- 发送失败时把该条放回队首并提示，避免静默丢消息。
+- 发送失败时把该条放回队首并提示，避免静默丢消息。放回后必须**自己再排一次**（`restore()` 重新读 `pi:get-status` 并 2 秒后 `setQueueTick`）：条目出队又回队不产生任何状态变化，flush 不会重跑，否则排队项会永远躺在那里。
 
 ## 运行状态（busy）
 
@@ -108,6 +108,9 @@ npm run typecheck    # node + web 两个 tsconfig 分别检查
 - 之前把 `agent_end` 当空闲，导致队列 flush 抢在 pi 收尾时发送、被拒绝后弹「Agent is already processing…」并把消息退回输入框——这就是「发新消息卡住」的来源。
 - `submitPrompt()`（`pi:prompt`）是唯一入口：先原样发；命中 `compaction is in progress` 就 `waitForIdle()` 后重试；命中 `already processing` 且没指定 `streamingBehavior` 就改发 `followUp` 排队并返回 `queued: true`（渲染层提示「已排队」）。**不要再在渲染层直接调 `rpc.prompt` 判断忙碌**。
 - 压缩状态进 `PiStatus.compacting`，输入框占位符显示「正在压缩上下文」。
+- `busy` 是事件驱动的，事件可能丢（压缩结束时 pi 正在重启、子进程被杀、`agent_settled` 没送到），而它**唯一的作用就是解锁队列**：卡住时界面一直显示运行中、排队消息永远不发。所以 `watchRunState()` 在 `busy` 期间每 3 秒 `get_state` 一次，以 pi 的答案为准。
+- `startPi()` 必须返回**正在进行的那个 promise**，不能 `if (starting) return status`：第二个调用者会拿到 `phase: 'starting'`，而没有任何东西会替它把状态推到 `ready`，队列（只在 `ready` 时 flush）就永久停住。
+- 渲染层的 `statusRef` 在 **effect 里**赋值，不要写成 `statusRef.current = status`（渲染期赋值）：被 React 丢弃的渲染会把 `busy` 留在 ref 里，`piBusy()` 就会和 flush 看到的状态打架。
 - 运行中改 MCP/子代理设置走 `reloadPiConfig()`：忙碌时只记 `configPending`，`agent_settled` 时用 `sessionArgs()` 重启 pi 把新配置装上（否则开关改了永远不生效）。
 - pi 非预期退出（扩展抛错、OOM）时 `rpc.on('exit')` 会在 1 秒后用同一会话重启，2 分钟内最多 3 次；`shuttingDown` 为真（`window-all-closed` / `before-quit`）时不再重启。
 - 扩展里的定时器**必须能容忍失效的 ctx**：`new_session` / `clone` / `switch_session` / `reload` 之后捕获的 `pi` 会变 stale，`pi.getAllTools()` 抛出的异常会直接杀掉整个 pi 进程（实测 `Timeout.reportTools` 崩溃导致「pi 未运行」）。`reportTools` 已包 try/catch。
