@@ -390,10 +390,15 @@ export function Composer({
           <div className="queue-panel">
             <div className="queue-head">
               <span className="queue-count">{queued.length} 条排队消息</span>
-              <span className="queue-hint">当前回复结束后自动发送</span>
+              <span className="queue-hint">
+                {queued.some((item) => item.command)
+                  ? '当前回合结束后自动发送 / 执行命令'
+                  : '当前回复结束后自动发送'}
+              </span>
             </div>
             {queued.map((item) => (
               <div className="queue-item" key={item.id}>
+                {item.command && <span className="queue-tag">命令</span>}
                 <span className="queue-text" title={item.text}>
                   {item.text || `${item.images.length} 张图片`}
                 </span>
@@ -403,13 +408,15 @@ export function Composer({
                 <button className="queue-btn" title="删除" onClick={() => onQueueRemove(item.id)}>
                   <CloseIcon size={11} />
                 </button>
-                <button
-                  className="queue-btn"
-                  title="立即发送（打断当前回合）"
-                  onClick={() => onQueueSteer(item.id)}
-                >
-                  <SendIcon size={11} />
-                </button>
+                {!item.command && (
+                  <button
+                    className="queue-btn"
+                    title="立即发送（打断当前回合）"
+                    onClick={() => onQueueSteer(item.id)}
+                  >
+                    <SendIcon size={11} />
+                  </button>
+                )}
               </div>
             ))}
           </div>

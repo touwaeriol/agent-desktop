@@ -43,6 +43,8 @@ export interface QueuedMessage {
   id: string
   text: string
   images: DraftImage[]
+  /** A slash command waiting for the run to end, not a message for pi. */
+  command?: boolean
 }
 import { updateStatusText } from './lib/updates'
 import {
@@ -150,6 +152,8 @@ export default function App(): React.JSX.Element {
   useEffect(() => {
     queueRef.current = queued
   }, [queued])
+  /** Bumped after a queued command runs, so the queue keeps draining without a run to end. */
+  const [queueTick, setQueueTick] = useState(0)
   const [run, setRun] = useState<{
     startedAt?: number
     endedAt?: number
@@ -595,26 +599,6 @@ export default function App(): React.JSX.Element {
    * send button on a queued item, forces it into the current turn with `steer`.
    */
 
-  /**
-   * Send the next queued message when a run settles.
-   *
-   * Deliberately depends on the run status only: adding an item must not trigger a send, otherwise
-   * the second item races the first one into pi while `isStreaming` is still false.
-   */
-  useEffect(() => {
-    // `compacting` counts as busy: pi refuses prompts while it rewrites the context.
-    if (status.isStreaming || status.compacting || status.phase !== 'ready') return
-    // The queue belongs to the main session: never flush it into an open `/btw` fork.
-    if (btwChatRef.current) return
-    const next = queueRef.current[0]
-    if (!next) return
-    setQueued((prev) => prev.filter((item) => item.id !== next.id))
-    void deliver(next.text, next.images).then((ok) => {
-      if (ok) return
-      setQueued((prev) => (prev.some((item) => item.id === next.id) ? prev : [next, ...prev]))
-    })
-  }, [status.isStreaming, status.compacting, status.phase, deliver])
-
   const newSession = useCallback(async () => {
     const result = await window.pi.newSession()
     if (!result.ok) {
@@ -628,27 +612,57 @@ export default function App(): React.JSX.Element {
     void loadSessions()
   }, [loadSessions])
 
+  const closeBtw = useCallback(async () => {
+    if (!btwChatRef.current) return
+    setBtwChat(undefined)
+    setBtwDraft('')
+    try {
+      await window.pi.closeSideChat()
+    } catch {
+      // the branch is discarded on the main side anyway
+    }
+  }, [])
+
+  /**
+   * Park a command that needs an idle session until the current run ends.
+   *
+   * `/btw` and `/mcp` are local and run immediately; `/clear`, `/compact` and the numeric
+   * `/autocompact` restart or replace the session, which pi cannot do mid-run. They wait in the
+   * same queue as messages (marked `command`) instead of being rejected with a toast.
+   */
+  const queueCommand = useCallback((text: string): void => {
+    const id = `qc-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
+    setQueued((prev) => [...prev, { id, text, images: [], command: true }])
+    setToast(`${text.split(' ')[0]} 已排队，本轮结束后自动执行`)
+  }, [])
+
   const runCommand = useCallback(
-    async (raw: string): Promise<boolean> => {
+    async (raw: string, options: { queued?: boolean } = {}): Promise<boolean> => {
+      // Called from the queue flush: pi picked up work again, so report "not handled" and let the
+      // flush put the item back instead of running a session command mid-run.
+      if (options.queued && piBusy()) return false
       const text = raw.trim()
       const space = text.indexOf(' ')
       const name = (space === -1 ? text : text.slice(0, space)).toLowerCase()
       const arg = space === -1 ? '' : text.slice(space + 1).trim()
+      /** True when the command has to wait for the current run to end. */
+      const defer = (): boolean => {
+        if (!piBusy()) return false
+        queueCommand(text)
+        return true
+      }
       switch (name) {
         case '/clear': {
-          if (piBusy()) {
-            setToast('正在回复中，先停止或等这一轮结束')
-            return true
-          }
+          if (defer()) return true
+          // A session switch drops the `/btw` fork on the main side; close the panel with it.
+          await closeBtw()
           await newSession()
           setToast('已清空当前会话')
           return true
         }
         case '/compact': {
-          if (piBusy()) {
-            setToast('正在回复中，等这一轮结束再压缩')
-            return true
-          }
+          if (defer()) return true
+          await closeBtw()
           setToast(arg ? `正在压缩（自定义提示词：${arg}）…` : '正在压缩上下文…')
           const result = await window.pi.compactSession(arg || undefined)
           if (!result.ok) {
@@ -674,10 +688,8 @@ export default function App(): React.JSX.Element {
             setToast('阈值要写数字，例如 /autocompact 500000')
             return true
           }
-          if (piBusy()) {
-            setToast('正在回复中，等这一轮结束再改阈值')
-            return true
-          }
+          if (defer()) return true
+          await closeBtw()
           const result = await window.pi.setCompactThreshold(tokens)
           setToast(
             result.ok
@@ -687,6 +699,7 @@ export default function App(): React.JSX.Element {
           return true
         }
         case '/mcp': {
+          // Local: reads the current MCP state and opens the panel. Never waits for the run.
           setMcpState(await window.pi.getMcpState())
           setMcpOpen(true)
           return true
@@ -696,8 +709,7 @@ export default function App(): React.JSX.Element {
             setToast('用法：/btw <问题>')
             return true
           }
-          // A local command: it never joins the queue. If pi is still working, the fork is taken as
-          // soon as it settles, and a second `/btw` replaces the old fork with a new branch.
+          // Local too: the panel opens now and the main process forks as soon as the run settles.
           setBtwDraft('')
           setBtwChat({ busy: true, turns: [{ question: arg }] })
           let result: SideChatResult
@@ -708,8 +720,9 @@ export default function App(): React.JSX.Element {
           }
           if (!result.ok) {
             // The branch is already discarded on the main side; leave no half-open panel behind.
+            // Closing the panel during the wait cancels the start, and that is not worth a toast.
+            if (btwChatRef.current) setToast(result.error ?? '侧边提问失败')
             setBtwChat(undefined)
-            setToast(result.error ?? '侧边提问失败')
             return true
           }
           setBtwChat({ busy: false, turns: [{ question: arg, answer: result.answer }] })
@@ -719,19 +732,39 @@ export default function App(): React.JSX.Element {
           return false
       }
     },
-    [loadMessages, newSession, piBusy]
+    [closeBtw, loadMessages, newSession, piBusy, queueCommand]
   )
 
-  const closeBtw = useCallback(async () => {
-    if (!btwChatRef.current) return
-    setBtwChat(undefined)
-    setBtwDraft('')
-    try {
-      await window.pi.closeSideChat()
-    } catch {
-      // the branch is discarded on the main side anyway
+  /**
+   * Send the next queued item when a run settles: a message goes to pi, a command runs here.
+   *
+   * Deliberately depends on the run status only: adding an item must not trigger a send, otherwise
+   * the second item races the first one into pi while `isStreaming` is still false. `queueTick` is
+   * bumped after a queued command finishes, because a command (e.g. `/clear`) does not change
+   * `isStreaming` and the remaining items would otherwise wait for the next run to end.
+   */
+  useEffect(() => {
+    // `compacting` counts as busy: pi refuses prompts while it rewrites the context.
+    if (status.isStreaming || status.compacting || status.phase !== 'ready') return
+    // The queue belongs to the main session: never flush it into an open `/btw` fork.
+    if (btwChatRef.current) return
+    const next = queueRef.current[0]
+    if (!next) return
+    setQueued((prev) => prev.filter((item) => item.id !== next.id))
+    const restore = (): void =>
+      setQueued((prev) => (prev.some((item) => item.id === next.id) ? prev : [next, ...prev]))
+    if (next.command) {
+      // `queued: true` keeps a command that is still blocked from re-queueing itself forever.
+      void runCommand(next.text, { queued: true }).then((handled) => {
+        if (!handled) restore()
+        else setQueueTick((value) => value + 1)
+      })
+      return
     }
-  }, [])
+    void deliver(next.text, next.images).then((ok) => {
+      if (!ok) restore()
+    })
+  }, [status.isStreaming, status.compacting, status.phase, deliver, runCommand, queueTick])
 
   const askBtw = useCallback(async () => {
     const text = btwDraft.trim()
@@ -770,19 +803,20 @@ export default function App(): React.JSX.Element {
     async (mode: 'send' | 'steer') => {
       const text = draft.trim()
       if (!text && draftImages.length === 0) return
+      // Slash commands are local: they run here and never become a message, streaming or not.
+      // Only an unknown `/xxx` falls through and goes to pi like any other prompt. This runs before
+      // the `/btw` guard below so `/mcp` and `/btw` still work while a side chat is open.
+      if (text.startsWith('/') && draftImages.length === 0) {
+        // Clear first: `/btw` keeps the promise pending until its answer arrives, and the text
+        // should leave the box the moment Enter is pressed.
+        setDraft('')
+        const handled = await runCommand(text)
+        if (handled) return
+      }
       // pi is parked on the `/btw` fork while that panel is open; nothing may go there by accident.
       if (btwChatRef.current) {
         setToast('先关闭侧边提问窗口')
         return
-      }
-      // Slash commands are local: they run here and never become a message, streaming or not.
-      // Only an unknown `/xxx` falls through and goes to pi like any other prompt.
-      if (text.startsWith('/') && draftImages.length === 0) {
-        const handled = await runCommand(text)
-        if (handled) {
-          setDraft('')
-          return
-        }
       }
       const streaming = piBusy()
       if (streaming && mode === 'send') {
@@ -1078,7 +1112,7 @@ export default function App(): React.JSX.Element {
           }}
           onQueueSteer={(id) => {
             const target = queued.find((item) => item.id === id)
-            if (!target) return
+            if (!target || target.command) return
             setQueued((prev) => prev.filter((item) => item.id !== id))
             void deliver(target.text, target.images, 'steer')
           }}

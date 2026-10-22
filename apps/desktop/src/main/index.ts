@@ -1291,6 +1291,8 @@ function registerIpc(): void {
   })
 
   ipcMain.handle('pi:compact', async (_event, instructions?: string) => {
+    // Compacting the fork would summarize the throwaway branch and leave the real session alone.
+    if (btwActive) await closeSideChat()
     try {
       const response = await rpc.request<{ data?: { summary?: string } }>(
         'compact',

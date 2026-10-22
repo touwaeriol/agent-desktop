@@ -74,7 +74,9 @@ npm run typecheck    # node + web 两个 tsconfig 分别检查
 ## 斜杠命令
 
 - 输入框打 `/` 弹出命令菜单（`Composer.tsx` 的 `SLASH_COMMANDS`），↑/↓ 选择、Enter/Tab 填入、Esc 清空。**填入后 `slashPicked` 记住当前值**，否则菜单会一直打开、Enter 永远只是重复填入，命令发不出去。
-- 命令在渲染层拦截（`App.tsx` 的 `runCommand`），**不管是否在流式输出都会先走命令，认不出的 `/xxx` 才当普通消息**（`send()` 里先 `runCommand`，返回 true 才算消费、清空输入框）。命令本身永远不进入对话、不进队列。会开新会话/重启 pi 的命令（`/clear`、`/compact`、`/autocompact <数字>`）在流式期间只弹 toast 拒绝；`/btw` 例外——它会等本轮结束再分支（见下）。
+- 命令在渲染层拦截（`App.tsx` 的 `runCommand`），**不管是否在流式输出都会先走命令，认不出的 `/xxx` 才当普通消息**（`send()` 里先 `runCommand`，返回 true 才算消费、清空输入框）。命令本身永远不进入对话。
+  - `/mcp`、`/btw` 是**本地命令，立刻执行**：`/mcp` 读一次 `getMcpState()` 弹浮层；`/btw` 立刻打开面板，主进程等本轮结束再 `clone`（面板里显示「正在回答…」）。两者都不排队，`send()` 里命令处理必须排在 `/btw` 面板守卫之前，否则面板打开时连 `/mcp` 都被拒。
+  - 需要空闲会话的命令（`/clear`、`/compact`、`/autocompact <数字>`）**排队而不是拒绝**：忙碌时 `queueCommand()` 往消息队列里塞一条 `command: true` 的条目（输入框上方显示「命令」标签，没有「立即发送」按钮），回合结束后由同一个 flush effect 调 `runCommand(text, { queued: true })` 执行。`queued: true` 时若 pi 又忙起来就返回 false，flush 会把条目放回队列而不是丢掉。
   - `/clear`：开新会话（= 侧栏「新建」），不是清空当前 JSONL。
   - `/compact [提示词]`：RPC `compact` + `customInstructions`；会话太小时 pi 会返回 `Nothing to compact`，原样提示给用户。
   - `/autocompact <token 数 | on | off>`：写 `~/.pi/agent/settings.json` 的 `compaction.enabled` / `compaction.reserveTokens`（`reserveTokens = contextWindow - 阈值`，按当前模型的 `contextWindow` 换算），然后重启 pi；`on/off` 额外调 RPC `set_auto_compaction` 立即生效。

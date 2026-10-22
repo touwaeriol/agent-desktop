@@ -4386,6 +4386,17 @@ button:disabled {
   white-space: nowrap;
 }
 
+/* A slash command waiting for the run to end: it executes here, it is not a message. */
+.queue-tag {
+  flex: none;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--accent-soft);
+  color: var(--accent-text);
+  font-size: 9.8px;
+  line-height: 1.5;
+}
+
 .queue-btn {
   display: grid;
   place-items: center;
