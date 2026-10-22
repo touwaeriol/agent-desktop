@@ -194,6 +194,8 @@ function desktopToolAvailable(): boolean {
 
 let agentSettings: agents.AgentSettings = { exposure: 'prompt', promptLimit: 8, presets: [] }
 let subagents: SubagentManager | null = null
+/** Last time the user stopped a run, used to keep subagent notices from restarting it. */
+let lastAbortAt = 0
 
 async function refreshAgents(): Promise<void> {
   agentSettings = await agents.loadAgents(app.getPath('userData'))
@@ -208,7 +210,8 @@ function subagentManager(): SubagentManager {
         bridge.publishEvent({
           type: 'subagent_settled',
           text: subagentNotice(record),
-          wake: record.notify === 'wake'
+          // Do not restart a run the user just stopped; queue the notice for their next turn.
+          wake: record.notify === 'wake' && Date.now() - lastAbortAt > 30_000
         })
       }
     })
@@ -794,6 +797,9 @@ function registerIpc(): void {
 
   ipcMain.handle('pi:abort', async () => {
     cancelPendingAsks('用户中止了本次运行')
+    // A subagent that settles right after a manual stop must not start a new turn behind the
+    // user's back; the notice is queued instead (see subagentManager onSettle).
+    lastAbortAt = Date.now()
     if (!rpc.running) return
     try {
       await rpc.request('abort', {}, 30000)

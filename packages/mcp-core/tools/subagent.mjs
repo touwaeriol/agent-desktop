@@ -267,11 +267,12 @@ export const startSubagent = {
       waitMs: { type: 'integer', description: 'How long sync mode waits. Default 120s, max 300s.' },
       notify: {
         type: 'string',
-        enum: ['queue', 'wake', 'none'],
+        enum: ['wake', 'queue', 'none'],
         description:
-          'How you learn it finished. queue: a notice is appended to this session and you see it ' +
-          'on your next turn (default for background). wake: also starts a turn for you right away. ' +
-          'none: only wait_subagent / get_subagent report it (default for sync).'
+          'How you learn it finished. wake (default for background): a notice is appended and a ' +
+          'turn starts right away, so you continue without being prompted. queue: the notice waits ' +
+          'in the transcript until your next turn. none: only wait_subagent / get_subagent report ' +
+          'it (default for sync).'
       },
       format: { type: 'string', enum: ['md', 'json'], default: 'md' }
     },
@@ -309,13 +310,13 @@ export const startSubagent = {
       return text(lines.join('\n'))
     }
     if (record.mode === 'background') {
-      const notify = record.notify ?? 'queue'
+      const notify = record.notify ?? 'wake'
       lines.push(
         '',
         notify === 'none'
           ? '后台运行中。完成后用 `wait_subagent` 取结论。'
           : notify === 'wake'
-            ? '后台运行中。结束后会唤醒你继续，不必轮询。'
+            ? '后台运行中。结束后会唤醒你继续（不必轮询，也不要空等）；只想安静收集就传 notify: "queue"。'
             : '后台运行中。结束后本会话会收到一条通知，下个回合即可看到；也可用 `wait_subagent`。'
       )
       return text(lines.join('\n'))

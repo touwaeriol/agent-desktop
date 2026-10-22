@@ -152,7 +152,8 @@ npm run typecheck    # node + web 两个 tsconfig 分别检查
 - `<agents>` 段由主进程渲染后经 `AGENT_DESKTOP_AGENTS_SECTION` 传给扩展，扩展在 `before_agent_start` 里注入 `sections.subagents`，**门控**：`pi.getActiveTools()` 里有 `mcp__desktop__start_subagent` 才注入，否则删除。
 - 桥内部 API（JSON，给 mcp-core 用）：`GET /agents`、`GET /models`、`POST /subagents`、`GET /subagents/:id`、`POST /subagents/:id/{prompt,stop,wait}`、`GET /subagents/:id/changes`。令牌沿用桥的 Bearer。
 - **子代理结束怎么通知父代理**：工具调用返回后无法再回调，所以走"主进程 → 桥事件 → 父进程内的扩展"这条线。`SubagentManager` 的 `onSettle` 把一条三行通知交给 `bridge.publishEvent()`；扩展（`desktop-mcp.js` 的 `pumpEvents`）长轮询 `GET /events?wait=25000`（Bearer 令牌，最长等 60s，队列上限 20 条、10 分钟过期），收到后 `pi.sendMessage({ customType: 'subagent_notice' }, { triggerTurn })`。
-- `start_subagent` 的 `notify`：`queue`（background 默认，只追加一条 custom 消息，父代理下个回合才读）、`wake`（`triggerTurn: true`，空闲时立刻开一个回合）、`none`（sync 默认，只有 `get_subagent` / `wait_subagent` 能看到）。
+- `start_subagent` 的 `notify`：`wake`（background 默认，`triggerTurn: true`：空闲时立刻开一个回合，正在流式则作为 steer 插到当前回合之后）、`queue`（只追加一条 custom 消息，**不会**让父代理动起来，等下个回合才被读到）、`none`（sync 默认，只有 `get_subagent` / `wait_subagent` 能看到）。实测过：`queue` 只产生 `custom:subagent_notice`、`assistants` 不变；`wake` 会多一个 assistant 回合。
+- 用户刚点过「停止」（`pi:abort` 30 秒内）时，`onSettle` 会把 `wake` 降级成 `queue`，否则用户刚停下的会话会被子代理通知重新拉起来。
 - 通知正文用 `<system-reminder source="agent-desktop">` 包起来：pi 把 custom 消息和用户消息**都**转成 `role: "user"` 发给模型（`core/messages.js` 的 `convertToLlm`），不标记的话模型会以为这是用户说的话。pi 自己不解析任何标签，这层纯粹是给模型的约定。
 - 渲染层只认 `customType === 'subagent_notice'`：`toChatItems` 和 `App.tsx` 的 `message_end` 都把它变成 `role: 'system'` 的条目，`Conversation.tsx` 画成虚线条（`.system-notice`），**不要**让它变成用户气泡。`noticeText()` 负责剥掉 `<system-reminder>` 外壳。
 - 父会话重启（换模型）时扩展重新加载、长轮询重连，队列里没投递的事件会补发；所以事件队列在**主进程**里，不要在扩展里缓存。

@@ -270,8 +270,10 @@ export class SubagentManager {
       messages: [],
       calls: [],
       timeoutMs: options.timeoutMs ?? preset?.timeoutMs ?? DEFAULT_TIMEOUT_MS,
-      // Sync mode already returns the answer, so only background runs notify by default.
-      notify: options.notify ?? (mode === 'background' ? 'queue' : 'none'),
+      // Sync mode already returns the answer. A background run has nobody waiting on it, so the
+      // default wakes the parent: otherwise the notice sits in the transcript until the user
+      // happens to write something, and the parent never continues on its own.
+      notify: options.notify ?? (mode === 'background' ? 'wake' : 'none'),
       parentSession: options.parentSession
     }
     const rpc = new PiRpcClient()
