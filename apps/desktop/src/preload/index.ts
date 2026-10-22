@@ -151,6 +151,7 @@ const bridge: PiBridge = {
   stopSubagent: (id: string) => ipcRenderer.invoke('subagents:stop', id),
   promptSubagent: (id: string, text: string, mode) =>
     ipcRenderer.invoke('subagents:prompt', id, text, mode),
+  revealSubagentSession: (file: string) => ipcRenderer.invoke('subagents:reveal', file),
   onSubagentUpdate: (listener) => {
     const handler = (_event: Electron.IpcRendererEvent, record: SubagentView): void =>
       listener(record)

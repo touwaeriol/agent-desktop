@@ -5295,6 +5295,53 @@ button:disabled {
   gap: 2px;
 }
 
+.subagents-search {
+  flex: none;
+  height: 26px;
+  margin-bottom: 4px;
+  padding: 0 8px;
+  border-radius: 7px;
+  border: 1px solid var(--border-strong);
+  background: var(--bg-input);
+  color: var(--text);
+  font-size: 11px;
+}
+
+.subagent-tag {
+  flex: none;
+  padding: 0 5px;
+  border-radius: 4px;
+  background: var(--bg-hover);
+  color: var(--faint);
+  font-size: 9.5px;
+}
+
+.subagent-session {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--faint);
+  font-size: 10.2px;
+}
+
+.subagent-session-label {
+  flex: none;
+}
+
+.subagent-session-path {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: 'Cascadia Code', 'Consolas', monospace;
+}
+
+.subagent-session .ghost {
+  flex: none;
+  padding: 1px 6px;
+  font-size: 10px;
+}
+
 .subagent-row {
   display: flex;
   align-items: center;

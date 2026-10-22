@@ -276,6 +276,9 @@ function serializeSubagent(record: SubagentRecord): Record<string, unknown> {
     runtimeMs: record.runtimeMs,
     createdAt: record.createdAt,
     notify: record.notify,
+    sessionFile: record.sessionFile,
+    parentSession: record.parentSession,
+    restored: record.restored === true,
     error: record.error
   }
 }
@@ -877,14 +880,16 @@ function registerIpc(): void {
 
   ipcMain.handle('mcp:state', () => buildMcpState())
 
-  ipcMain.handle('subagents:list', () => subagents?.list().map((record) => serializeSubagent(record)) ?? [])
+  ipcMain.handle('subagents:list', () =>
+    subagentManager().list().map((record) => serializeSubagent(record))
+  )
   ipcMain.handle('subagents:get', (_event, id: string) => {
-    const record = subagents?.get(id)
+    const record = subagentManager().get(id)
     return record ? serializeSubagent(record) : null
   })
   ipcMain.handle('subagents:stop', async (_event, id: string) => {
     try {
-      await subagents?.stop(id)
+      await subagentManager().stop(id)
       return true
     } catch {
       return false
@@ -894,13 +899,18 @@ function registerIpc(): void {
     'subagents:prompt',
     async (_event, id: string, text: string, mode: 'interrupt' | 'steer' | 'follow-up') => {
       try {
-        await subagents?.prompt(id, text, mode)
+        await subagentManager().prompt(id, text, mode)
         return true
       } catch {
         return false
       }
     }
   )
+  ipcMain.handle('subagents:reveal', (_event, file: string) => {
+    if (typeof file !== 'string' || !existsSync(file)) return false
+    shell.showItemInFolder(file)
+    return true
+  })
 
   ipcMain.handle('workspace:files', () => listWorkspaceFiles(status.cwd))
 
@@ -1405,7 +1415,8 @@ app.whenReady().then(async () => {
       subagents: () => subagentManager(),
       listModels: (options) => providers.listModelChoices({ includeUnconfigured: !options.configuredOnly }),
       defaultMode: () => subagentConfig().defaultMode,
-      desktopTools: () => subagentConfig().desktopTools
+      desktopTools: () => subagentConfig().desktopTools,
+      parentSession: () => status.sessionFile
     })
   )
   createWindow()
@@ -1422,6 +1433,8 @@ app.whenReady().then(async () => {
   )
   // Warm the model runtime in the background so the first Settings open is instant.
   await refreshAgents()
+  // Restores the subagent records of previous runs, so the panel and the tools can query them.
+  subagentManager()
   void providers.listProviders().catch(() => undefined)
   void providers.listModelChoices().catch(() => undefined)
   void startPi(cwd)

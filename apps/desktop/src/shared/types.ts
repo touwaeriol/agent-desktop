@@ -337,6 +337,12 @@ export interface SubagentView {
   runtimeMs?: number
   createdAt: number
   notify: 'queue' | 'wake' | 'none'
+  /** The subagent's own session file, for inspecting or resuming the run later. */
+  sessionFile?: string
+  /** Session file of the conversation that started it. */
+  parentSession?: string
+  /** Loaded from disk after a restart: the result stays queryable, the process does not. */
+  restored?: boolean
   error?: string
 }
 
@@ -453,5 +459,6 @@ export interface PiBridge {
   getSubagent(id: string): Promise<SubagentView | null>
   stopSubagent(id: string): Promise<boolean>
   promptSubagent(id: string, text: string, mode: 'interrupt' | 'steer' | 'follow-up'): Promise<boolean>
+  revealSubagentSession(file: string): Promise<boolean>
   onSubagentUpdate(listener: (record: SubagentView) => void): () => void
 }

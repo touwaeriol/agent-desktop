@@ -826,7 +826,9 @@ export default function App(): React.JSX.Element {
           streaming={Boolean(status.isStreaming)}
           sidebarOpen={sidebarOpen}
           subagentsRunning={subagents.filter(isSubagentRunning).length}
-          subagentsFinished={subagents.filter((record) => record.status === 'idle').length}
+          subagentsFinished={
+            subagents.filter((record) => !record.restored && record.status === 'idle').length
+          }
           onNew={() => void newSession()}
           onToggleSidebar={() => setSidebarOpen((value) => !value)}
           onOpenSubagents={() => setSubagentsOpen(true)}

@@ -8,7 +8,7 @@
  * subagents. Their sessions live in their own directory so they never show up in the sidebar.
  */
 import { randomUUID } from 'node:crypto'
-import { existsSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import { PiRpcClient } from './pi-rpc'
@@ -59,6 +59,12 @@ export interface SubagentRecord {
   runtimeMs?: number
   timeoutMs: number
   notify: NotifyMode
+  /** The subagent's own pi session file, so a run can be inspected or resumed later. */
+  sessionFile?: string
+  /** The main session that started it, for correlating runs after a restart. */
+  parentSession?: string
+  /** Loaded from disk: the process is gone, only the result remains. */
+  restored?: boolean
 }
 
 export interface StartOptions {
@@ -75,6 +81,7 @@ export interface StartOptions {
   waitMs?: number
   desktopTools?: boolean
   notify?: NotifyMode
+  parentSession?: string
 }
 
 export interface StartResult {
@@ -93,7 +100,8 @@ const DEFAULT_TIMEOUT_MS = 15 * 60 * 1000
 const DEFAULT_WAIT_MS = 120 * 1000
 const IDLE_TIMEOUT_MS = 30 * 60 * 1000
 const READY_TIMEOUT_MS = 30_000
-const MAX_KEPT = 40
+const MAX_KEPT = 120
+const STORE_VERSION = 1
 
 interface PendingCall {
   tool: string
@@ -102,7 +110,8 @@ interface PendingCall {
 
 interface Internal {
   record: SubagentRecord
-  rpc: PiRpcClient
+  /** Missing for records restored from disk: there is no process behind them. */
+  rpc?: PiRpcClient
   pendingCalls: Map<string, PendingCall>
   waiters: Array<(record: SubagentRecord) => void>
   totalTimer?: NodeJS.Timeout
@@ -116,6 +125,7 @@ interface Internal {
 export class SubagentManager {
   private readonly items = new Map<string, Internal>()
   private maxConcurrent = 4
+  private saveTimer?: NodeJS.Timeout
 
   constructor(
     private readonly options: {
@@ -126,7 +136,73 @@ export class SubagentManager {
       onSettle?: (record: SubagentRecord) => void
       resolveModel?: (provider: string, id: string) => Promise<boolean>
     }
-  ) {}
+  ) {
+    this.restore()
+  }
+
+  private storePath(): string {
+    return path.join(this.options.userData, 'subagents.json')
+  }
+
+  /**
+   * Bring back the records of previous runs. Their processes are gone, so anything that was still
+   * running is marked stopped; finished results stay queryable by id (`get_subagent`,
+   * `list_subagents`, the subagent panel).
+   */
+  private restore(): void {
+    let parsed: { records?: SubagentRecord[] }
+    try {
+      parsed = JSON.parse(readFileSync(this.storePath(), 'utf8')) as { records?: SubagentRecord[] }
+    } catch {
+      return
+    }
+    const records = Array.isArray(parsed?.records) ? parsed.records : []
+    for (const record of records) {
+      if (!record || typeof record.id !== 'string') continue
+      const restored: SubagentRecord = {
+        ...record,
+        messages: Array.isArray(record.messages) ? record.messages : [],
+        calls: Array.isArray(record.calls) ? record.calls : [],
+        notify: record.notify ?? 'none',
+        timeoutMs: record.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+        restored: true
+      }
+      if (restored.status === 'starting' || restored.status === 'streaming') {
+        restored.status = 'stopped'
+        restored.error = restored.error ?? '应用已重启，子代理进程已结束'
+      }
+      this.items.set(restored.id, {
+        record: restored,
+        pendingCalls: new Map(),
+        waiters: [],
+        settled: true,
+        runId: 0,
+        notifiedRun: 0
+      })
+    }
+    this.prune()
+  }
+
+  private scheduleSave(): void {
+    if (this.saveTimer) clearTimeout(this.saveTimer)
+    this.saveTimer = setTimeout(() => {
+      this.saveTimer = undefined
+      this.save()
+    }, 800)
+  }
+
+  private save(): void {
+    const records = [...this.items.values()]
+      .map((item) => item.record)
+      .sort((a, b) => b.createdAt - a.createdAt)
+    try {
+      void fs.mkdir(this.options.userData, { recursive: true }).then(() =>
+        fs.writeFile(this.storePath(), JSON.stringify({ version: STORE_VERSION, records }, null, 1))
+      )
+    } catch {
+      // a lost record is not worth breaking a run over
+    }
+  }
 
   setMaxConcurrent(value: number): void {
     this.maxConcurrent = Math.max(1, Math.floor(value))
@@ -138,11 +214,13 @@ export class SubagentManager {
 
   private emit(record: SubagentRecord): void {
     this.options.onUpdate?.(record)
+    this.scheduleSave()
   }
 
   private runningCount(): number {
     let count = 0
     for (const item of this.items.values()) {
+      if (item.record.restored) continue
       if (item.record.status === 'starting' || item.record.status === 'streaming' || item.record.status === 'idle') {
         count += 1
       }
@@ -193,7 +271,8 @@ export class SubagentManager {
       calls: [],
       timeoutMs: options.timeoutMs ?? preset?.timeoutMs ?? DEFAULT_TIMEOUT_MS,
       // Sync mode already returns the answer, so only background runs notify by default.
-      notify: options.notify ?? (mode === 'background' ? 'queue' : 'none')
+      notify: options.notify ?? (mode === 'background' ? 'queue' : 'none'),
+      parentSession: options.parentSession
     }
     const rpc = new PiRpcClient()
     const internal: Internal = {
@@ -255,10 +334,14 @@ export class SubagentManager {
   }
 
   private async waitReady(internal: Internal): Promise<void> {
+    const rpc = internal.rpc
+    if (!rpc) return
     const started = Date.now()
     while (Date.now() - started < READY_TIMEOUT_MS) {
       try {
-        await internal.rpc.request('get_state', {}, 3000)
+        const state = await rpc.request<{ data?: { sessionFile?: string } }>('get_state', {}, 3000)
+        const file = state.data?.sessionFile
+        if (typeof file === 'string') internal.record.sessionFile = file
         return
       } catch {
         await new Promise((resolve) => setTimeout(resolve, 250))
@@ -266,7 +349,7 @@ export class SubagentManager {
     }
     internal.record.status = 'error'
     internal.record.error = '子代理未在 30s 内就绪'
-    internal.rpc.stop()
+    rpc.stop()
     this.finish(internal)
   }
 
@@ -308,8 +391,10 @@ export class SubagentManager {
   /** Pull the transcript after a turn settles; only assistant text is kept. */
   private async collect(internal: Internal): Promise<void> {
     const record = internal.record
+    const rpc = internal.rpc
+    if (!rpc) return
     try {
-      const response = await internal.rpc.request<{ data?: { messages?: Array<Record<string, unknown>> } }>(
+      const response = await rpc.request<{ data?: { messages?: Array<Record<string, unknown>> } }>(
         'get_messages',
         {},
         10_000
@@ -335,7 +420,7 @@ export class SubagentManager {
       // transcript is best effort
     }
     try {
-      const stats = await internal.rpc.request<{ data?: { tokens?: { total?: number } } }>(
+      const stats = await rpc.request<{ data?: { tokens?: { total?: number } } }>(
         'get_session_stats',
         {},
         5000
@@ -365,6 +450,7 @@ export class SubagentManager {
 
   private resetIdle(internal: Internal): void {
     if (internal.idleTimer) clearTimeout(internal.idleTimer)
+    if (internal.record.restored) return
     if (internal.record.status !== 'idle') return
     internal.idleTimer = setTimeout(() => {
       void this.stop(internal.record.id, true, '空闲超时，已自动回收')
@@ -400,6 +486,7 @@ export class SubagentManager {
   async wait(id: string, timeoutMs: number): Promise<{ record: SubagentRecord; timedOut: boolean }> {
     const internal = this.items.get(id)
     if (!internal) throw Object.assign(new Error(`未知子代理：${id}`), { code: 'UNKNOWN_SUBAGENT' })
+    if (!internal.rpc) return { record: internal.record, timedOut: false }
     if (internal.record.status === 'idle' || internal.record.status === 'stopped' || internal.record.status === 'error') {
       return { record: internal.record, timedOut: false }
     }
@@ -410,6 +497,12 @@ export class SubagentManager {
   async prompt(id: string, text: string, mode: 'interrupt' | 'steer' | 'follow-up'): Promise<SubagentRecord> {
     const internal = this.items.get(id)
     if (!internal) throw Object.assign(new Error(`未知子代理：${id}`), { code: 'UNKNOWN_SUBAGENT' })
+    if (!internal.rpc) {
+      throw Object.assign(
+        new Error(`子代理 ${id} 是历史记录（应用已重启），进程已结束，无法再发送消息。需要继续就在同一目录用 start_subagent 重新起一个。`),
+        { code: 'SUBAGENT_GONE' }
+      )
+    }
     if (internal.record.status === 'stopped' || internal.record.status === 'error') {
       throw Object.assign(new Error(`子代理已结束（${internal.record.status}）`), { code: 'SUBAGENT_NOT_RUNNING' })
     }
@@ -432,12 +525,15 @@ export class SubagentManager {
     const internal = this.items.get(id)
     if (!internal) throw Object.assign(new Error(`未知子代理：${id}`), { code: 'UNKNOWN_SUBAGENT' })
     if (internal.record.status === 'stopped') return internal.record
-    try {
-      await internal.rpc.request('abort', {}, 5000)
-    } catch {
-      // already idle
+    const rpc = internal.rpc
+    if (rpc) {
+      try {
+        await rpc.request('abort', {}, 5000)
+      } catch {
+        // already idle
+      }
+      rpc.stop()
     }
-    internal.rpc.stop()
     internal.record.status = 'stopped'
     internal.record.runtimeMs = internal.record.startedAt ? Date.now() - internal.record.startedAt : undefined
     if (reason) internal.record.error = reason
@@ -453,8 +549,10 @@ export class SubagentManager {
   stopAll(sync = false): void {
     for (const internal of this.items.values()) {
       if (internal.record.status === 'stopped') continue
-      if (sync) internal.rpc.killNow()
-      else internal.rpc.stop()
+      if (internal.rpc) {
+        if (sync) internal.rpc.killNow()
+        else internal.rpc.stop()
+      }
       internal.record.status = 'stopped'
       this.finish(internal)
     }
@@ -472,7 +570,6 @@ export class SubagentManager {
     }
   }
 }
-
 function extractText(message: Record<string, unknown>): string {
   const content = message.content
   if (typeof content === 'string') return content

@@ -23,6 +23,8 @@ export interface ApiDeps {
   >
   defaultMode: () => 'sync' | 'background'
   desktopTools: () => boolean
+  /** Session file of the main conversation, so a subagent can be traced back to it. */
+  parentSession?: () => string | undefined
 }
 
 const SUBAGENT_ID = /^\/subagents\/([^/]+)(?:\/([a-z]+))?$/
@@ -114,7 +116,8 @@ export function createApiHandler(deps: ApiDeps): (request: ApiRequest) => Promis
             body.notify === 'queue' || body.notify === 'wake' || body.notify === 'none'
               ? body.notify
               : undefined,
-          desktopTools: deps.desktopTools()
+          desktopTools: deps.desktopTools(),
+          parentSession: deps.parentSession?.()
         })
         return ok({
           subagent: result.record,
@@ -128,7 +131,24 @@ export function createApiHandler(deps: ApiDeps): (request: ApiRequest) => Promis
     }
 
     if (path === '/subagents' && method === 'GET') {
-      return ok({ subagents: deps.subagents().list() })
+      const q = (query.get('q') ?? '').trim().toLowerCase()
+      const status = query.get('status') ?? undefined
+      const agent = query.get('agent') ?? undefined
+      const limit = Number(query.get('limit') ?? 0)
+      const all = deps.subagents().list()
+      let list = all
+      if (status) list = list.filter((record) => record.status === status)
+      if (agent) list = list.filter((record) => record.agent === agent)
+      if (q) {
+        list = list.filter((record) =>
+          `${record.id} ${record.label ?? ''} ${record.agent ?? ''} ${record.finalText ?? ''} ${record.cwd}`
+            .toLowerCase()
+            .includes(q)
+        )
+      }
+      list = list.slice().sort((a, b) => b.createdAt - a.createdAt)
+      if (Number.isFinite(limit) && limit > 0) list = list.slice(0, limit)
+      return ok({ total: all.length, subagents: list })
     }
 
     const match = SUBAGENT_ID.exec(path)

@@ -64,7 +64,8 @@ function statusLine(record) {
     record.mode ? `· ${record.mode}` : '',
     record.model ? `· ${record.model.provider}/${record.model.id}` : '',
     duration(record.runtimeMs) ? `· ${duration(record.runtimeMs)}` : '',
-    tokens(record.tokens) ? `· ${tokens(record.tokens)}` : ''
+    tokens(record.tokens) ? `· ${tokens(record.tokens)}` : '',
+    record.restored ? '· 历史' : ''
   ]
   return parts.filter(Boolean).join(' ')
 }
@@ -140,6 +141,9 @@ function renderSubagent(record, options = {}) {
   if (record.cwd) lines.push(`cwd: ${record.cwd}`)
   if (record.tools?.length) lines.push(`tools: ${record.tools.join(', ')}`)
   if (record.error) lines.push(`错误：${record.error}`)
+  if (record.restored) {
+    lines.push('历史记录：进程已结束，结果仍可读取，但不能再发消息（需要继续就在同一目录重新 start_subagent）。')
+  }
 
   if (include.includes('messages')) {
     lines.push('', `### 消息（游标 ${record.messages?.length ?? 0}）`, renderMessages(record, options.since ?? 0))
@@ -353,8 +357,68 @@ export const getSubagent = {
   }
 }
 
-export const waitSubagent = {
-  name: 'wait_subagent',
+export const listSubagents = {
+  name: 'list_subagents',
+  title: 'List subagent runs',
+  description:
+    'Every subagent this app has run, newest first — including runs from before a restart. Use it ' +
+    'to find an earlier result by label or task text, then `get_subagent` for the full answer. ' +
+    'Filter with `q` (matches id, label, preset, cwd and final answer), `status` or `agent`.',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      q: { type: 'string', description: 'Free-text filter over id, label, preset, cwd, final answer.' },
+      status: {
+        type: 'string',
+        enum: ['starting', 'streaming', 'idle', 'error', 'stopped'],
+        description: 'Only runs in this state. `idle` means it finished and has an answer.'
+      },
+      agent: { type: 'string', description: 'Only runs started from this preset id.' },
+      limit: { type: 'integer', minimum: 1, maximum: 50, default: 10 },
+      format: { type: 'string', enum: ['md', 'json'], default: 'md' }
+    },
+    additionalProperties: false
+  },
+  async call(args, context) {
+    const params = new URLSearchParams()
+    if (typeof args?.q === 'string' && args.q.trim()) params.set('q', args.q.trim())
+    if (typeof args?.status === 'string') params.set('status', args.status)
+    if (typeof args?.agent === 'string') params.set('agent', args.agent)
+    params.set('limit', String(args?.limit ?? 10))
+    const response = await callBridge(context, 'GET', `/subagents?${params.toString()}`)
+    if (args?.format === 'json') {
+      return text(JSON.stringify({ total: response.total, subagents: response.subagents }, null, 2))
+    }
+    const runs = response.subagents ?? []
+    if (runs.length === 0) {
+      return text(
+        response.total
+          ? `没有匹配的子代理（共 ${response.total} 个记录），放宽 q / status 再试。`
+          : '还没有任何子代理记录。'
+      )
+    }
+    const lines = [`子代理记录（${runs.length}/${response.total ?? runs.length}）：`]
+    for (const record of runs) {
+      const head = [
+        record.id,
+        record.status,
+        record.label ? `· ${record.label}` : '',
+        record.agent ? `· ${record.agent}` : '',
+        duration(record.runtimeMs) ? `· ${duration(record.runtimeMs)}` : '',
+        tokens(record.tokens) ? `· ${tokens(record.tokens)}` : '',
+        record.restored ? '· 历史' : ''
+      ]
+        .filter(Boolean)
+        .join(' ')
+      const gist = (record.finalText ?? record.error ?? '').replace(/\s+/g, ' ').trim().slice(0, 120)
+      lines.push(`- ${head}${gist ? ` — ${gist}` : ''}`)
+    }
+    lines.push('', '详情用 `get_subagent`（id 同上）。历史记录的进程已结束，只能读结果。')
+    return text(lines.join('\n'))
+  }
+}
+
+export const waitSubagent = {  name: 'wait_subagent',
   title: 'Wait for a subagent',
   description:
     'Wait until the subagent stops running (or the timeout passes) and return its final answer. ' +
@@ -484,6 +548,7 @@ export const subagentTools = [
   searchAgents,
   listModels,
   startSubagent,
+  listSubagents,
   getSubagent,
   waitSubagent,
   sendSubagentPrompt,

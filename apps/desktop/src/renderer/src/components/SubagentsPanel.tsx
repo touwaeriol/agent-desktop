@@ -48,10 +48,21 @@ export function SubagentsPanel({
   const [mode, setMode] = useState<'steer' | 'follow-up' | 'interrupt'>('steer')
   const [busy, setBusy] = useState(false)
   const [showMessages, setShowMessages] = useState(false)
+  const [query, setQuery] = useState('')
+
+  const visible = useMemo(() => {
+    const needle = query.trim().toLowerCase()
+    if (!needle) return records
+    return records.filter((record) =>
+      `${record.id} ${record.label ?? ''} ${record.agent ?? ''} ${record.finalText ?? ''} ${record.cwd}`
+        .toLowerCase()
+        .includes(needle)
+    )
+  }, [records, query])
 
   const selected = useMemo(
-    () => records.find((record) => record.id === selectedId) ?? records[0],
-    [records, selectedId]
+    () => visible.find((record) => record.id === selectedId) ?? visible[0],
+    [visible, selectedId]
   )
 
   useEffect(() => {
@@ -101,7 +112,13 @@ export function SubagentsPanel({
         ) : (
           <div className="subagents-body">
             <div className="subagents-list">
-              {records.map((record) => (
+              <input
+                className="subagents-search"
+                value={query}
+                placeholder="搜索 id / 名称 / 结论"
+                onChange={(event) => setQuery(event.target.value)}
+              />
+              {visible.map((record) => (
                 <button
                   key={record.id}
                   className={`subagent-row ${record.id === selected?.id ? 'active' : ''}`}
@@ -112,6 +129,7 @@ export function SubagentsPanel({
                     <span className="subagent-row-head">
                       {record.label ?? record.agent ?? record.id}
                       {record.label && <span className="subagent-row-id">{record.id}</span>}
+                      {record.restored && <span className="subagent-tag">历史</span>}
                     </span>
                     <span className="subagent-row-sub">
                       {STATUS_LABEL[record.status]}
@@ -122,6 +140,7 @@ export function SubagentsPanel({
                   </span>
                 </button>
               ))}
+              {visible.length === 0 && <div className="subagent-empty">没有匹配的记录</div>}
             </div>
 
             {selected && (
@@ -144,6 +163,21 @@ export function SubagentsPanel({
                 <div className="subagent-cwd" title={selected.cwd}>
                   {selected.cwd}
                 </div>
+
+                {selected.sessionFile && (
+                  <div className="subagent-session">
+                    <span className="subagent-session-label">会话</span>
+                    <span className="subagent-session-path" title={selected.sessionFile}>
+                      {selected.sessionFile.split(/[\\/]/).pop()}
+                    </span>
+                    <button
+                      className="ghost"
+                      onClick={() => void window.pi.revealSubagentSession(selected.sessionFile!)}
+                    >
+                      定位
+                    </button>
+                  </div>
+                )}
 
                 {selected.error && <div className="message-error">{selected.error}</div>}
 
@@ -201,54 +235,67 @@ export function SubagentsPanel({
                 )}
 
                 <div className="subagent-actions">
-                  {draft.trim() && (
-                    <div className="subagent-modes">
-                      {(
-                        [
-                          ['steer', '引导（当前回合后注入）'],
-                          ['follow-up', '追加（本回合结束后）'],
-                          ['interrupt', '打断后重答']
-                        ] as const
-                      ).map(([value, label]) => (
-                        <button
-                          key={value}
-                          className={`ghost ${mode === value ? 'active' : ''}`}
-                          onClick={() => setMode(value)}
-                        >
-                          {label}
-                        </button>
-                      ))}
+                  {selected.restored ? (
+                    <div className="subagent-empty">
+                      历史记录：进程已结束，只能查看结果。需要继续就在同一目录重新起一个子代理。
                     </div>
+                  ) : (
+                    <>
+                      {draft.trim() && (
+                        <div className="subagent-modes">
+                          {(
+                            [
+                              ['steer', '引导（当前回合后注入）'],
+                              ['follow-up', '追加（本回合结束后）'],
+                              ['interrupt', '打断后重答']
+                            ] as const
+                          ).map(([value, label]) => (
+                            <button
+                              key={value}
+                              className={`ghost ${mode === value ? 'active' : ''}`}
+                              onClick={() => setMode(value)}
+                            >
+                              {label}
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                      <div className="subagent-compose">
+                        <input
+                          value={draft}
+                          placeholder="给它发一条消息…"
+                          onChange={(event) => setDraft(event.target.value)}
+                          onKeyDown={(event) => {
+                            if (event.key === 'Enter' && !event.shiftKey) {
+                              event.preventDefault()
+                              void send()
+                            }
+                          }}
+                          disabled={selected.status === 'stopped' || selected.status === 'error'}
+                        />
+                        <button
+                          className="ghost"
+                          onClick={() => void send()}
+                          disabled={
+                            !draft.trim() ||
+                            busy ||
+                            selected.status === 'stopped' ||
+                            selected.status === 'error'
+                          }
+                        >
+                          <RefreshIcon size={13} /> 发送
+                        </button>
+                        <button
+                          className="ghost danger"
+                          onClick={() => void stop()}
+                          disabled={busy || !isRunning(selected)}
+                          title="停止子代理"
+                        >
+                          <StopIcon size={13} /> 停止
+                        </button>
+                      </div>
+                    </>
                   )}
-                  <div className="subagent-compose">
-                    <input
-                      value={draft}
-                      placeholder="给它发一条消息…"
-                      onChange={(event) => setDraft(event.target.value)}
-                      onKeyDown={(event) => {
-                        if (event.key === 'Enter' && !event.shiftKey) {
-                          event.preventDefault()
-                          void send()
-                        }
-                      }}
-                      disabled={selected.status === 'stopped' || selected.status === 'error'}
-                    />
-                    <button
-                      className="ghost"
-                      onClick={() => void send()}
-                      disabled={!draft.trim() || busy || selected.status === 'stopped' || selected.status === 'error'}
-                    >
-                      <RefreshIcon size={13} /> 发送
-                    </button>
-                    <button
-                      className="ghost danger"
-                      onClick={() => void stop()}
-                      disabled={busy || !isRunning(selected)}
-                      title="停止子代理"
-                    >
-                      <StopIcon size={13} /> 停止
-                    </button>
-                  </div>
                 </div>
               </div>
             )}
