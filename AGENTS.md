@@ -46,8 +46,7 @@ npm run typecheck    # node + web 两个 tsconfig 分别检查
 ## Conversation layout
 
 - assistant 消息不再有头像，正文直接铺开（文档式）；用户消息是右对齐气泡，图片在气泡上方（`.message.user` 为 column + align-items flex-end）。
-- 工具调用按“活动行”聚合：`Activity` 把同一轮的工具按 read/write/bash/search/other 汇总成 `读取 2 个文件 · 运行 1 条命令 ›`，点开才显示具体 `.tool-card`；运行中/失败才显示圆点。
-- 连续多轮的「只有思考 + 工具、没有正文」的 assistant 条目会在渲染时合并（`Conversation.tsx` 的 `groupRounds`）：pi 每轮一次请求，读十个文件就是十条 assistant 消息，不合并的话记录看起来像「思考→工具→思考→工具」。带正文的条目、运行中的条目、含 `start_subagent` 的条目不合并。这只是显示层合并，`items` 本身仍是逐条（流式 patch 依赖最后一条）。
+- 工具调用按“活动行”聚合：`Activity` 把同一轮的工具按 read/write/bash/search/other 汇总成 `读取 2 个文件 · 运行 1 条命令 ›`，点开才显示具体 `.tool-card`；运行中/失败才显示圆点。**一轮 = 一条 assistant 消息**：不要为了“看起来少一点”去跨消息合并思考块或工具，模型真的一次发多个调用时，聚合行自然会变长。
 - 每轮结束的统计行（`.run-status`）来自 `App.tsx` 的 `run` 状态：`agent_start` 记开始时间、`tool_execution_start/end` 加减运行中数量、`agent_settled` 记结束时间并通过 `pi:session-stats`（RPC `get_session_stats`）取 `tokens.total`。1 秒定时器只为刷新计时，不要用它做别的。
 
 ## Session view, thinking, model allowlist
@@ -133,7 +132,7 @@ npm run typecheck    # node + web 两个 tsconfig 分别检查
 - 注册方式选扩展 + `--extension`，**不要**写 `~/.pi/agent/mcp.json`：这样桌面端的工具不会污染终端里的 pi，桥接端口/令牌也不用每次启动改写用户配置。`mcpArgs()` 在总开关关闭时传 `--no-mcp`，桌面工具关闭时不传 `--extension`。
 - **MCP 不能提供系统提示词**：协议只有 `initialize.instructions`（+ `prompts` 原语），pi 的 MCP 客户端只读 `instructions`，且只用于 codemode 命名空间的 `describeNamespace()` 和 `mcp_servers` 段——而 `mcp_servers` 段由 `renderServersSection()` 里的 `hasIndirectTools` 过滤，**`direct` 暴露的服务器不会出现在里面**（每服务器也只取第一行、≤250 字符、整段 ≤4096）。`prompts/list`、`prompts/get`、`sampling`、`elicitation` pi 都没实现（client 只声明 `roots`）。所以 `server.mjs` 里的 `instructions` 在 direct 下对模型不可见，只对 codemode 有意义。
 - 因此模型的使用引导由扩展注入：`desktop-mcp.js` 挂 `before_agent_start`，往 `event.systemPromptOptions.sections.desktop_tools` 写一段文案。**必须用 `pi.getActiveTools().includes('mcp__desktop__ask_user_question')` 门控**：只有 MCP 打开、桌面工具打开、服务器真正连上、工具被声明给模型时才注入；否则 `delete sections.desktop_tools`。段名要匹配 `^[a-z][a-z0-9_-]*$` 且不能叫 `preamble`；段内容由 pi 包成 `<desktop_tools>…</desktop_tools>`，不要再手写标签。每轮都会重算，`diffSystemPromptSections` 会把不存在的段 patch 成 null，所以关掉 MCP 后旧段会自动消失，不需要清理会话文件。
-- 扩展还无条件注入 `sections.batching`（`BATCH_GUIDANCE`）：pi 每轮一次模型请求，模型容易「调一个工具想一遍」，这段要求它**先定步骤、再把互不依赖的调用放在同一轮**，并沿用已有计划而不是在调用之间重复推理。它跟工具无关，所以不门控；内容改动要看模型是否真的减少轮数。
+- 扩展还无条件往 `event.systemPromptOptions.promptGuidelines` 里推两条规则（`BATCH_GUIDELINES`）：需要多个互不依赖的调用时**在同一条 assistant 消息里一起发**，以及不要在调用之间重复推理。**用 guidelines 而不是自定义 section**：guidelines 会进系统提示的 `<rules>` 列表，和 pi 自己的规则并排，模型遵守率明显更高（自定义段要模型自己决定去读）。pi 每轮一次模型请求，一次只发一个调用就是多一次往返——实测旧会话 131 轮里平均只有 1.2 个调用/轮，这就是「一工具一思考」的来源。
 - 路径解析：打包版从 `process.resourcesPath/extension|mcp` 取（`electron-builder.yml` 的 `extraResources` 负责拷贝 `resources/extension` 与 `packages/mcp-core` 的 `server.mjs` + `tools/**`），开发版用 `searchUp` 从 `app.getAppPath()` 向上找 `resources/extension/desktop-mcp.js` 和 `packages/mcp-core/server.mjs`。改了资源位置要同时改这两处。
 - 设置 → MCP（`McpPanel.tsx`）管理 `~/.pi/agent/mcp.json`：总开关（`config.json.mcp.enabled`）、桌面工具开关（`mcp.desktopTool`）、服务器启用/删除/新增（新增接受一段 JSON，需含 `command` 或 `url`）。任何变更都会 `reloadPiConfig()` 重启 pi。
 - 项目级 `.pi/mcp.json` 只读展示并合并到列表（同名覆盖用户级），仅在信任项目时由 pi 生效。

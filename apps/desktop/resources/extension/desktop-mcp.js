@@ -19,25 +19,20 @@ const WEB_FETCH_TOOL = 'mcp__web__web_fetch'
 const PROMPT_SECTION = 'desktop_tools'
 const AGENTS_SECTION = 'subagents'
 const WEB_SECTION = 'web_tools'
-const BATCH_SECTION = 'batching'
 
 /**
- * Every run gets this one. pi asks the model once per assistant turn, so "one tool call, one thought"
- * turns a simple job into a dozen round trips; the section pushes back toward a plan followed by a
- * batch of independent calls, and toward carrying that plan forward instead of re-deriving it.
+ * Guidelines, not a section: `systemPromptOptions.promptGuidelines` are rendered as bullets in the
+ * system prompt's `<rules>` block, right next to pi's own rules. A model follows that list far more
+ * reliably than a tag it has to decide to read.
+ *
+ * pi sends one model request per turn and executes every tool call in that response, so the cost of
+ * "one tool call, one thought" is one extra round trip per call — measured on a real session,
+ * roughly 1.2 calls per assistant message over 131 turns.
  */
-const BATCH_GUIDANCE = [
-  'Work in batches. Once a step is clear, issue every independent tool call it needs in the same turn:',
-  'parallel reads, searches, status checks and edits that do not depend on each other belong together.',
-  'One round trip for several calls beats one round trip per call.',
-  '',
-  'Do not re-plan between mechanical steps. When a result is what you expected, continue the plan you',
-  'already have instead of restating it: repeated reasoning between calls is the most expensive way to',
-  'make no progress. Keep one running plan for the task and amend it in place.',
-  '',
-  'Think again only when a result contradicts the plan, a real decision appears, or the next step is',
-  'irreversible — and then say what changed, so the next batch starts from it.'
-].join('\n')
+const BATCH_GUIDELINES = [
+  'When a step needs several independent tool calls, send them together in one response (multiple tool calls in one assistant message). One call per turn costs an extra round trip and another round of reasoning for no gain.',
+  'Keep working from the plan you already have instead of restating it between calls. Think again only when a result contradicts the plan, a real decision appears, or the next step is irreversible.'
+]
 
 /**
  * Guidance for the model. An MCP server cannot supply a system prompt: pi only uses a server's
@@ -218,8 +213,14 @@ export default function desktopMcp(pi) {  const url = process.env.AGENT_DESKTOP_
       sections[WEB_SECTION] = WEB_GUIDANCE
     } else delete sections[WEB_SECTION]
 
-    // Unconditional: batching is about how the run uses whatever tools it has.
-    sections[BATCH_SECTION] = BATCH_GUIDANCE
+    // Unconditional: batching is about how the run uses whatever tools it has. Guidelines land in
+    // `<rules>`; pushing the same strings twice would duplicate them, so check first.
+    const guidelines = event.systemPromptOptions.promptGuidelines
+    if (Array.isArray(guidelines)) {
+      for (const rule of BATCH_GUIDELINES) {
+        if (!guidelines.includes(rule)) guidelines.push(rule)
+      }
+    }
 
     reportTools()
   })
