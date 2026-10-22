@@ -548,15 +548,6 @@ export function Sidebar({
         </button>
       </div>
 
-      <div className="mode-switch" role="tablist">
-        <button className="mode" disabled title="Cowork 模式暂未接入">
-          Cowork
-        </button>
-        <button className="mode active" role="tab" aria-selected="true">
-          Code
-        </button>
-      </div>
-
       {menuOpen && (
         <div className="sidebar-filter" ref={menuRef}>
           <button
