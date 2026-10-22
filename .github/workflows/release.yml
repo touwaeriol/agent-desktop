@@ -23,10 +23,19 @@ jobs:
         run: npm run typecheck
       - name: Build renderer and main
         run: npm run build
-      - name: Package and publish GitHub Release
+      - name: Package installer
+        run: npx electron-builder --config electron-builder.yml --win --publish never
+      - name: Publish GitHub Release
+        shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: npx electron-builder --config electron-builder.yml --win --publish always
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            release/*.exe \
+            release/latest.yml \
+            release/*.blockmap \
+            --title "Agent Desktop ${GITHUB_REF_NAME}" \
+            --generate-notes
       - name: Upload installer artifact
         uses: actions/upload-artifact@v4
         with:
