@@ -1,18 +1,17 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { PiStatus, SessionSummary } from '@shared/types'
 import {
-  ArchiveIcon,
   ArrowLeftIcon,
   ArrowRightIcon,
   BriefcaseIcon,
   CheckIcon,
   ChevronIcon,
   CloseIcon,
+  EllipsisIcon,
   FilterIcon,
   FolderIcon,
   MenuIcon,
   PanelIcon,
-  PinIcon,
   PlusIcon,
   SearchIcon
 } from './Icons'
@@ -199,10 +198,12 @@ export function Sidebar({
   const [moreOpen, setMoreOpen] = useState(false)
   const [section, setSection] = useState<'environment' | 'group' | 'sort' | null>(null)
   const [searchKey, setSearchKey] = useState<string>()
+  const [sessionMenu, setSessionMenu] = useState<string>()
   const [filterKey, setFilterKey] = useState<string>()
   const [projectQueries, setProjectQueries] = useState<Record<string, string>>({})
   const [projectStatus, setProjectStatus] = useState<Record<string, StatusFilter>>({})
   const menuRef = useRef<HTMLDivElement>(null)
+  const sessionMenuRef = useRef<HTMLDivElement>(null)
   const moreRef = useRef<HTMLDivElement>(null)
   const projectFilterRef = useRef<HTMLDivElement>(null)
 
@@ -239,6 +240,22 @@ export function Sidebar({
         .filter((session): session is SessionSummary => Boolean(session)),
     [pinned, sessions]
   )
+
+  useEffect(() => {
+    if (!sessionMenu) return
+    const onMouseDown = (event: MouseEvent): void => {
+      if (!sessionMenuRef.current?.contains(event.target as Node)) setSessionMenu(undefined)
+    }
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape') setSessionMenu(undefined)
+    }
+    document.addEventListener('mousedown', onMouseDown)
+    document.addEventListener('keydown', onKeyDown)
+    return () => {
+      document.removeEventListener('mousedown', onMouseDown)
+      document.removeEventListener('keydown', onKeyDown)
+    }
+  }, [sessionMenu])
 
   useEffect(() => {
     if (!menuOpen) return
@@ -837,26 +854,42 @@ export function Sidebar({
                             )}
                           </span>
                         </div>
-                        <button
-                          className={`session-archive ${pinned.includes(session.path) ? 'pinned' : ''}`}
-                          title={pinned.includes(session.path) ? '取消置顶' : '置顶'}
-                          onClick={(event) => {
-                            event.stopPropagation()
-                            togglePin(session.path)
-                          }}
-                        >
-                          <PinIcon size={12} />
-                        </button>
-                        <button
-                          className="session-archive"
-                          title={isArchived ? '取消归档' : '归档'}
-                          onClick={(event) => {
-                            event.stopPropagation()
-                            toggleArchive(session.path)
-                          }}
-                        >
-                          <ArchiveIcon size={12} />
-                        </button>
+                        <div className="session-menu-wrap" ref={sessionMenu === session.path ? sessionMenuRef : undefined}>
+                          <button
+                            className={`session-menu-btn ${sessionMenu === session.path ? 'open' : ''}`}
+                            title="更多操作"
+                            onClick={(event) => {
+                              event.stopPropagation()
+                              setSessionMenu((current) =>
+                                current === session.path ? undefined : session.path
+                              )
+                            }}
+                          >
+                            <EllipsisIcon size={13} />
+                          </button>
+                          {sessionMenu === session.path && (
+                            <div className="session-menu" onClick={(event) => event.stopPropagation()}>
+                              <button
+                                className="session-menu-item"
+                                onClick={() => {
+                                  togglePin(session.path)
+                                  setSessionMenu(undefined)
+                                }}
+                              >
+                                {pinned.includes(session.path) ? '取消置顶' : '置顶'}
+                              </button>
+                              <button
+                                className="session-menu-item"
+                                onClick={() => {
+                                  toggleArchive(session.path)
+                                  setSessionMenu(undefined)
+                                }}
+                              >
+                                {isArchived ? '取消归档' : '归档'}
+                              </button>
+                            </div>
+                          )}
+                        </div>
                       </div>
                     )
                   })}

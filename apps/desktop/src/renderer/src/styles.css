@@ -437,6 +437,7 @@ button:disabled {
 }
 
 .session-item {
+  position: relative;
   width: 100%;
   display: flex;
   align-items: center;
@@ -463,24 +464,69 @@ button:disabled {
   opacity: 0.6;
 }
 
-.session-archive {
-  flex: 0 0 18px;
-  width: 18px;
-  height: 18px;
+.session-menu-wrap {
+  position: absolute;
+  right: 4px;
+  top: 50%;
+  transform: translateY(-50%);
+  /* Own stacking context: the dropdown must paint above the rows below it. */
+  z-index: 50;
+}
+
+.session-menu-btn {
   display: grid;
   place-items: center;
+  width: 18px;
+  height: 18px;
   border-radius: 5px;
   color: var(--faint);
+  background: var(--bg-sidebar);
   opacity: 0;
 }
 
-.session-item:hover .session-archive,
-.session-item:focus-within .session-archive {
+.session-item:hover .session-menu-btn,
+.session-item:focus-within .session-menu-btn,
+.session-menu-btn.open {
   opacity: 1;
 }
 
-.session-archive:hover {
+.session-menu-btn:hover,
+.session-menu-btn.open {
   background: var(--border-soft);
+  color: var(--text);
+}
+
+/* The time is only readable while the row is not hovered: the menu button sits on top of it. */
+.session-item:hover .session-meta {
+  opacity: 0;
+}
+
+.session-menu {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 2px);
+  z-index: 40;
+  display: flex;
+  flex-direction: column;
+  min-width: 128px;
+  padding: 4px;
+  border-radius: 9px;
+  border: 1px solid var(--border-strong);
+  background: var(--bg-elev);
+  box-shadow: 0 16px 32px rgba(0, 0, 0, 0.28);
+}
+
+.session-menu-item {
+  padding: 5px 8px;
+  border-radius: 6px;
+  color: var(--text-dim);
+  font-size: 11.6px;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.session-menu-item:hover {
+  background: var(--bg-hover);
   color: var(--text);
 }
 
@@ -514,6 +560,7 @@ button:disabled {
   font-size: 10px;
   color: var(--faint);
   white-space: nowrap;
+  transition: opacity 0.1s ease;
 }
 
 .session-cwd {
