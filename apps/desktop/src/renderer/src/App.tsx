@@ -193,8 +193,15 @@ export default function App(): React.JSX.Element {
     localStorage.getItem('pi-desktop-theme') === 'light' ? 'light' : 'dark'
   )
 
+  /**
+   * Last *committed* status. Written from an effect, not during render: a render that React throws
+   * away would otherwise leave the ref holding a `busy` value the window never showed, and every
+   * `piBusy()` check would then disagree with the status the flush effect is looking at.
+   */
   const statusRef = useRef(status)
-  statusRef.current = status
+  useEffect(() => {
+    statusRef.current = status
+  }, [status])
   /** pi refuses prompts while it runs or compacts, so both count as busy everywhere. */
   const piBusy = useCallback(
     () => Boolean(statusRef.current.isStreaming || statusRef.current.compacting),
@@ -750,7 +757,8 @@ export default function App(): React.JSX.Element {
    * the second item races the first one into pi while `isStreaming` is still false. `queueTick` is
    * bumped after a queued command finishes, because a command (e.g. `/clear`) does not change
    * `isStreaming` and the remaining items would otherwise wait for the next run to end. `btwChat`
-   * is here for the same reason: closing the side chat is what unblocks the queue.
+   * is here for the same reason: closing the side chat is what unblocks the queue. A failed attempt
+   * re-arms the effect itself, because `busy` is an opinion that can be wrong (see `restore`).
    */
   useEffect(() => {
     // `compacting` counts as busy: pi refuses prompts while it rewrites the context.
@@ -760,19 +768,35 @@ export default function App(): React.JSX.Element {
     const next = queueRef.current[0]
     if (!next) return
     setQueued((prev) => prev.filter((item) => item.id !== next.id))
-    const restore = (): void =>
+    /**
+     * Put the item back and arrange the next attempt.
+     *
+     * The item left the queue and came back without any status change, so this effect will not run
+     * again by itself — that is how a queued command could sit there forever while the run was long
+     * over. Ask main for its status (the push may have been missed) and retry after a pause.
+     */
+    const restore = (): void => {
       setQueued((prev) => (prev.some((item) => item.id === next.id) ? prev : [next, ...prev]))
+      void window.pi.getStatus().then(setStatus)
+      window.setTimeout(() => setQueueTick((value) => value + 1), 2000)
+    }
     if (next.command) {
       // `queued: true` keeps a command that is still blocked from re-queueing itself forever.
-      void runCommand(next.text, { queued: true }).then((handled) => {
-        if (!handled) restore()
-        else setQueueTick((value) => value + 1)
-      })
+      void runCommand(next.text, { queued: true }).then(
+        (handled) => {
+          if (!handled) restore()
+          else setQueueTick((value) => value + 1)
+        },
+        () => restore()
+      )
       return
     }
-    void deliver(next.text, next.images).then((ok) => {
-      if (!ok) restore()
-    })
+    void deliver(next.text, next.images).then(
+      (ok) => {
+        if (!ok) restore()
+      },
+      () => restore()
+    )
   }, [status.isStreaming, status.compacting, status.phase, deliver, runCommand, queueTick, btwChat])
 
   const askBtw = useCallback(async () => {

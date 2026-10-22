@@ -162,7 +162,10 @@ const AUTO_COMPACT_RATIO = 0.9
 
 function autoCompactRatio(): number {
   const ratio = desktopConfig.autoCompact?.ratio
-  return typeof ratio === 'number' && ratio > 0.3 && ratio < 0.99 ? ratio : AUTO_COMPACT_RATIO
+  // An explicit `/autocompact <tokens>` is stored as a ratio, so the accepted range has to cover
+  // small thresholds too: rejecting them made the settings row claim 90% right after the user asked
+  // for something else, and the next restart silently moved the trigger point back.
+  return typeof ratio === 'number' && ratio > 0.005 && ratio < 0.995 ? ratio : AUTO_COMPACT_RATIO
 }
 
 /**
@@ -789,8 +792,25 @@ async function waitForReady(): Promise<Record<string, unknown>> {
   )
 }
 
-async function startPi(cwd?: string, extraArgs: string[] = []): Promise<PiStatus> {
-  if (starting) return status
+/**
+ * The in-flight `startPi`, if any.
+ *
+ * Returning the *current* status for a second caller while a start was running handed back
+ * `phase: 'starting'`, and nothing ever moved it to `ready` for that caller: the window then waits
+ * forever, which also parks the message queue (it only flushes in `ready`).
+ */
+let startPromise: Promise<PiStatus> | undefined
+
+function startPi(cwd?: string, extraArgs: string[] = []): Promise<PiStatus> {
+  if (startPromise) return startPromise
+  const run = runStart(cwd, extraArgs).finally(() => {
+    if (startPromise === run) startPromise = undefined
+  })
+  startPromise = run
+  return run
+}
+
+async function runStart(cwd?: string, extraArgs: string[] = []): Promise<PiStatus> {
   starting = true
   await applySystemProxy()
   cancelPendingAsks('pi 已重启')
@@ -922,6 +942,22 @@ async function refreshState(): Promise<void> {
   } catch {
     // ignore transient failures
   }
+}
+
+/**
+ * Re-read the run state while `busy`, because `busy` is the only thing that unblocks the window's
+ * message queue.
+ *
+ * It is set from events, and events can be lost: a compaction that ends while pi is being restarted,
+ * a line dropped by a killed child, an `agent_settled` that never arrived. Nothing else would ever
+ * clear it, and the window would keep showing a finished run as running with every queued message
+ * stranded behind it. `get_state` is cheap, so ask pi directly and let the answer win.
+ */
+function watchRunState(): void {
+  setInterval(() => {
+    if (!busy || !rpc.running) return
+    void refreshState()
+  }, 3000)
 }
 
 function sessionArgs(): string[] {
@@ -1926,6 +1962,7 @@ app.whenReady().then(async () => {
     })
     .catch(() => undefined)
   void startPi(cwd).then(() => syncAutoCompact())
+  watchRunState()
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()

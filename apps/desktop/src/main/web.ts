@@ -709,11 +709,13 @@ async function fetchPage(
   body = body.trim()
   const clipped = truncate(body, maxChars)
   const size = `${(bytes.byteLength / 1024).toFixed(1)} KB${bytesTruncated ? '+' : ''}`
-  const head = `# ${title || target.href}`
-  const meta = `${target.href} · ${contentType || 'unknown'} · ${size}`
+  // Redirects happen server-side; report where the content actually came from.
+  const resolved = response.url || target.href
+  const head = `# ${title || resolved}`
+  const meta = `${resolved} · ${contentType || 'unknown'} · ${size}`
   return {
     text: `${head}\n\n${meta}\n\n---\n\n${clipped || '（页面没有可读正文）'}`,
-    structured: { url: target.href, title, contentType, truncated: clipped.length < body.length }
+    structured: { url: resolved, title, contentType, truncated: clipped.length < body.length }
   }
 }
 
