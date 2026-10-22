@@ -165,6 +165,7 @@ export interface ModelChoice {
   providerName: string
   id: string
   name?: string
+  contextWindow?: number
   configured: boolean
 }
 
@@ -278,12 +279,33 @@ export interface McpEngineState {
   tools: McpToolInfo[]
 }
 
+export interface SubagentPresetInfo {
+  id: string
+  name: string
+  description: string
+  mode?: 'sync' | 'background'
+  tools?: string[]
+  source: 'builtin' | 'user'
+}
+
+export interface SubagentState {
+  enabled: boolean
+  exposure: 'prompt' | 'lazy' | 'hidden'
+  promptLimit: number
+  maxConcurrent: number
+  desktopTools: boolean
+  presets: SubagentPresetInfo[]
+  running: number
+  configPath: string
+}
+
 export interface McpState {
   enabled: boolean
   desktopTool: boolean
   desktopToolAvailable: boolean
   desktopTools: McpToolInfo[]
   engines: McpEngineState[]
+  subagents: SubagentState
   /** Masked Morph API key (`sk-w_…abcd`), never the key itself. */
   morphKeyHint?: string
   servers: McpServerInfo[]
@@ -352,6 +374,9 @@ export interface PiBridge {
   setMcpEngineEnabled(id: McpEngineId, enabled: boolean): Promise<McpState>
   setMcpEngineEntry(id: McpEngineId, entry: string | null): Promise<McpState>
   setMorphApiKey(key: string | null): Promise<McpState>
+  setSubagentsEnabled(enabled: boolean): Promise<McpState>
+  setAgentExposure(exposure: 'prompt' | 'lazy' | 'hidden'): Promise<McpState>
+  openAgentsConfig(): Promise<void>
   refreshMcpEngines(): Promise<McpState>
   buildMcpIndex(): Promise<{ ok: boolean; message: string }>
   setMcpToolEnabled(server: string, tool: string, enabled: boolean): Promise<McpState>

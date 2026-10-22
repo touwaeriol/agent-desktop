@@ -37,7 +37,7 @@ function replyError(id, code, message) {
   send({ jsonrpc: '2.0', id, error: { code, message } })
 }
 
-function post(path, payload, signal) {
+function request(method, path, payload, signal) {
   return new Promise((resolve, reject) => {
     if (!BRIDGE_URL) {
       reject(new Error('Agent Desktop 桥接地址未配置（AGENT_DESKTOP_MCP_URL）'))
@@ -50,14 +50,14 @@ function post(path, payload, signal) {
       reject(new Error(`桥接地址无效：${error.message}`))
       return
     }
-    const body = Buffer.from(JSON.stringify(payload), 'utf8')
+    const body = Buffer.from(payload === undefined ? '' : JSON.stringify(payload), 'utf8')
     const request = http.request(
       {
         protocol: target.protocol,
         hostname: target.hostname,
         port: target.port,
-        path: target.pathname,
-        method: 'POST',
+        path: `${target.pathname}${target.search}`,
+        method,
         headers: {
           'content-type': 'application/json',
           'content-length': body.length,
@@ -69,15 +69,19 @@ function post(path, payload, signal) {
         response.on('data', (chunk) => chunks.push(chunk))
         response.on('end', () => {
           const text = Buffer.concat(chunks).toString('utf8')
-          if (response.statusCode !== 200) {
-            reject(new Error(`桥接返回 ${response.statusCode}：${text.slice(0, 400)}`))
-            return
-          }
+          let parsed
           try {
-            resolve(JSON.parse(text))
+            parsed = JSON.parse(text)
           } catch {
             reject(new Error(`桥接返回了无法解析的内容：${text.slice(0, 400)}`))
+            return
           }
+          // The JSON API reports failures in the body; let the tool format them.
+          if (response.statusCode === 200 || parsed?.ok === false) {
+            resolve(parsed)
+            return
+          }
+          reject(new Error(`桥接返回 ${response.statusCode}：${text.slice(0, 400)}`))
         })
       }
     )
@@ -88,8 +92,13 @@ function post(path, payload, signal) {
       if (signal.aborted) request.destroy(new Error('请求已取消'))
       else signal.addEventListener('abort', () => request.destroy(new Error('请求已取消')), { once: true })
     }
-    request.end(body)
+    if (method === 'GET' || method === 'DELETE') request.end()
+    else request.end(body)
   })
+}
+
+function post(path, payload, signal) {
+  return request('POST', path, payload, signal)
 }
 
 const toolByName = new Map(tools.map((tool) => [tool.name, tool]))
@@ -137,6 +146,7 @@ async function handleRequest(message) {
         reply(
           id,
           await tool.call(params?.arguments, {
+            request,
             post,
             signal: controller.signal,
             log

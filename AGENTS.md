@@ -119,3 +119,17 @@ npm run typecheck    # node + web 两个 tsconfig 分别检查
 - **不要设置 `CODEGRAPH_NO_DAEMON=1`**：那会让服务器独占写锁，用户同时用 IDE/终端的 CodeGraph 时，后启动的一方要么拒绝启动，要么只暴露 3 个工具（`search/node/explore`）。让它代理到共享 daemon 才能共存。`CODEGRAPH_MCP_TOOLS` 必须设，否则默认只暴露 `codegraph_explore`。
 - 引擎会往项目里写 `.codegraph/`（已加进 `.gitignore`）。
 
+### 子代理（subagents）
+
+- **每个子代理是一个独立 `pi --mode rpc` 子进程**，由主进程 `apps/desktop/src/main/subagents.ts` 的 `SubagentManager` 管理；会话目录 `%APPDATA%/agent-desktop/subagents`，不写用户 `~/.pi/agent/sessions`，侧栏也看不到。默认加 `--no-mcp`：子代理不能反问用户（`ask_user_question`），也不能再起子代理。
+- 主会话通过 8 个桌面工具驱动：`search_agents` / `list_models` / `start_subagent` / `get_subagent` / `wait_subagent` / `send_subagent_prompt` / `stop_subagent` / `get_subagent_changes`，实现在 `packages/mcp-core/tools/subagent.mjs`，只做参数校验 + 转发。
+- **工具返回默认是 Markdown**，JSON 只在显式传 `format: "json"` / `include` / `detail` 时返回；`ask_user_question` 也不再附带 JSON 副本。模型不需要解析结构，重复的键名纯属浪费 token。
+- `get_subagent` / `wait_subagent` **默认只返回最终结论 + 改动摘要**，运行中只给状态行；要看过程必须显式传 `include: ["messages"]`（带 `since` 游标）或 `["last"]`。
+- 预设：内置 `explorer` / `reviewer` / `tester` / `worker`（`apps/desktop/src/main/agents.ts`），用户可在 `%APPDATA%/agent-desktop/agents.json` 覆盖或新增；优先级 = 内置 ← 用户文件 ← `start_subagent` 显式参数。预设字段全部落到 pi 启动参数（`--tools`、`--provider/--model`、`--append-system-prompt`）。
+- **预设没有"加载"概念**：`search_agents` 返回 id 后可直接 `start_subagent({ agent })`，不需要像 `tool_search` 那样把 schema 声明进工具列表。`agents.exposure` 只控制要不要提前把列表写进系统提示词（`prompt` / `lazy` / `hidden`，超过 `promptLimit` 自动只列 `visible` 的）。
+- `<agents>` 段由主进程渲染后经 `AGENT_DESKTOP_AGENTS_SECTION` 传给扩展，扩展在 `before_agent_start` 里注入 `sections.subagents`，**门控**：`pi.getActiveTools()` 里有 `mcp__desktop__start_subagent` 才注入，否则删除。
+- 桥内部 API（JSON，给 mcp-core 用）：`GET /agents`、`GET /models`、`POST /subagents`、`GET /subagents/:id`、`POST /subagents/:id/{prompt,stop,wait}`、`GET /subagents/:id/changes`。令牌沿用桥的 Bearer。
+- 控制语义映射到 pi：`interrupt` = `abort` + `prompt`，`steer` = `prompt(..., streamingBehavior: 'steer')`，`follow-up` = `'followUp'`。
+- 限制：并发 4（超出报 `SUBAGENT_LIMIT`，不排队）、单次总运行 15 分钟、空闲 30 分钟回收、sync 最长等 300s 后转后台、应用退出 `stopAll()`。**主会话重启（换模型等）不杀子代理**，它们本来就是独立进程。
+- 工具调用记录取自 `tool_execution_start` 的参数（`path` / `command` / `pattern`），不要用工具输出首行猜路径——`read` 的输出首行是内容，会把路径解析成 `{`。
+- 服务器连接是异步的，扩展在加载后 2.5s / 8s 各补报一次工具清单（`POST /tools`），否则设置页只会看到连接完成前的那部分工具。

@@ -24,6 +24,7 @@ let toolsListener: ((servers: Record<string, McpToolInfo[]>) => void) | null = n
 let mcpHandler:
   | ((engine: string, message: Record<string, unknown>) => Promise<unknown | undefined>)
   | null = null
+let apiHandler: ((request: ApiRequest) => Promise<ApiResponse>) | null = null
 const pending = new Map<string, PendingAsk>()
 
 export function getBridgeInfo(): BridgeInfo {
@@ -233,6 +234,74 @@ function normalizeTools(raw: unknown): Record<string, McpToolInfo[]> {
 }
 
 const MCP_ENDPOINT = /^\/mcp\/([a-z0-9_-]+)$/
+const API_PREFIX = /^\/(agents|models|subagents)(\/.*)?$/
+
+export interface ApiRequest {
+  method: string
+  path: string
+  query: URLSearchParams
+  body: Record<string, unknown>
+}
+
+export interface ApiResponse {
+  status: number
+  body: unknown
+}
+
+/** Internal JSON API behind the desktop tools (agents, models, subagents). */
+export function setApiHandler(
+  handler: ((request: ApiRequest) => Promise<ApiResponse>) | null
+): void {
+  apiHandler = handler
+}
+
+async function handleApi(
+  request: http.IncomingMessage,
+  response: http.ServerResponse
+): Promise<void> {
+  const presented =
+    typeof request.headers.authorization === 'string'
+      ? request.headers.authorization.replace(/^Bearer\s+/i, '')
+      : String(request.headers['x-agent-desktop-token'] ?? '')
+  if (token && presented !== token) {
+    respond(response, 401, { ok: false, code: 'UNAUTHORIZED', message: '桥接令牌无效' })
+    return
+  }
+  if (!apiHandler) {
+    respond(response, 503, { ok: false, code: 'NOT_READY', message: '桥接尚未就绪' })
+    return
+  }
+  const parsed = new URL(request.url ?? '/', 'http://127.0.0.1')
+  let body: Record<string, unknown> = {}
+  if (request.method === 'POST' || request.method === 'PUT') {
+    try {
+      const raw = await readBody(request)
+      body = raw.trim() ? (JSON.parse(raw) as Record<string, unknown>) : {}
+    } catch (error) {
+      respond(response, 400, {
+        ok: false,
+        code: 'BAD_BODY',
+        message: error instanceof Error ? error.message : String(error)
+      })
+      return
+    }
+  }
+  try {
+    const result = await apiHandler({
+      method: request.method ?? 'GET',
+      path: parsed.pathname,
+      query: parsed.searchParams,
+      body
+    })
+    respond(response, result.status, result.body)
+  } catch (error) {
+    respond(response, 500, {
+      ok: false,
+      code: 'API_ERROR',
+      message: error instanceof Error ? error.message : String(error)
+    })
+  }
+}
 
 async function handleMcp(
   engine: string,
@@ -285,6 +354,17 @@ async function handleMcp(
 function createHandler(): http.RequestListener {
   return (request, response) => {
     const url = request.url ?? '/'
+    const apiPath = new URL(url, 'http://127.0.0.1').pathname
+    if (API_PREFIX.test(apiPath)) {
+      void handleApi(request, response).catch((error: unknown) => {
+        respond(response, 500, {
+          ok: false,
+          code: 'API_ERROR',
+          message: error instanceof Error ? error.message : String(error)
+        })
+      })
+      return
+    }
     const mcp = MCP_ENDPOINT.exec(url)
     if (mcp) {
       const engine = mcp[1]

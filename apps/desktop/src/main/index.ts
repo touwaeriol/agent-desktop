@@ -10,6 +10,9 @@ import * as updates from './updates'
 import * as mcp from './mcp'
 import * as engines from './engines'
 import * as gateway from './gateway'
+import * as agents from './agents'
+import { SubagentManager, type SubagentRecord } from './subagents'
+import { createApiHandler } from './api'
 import * as bridge from './bridge'
 import { applySystemProxy, getProxyInfo } from './proxy'
 import type {
@@ -63,6 +66,14 @@ interface McpEngineConfig {
   entry?: string
 }
 
+interface SubagentConfig {
+  enabled?: boolean
+  maxConcurrent?: number
+  /** Let subagents use the desktop engines (codegraph / warpgrep). */
+  desktopTools?: boolean
+  defaultMode?: 'sync' | 'background'
+}
+
 interface McpConfig {
   enabled?: boolean
   desktopTool?: boolean
@@ -73,6 +84,7 @@ interface McpConfig {
   morphApiKey?: string
   /** server -> tool -> enabled. A tool set to false is registered as `hidden`. */
   toolToggles?: Record<string, Record<string, boolean>>
+  subagents?: SubagentConfig
 }
 
 interface DesktopConfig {
@@ -130,6 +142,16 @@ function toolToggles(): Record<string, Record<string, boolean>> {
   return desktopConfig.mcp?.toolToggles ?? {}
 }
 
+function subagentConfig(): Required<SubagentConfig> {
+  const config = desktopConfig.mcp?.subagents ?? {}
+  return {
+    enabled: config.enabled !== false,
+    maxConcurrent: config.maxConcurrent ?? 4,
+    desktopTools: config.desktopTools === true,
+    defaultMode: config.defaultMode ?? 'background'
+  }
+}
+
 function resourceDir(): string {
   return app.isPackaged ? process.resourcesPath : path.join(app.getAppPath(), 'resources')
 }
@@ -170,6 +192,45 @@ function desktopToolAvailable(): boolean {
   return existsSync(desktopExtensionPath()) && existsSync(mcpServerScript())
 }
 
+let agentSettings: agents.AgentSettings = { exposure: 'prompt', promptLimit: 8, presets: [] }
+let subagents: SubagentManager | null = null
+
+async function refreshAgents(): Promise<void> {
+  agentSettings = await agents.loadAgents(app.getPath('userData'))
+}
+
+function subagentManager(): SubagentManager {
+  if (!subagents) {
+    subagents = new SubagentManager({
+      userData: app.getPath('userData'),
+      onUpdate: (record) => mainWindow?.webContents.send('subagents:update', serializeSubagent(record))
+    })
+    subagents.setMaxConcurrent(subagentConfig().maxConcurrent)
+  }
+  return subagents
+}
+
+/** Wire shape of a subagent: no rpc handle, timestamps kept as numbers. */
+function serializeSubagent(record: SubagentRecord): Record<string, unknown> {
+  return {
+    id: record.id,
+    label: record.label,
+    agent: record.agent,
+    mode: record.mode,
+    cwd: record.cwd,
+    status: record.status,
+    model: record.model,
+    tools: record.tools,
+    messages: record.messages,
+    calls: record.calls,
+    finalText: record.finalText,
+    tokens: record.tokens,
+    runtimeMs: record.runtimeMs,
+    createdAt: record.createdAt,
+    error: record.error
+  }
+}
+
 /** Any built-in server active, which is when the extension has to be loaded. */
 async function mcpLaunch(
   cwd: string
@@ -195,7 +256,13 @@ async function mcpLaunch(
     env.AGENT_DESKTOP_MCP_URL = url
     env.AGENT_DESKTOP_MCP_TOKEN = bridge.getBridgeToken()
   }
-  if (core) env.AGENT_DESKTOP_MCP_CORE_SCRIPT = mcpServerScript()
+  if (core) {
+    env.AGENT_DESKTOP_MCP_CORE_SCRIPT = mcpServerScript()
+    // The core server only lists the subagent tools when they are enabled.
+    env.AGENT_DESKTOP_SUBAGENTS = subagentConfig().enabled ? '1' : '0'
+    const section = agents.renderAgentsSection(agentSettings)
+    if (section && subagentConfig().enabled) env.AGENT_DESKTOP_AGENTS_SECTION = section
+  }
   if (targets.length > 0 && url) {
     env.AGENT_DESKTOP_MCP_ENGINES = JSON.stringify(
       engines.buildEngineRegistrations({
@@ -389,6 +456,23 @@ async function buildMcpState(): Promise<McpState> {
       enabled: toolToggles().desktop?.[tool.name] !== false
     })),
     engines: engineStates,
+    subagents: {
+      enabled: subagentConfig().enabled,
+      exposure: agentSettings.exposure,
+      promptLimit: agentSettings.promptLimit,
+      maxConcurrent: subagentConfig().maxConcurrent,
+      desktopTools: subagentConfig().desktopTools,
+      presets: agentSettings.presets.map((preset) => ({
+        id: preset.id,
+        name: preset.name,
+        description: preset.description,
+        mode: preset.mode,
+        tools: preset.tools,
+        source: preset.source
+      })),
+      running: subagents?.list().filter((record) => record.status !== 'stopped').length ?? 0,
+      configPath: agents.agentsFilePath(app.getPath('userData'))
+    },
     morphKeyHint: maskKey(desktopConfig.mcp?.morphApiKey),
     servers,
     userConfigPath: mcp.USER_MCP_PATH,
@@ -543,6 +627,7 @@ function sessionArgs(): string[] {
 }
 
 async function reloadPiConfig(): Promise<void> {
+  await refreshAgents()
   if (status.isStreaming) {
     mainWindow?.webContents.send('pi:config-pending', true)
     return
@@ -795,6 +880,25 @@ function registerIpc(): void {
     await saveConfig({ mcp: next })
     await reloadPiConfig()
     return buildMcpState()
+  })
+
+  ipcMain.handle('mcp:set-subagents', async (_event, enabled: boolean) => {
+    await saveConfig({
+      mcp: { ...desktopConfig.mcp, subagents: { ...(desktopConfig.mcp?.subagents ?? {}), enabled: Boolean(enabled) } }
+    })
+    await reloadPiConfig()
+    return buildMcpState()
+  })
+
+  ipcMain.handle('agents:set-exposure', async (_event, exposure: 'prompt' | 'lazy' | 'hidden') => {
+    await agents.saveExposure(app.getPath('userData'), exposure)
+    await reloadPiConfig()
+    return buildMcpState()
+  })
+
+  ipcMain.handle('agents:open-config', async () => {
+    await agents.ensureAgentsFile(app.getPath('userData'))
+    await shell.openPath(agents.agentsFilePath(app.getPath('userData')))
   })
 
   ipcMain.handle('mcp:choose-engine-entry', async () => {
@@ -1079,6 +1183,15 @@ app.whenReady().then(async () => {
     }
     return gateway.handleMessage(engine, message)
   })
+  bridge.setApiHandler(
+    createApiHandler({
+      agentSettings: () => agentSettings,
+      subagents: () => subagentManager(),
+      listModels: (options) => providers.listModelChoices({ includeUnconfigured: !options.configuredOnly }),
+      defaultMode: () => subagentConfig().defaultMode,
+      desktopTools: () => subagentConfig().desktopTools
+    })
+  )
   createWindow()
   updates.setupUpdates((next) => mainWindow?.webContents.send('app-update', next))
   console.log(
@@ -1092,6 +1205,7 @@ app.whenReady().then(async () => {
     mcpServerScript()
   )
   // Warm the model runtime in the background so the first Settings open is instant.
+  await refreshAgents()
   void providers.listProviders().catch(() => undefined)
   void providers.listModelChoices().catch(() => undefined)
   void startPi(cwd)
@@ -1124,6 +1238,7 @@ app.on('window-all-closed', () => {
 
 app.on('before-quit', () => {
   bridge.cancelAllAsks('桌面端已退出')
+  subagents?.stopAll()
   gateway.stopAll()
   bridge.stopBridge()
   rpc.stop()

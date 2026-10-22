@@ -4022,6 +4022,41 @@ button:disabled {
   font-size: 10.2px;
 }
 
+.mcp-tool-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 2px 10px;
+  margin-top: 6px;
+}
+
+.mcp-tool-row {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+  padding: 2px 0;
+}
+
+.mcp-tool-name {
+  color: var(--text);
+  font-family: 'Cascadia Code', 'Consolas', monospace;
+  font-size: 11px;
+}
+
+.mcp-tool-meta {
+  color: var(--faint);
+  font-size: 10.4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mcp-engine-actions .ghost.active {
+  border-color: var(--border-strong);
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
 .mcp-tools {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));

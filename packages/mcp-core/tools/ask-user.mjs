@@ -102,10 +102,8 @@ export const askUserQuestion = {
         {
           type: 'text',
           text: `用户已回答 ${answers.filter((answer) => !answer.skipped).length}/${answers.length} 个问题：\n${formatAnswers(answers)}`
-        },
-        { type: 'text', text: JSON.stringify({ answers }, null, 2) }
-      ],
-      structuredContent: { answers }
+        }
+      ]
     }
   }
 }

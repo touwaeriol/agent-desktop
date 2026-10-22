@@ -13,7 +13,9 @@
 
 const CORE_SERVER = 'desktop'
 const ASK_TOOL = 'mcp__desktop__ask_user_question'
+const START_SUBAGENT_TOOL = 'mcp__desktop__start_subagent'
 const PROMPT_SECTION = 'desktop_tools'
+const AGENTS_SECTION = 'subagents'
 
 /**
  * Guidance for the model. An MCP server cannot supply a system prompt: pi only uses a server's
@@ -65,6 +67,8 @@ export default function desktopMcp(pi) {
   const coreScript = process.env.AGENT_DESKTOP_MCP_CORE_SCRIPT
   const engines = parseJson(process.env.AGENT_DESKTOP_MCP_ENGINES, [])
   const toggles = parseJson(process.env.AGENT_DESKTOP_MCP_TOGGLES, {})
+  const subagentsEnabled = process.env.AGENT_DESKTOP_SUBAGENTS === '1'
+  const agentsSection = process.env.AGENT_DESKTOP_AGENTS_SECTION ?? ''
   if (!url) return
 
   if (coreScript) {
@@ -74,7 +78,8 @@ export default function desktopMcp(pi) {
       env: {
         ELECTRON_RUN_AS_NODE: '1',
         AGENT_DESKTOP_MCP_URL: url,
-        AGENT_DESKTOP_MCP_TOKEN: token
+        AGENT_DESKTOP_MCP_TOKEN: token,
+        AGENT_DESKTOP_SUBAGENTS: subagentsEnabled ? '1' : '0'
       },
       exposure: 'direct',
       // No timeout: pi skips arming its request timer when timeoutMs is not finite
@@ -138,13 +143,25 @@ export default function desktopMcp(pi) {
     })
   }
 
+  // Servers connect asynchronously, so the first report may see only part of the tool list. Report
+  // again shortly after load; `reportTools` skips identical payloads.
+  setTimeout(reportTools, 2500)
+  setTimeout(reportTools, 8000)
+
   pi.on('before_agent_start', (event) => {
     // Only while the desktop MCP server is connected and its tool is declared to the model, so a
     // disabled MCP, a disabled desktop tool, a hidden tool, or a failed server leaves the prompt
     // untouched. The section is recomputed every run, and pi's section diff drops it when unset.
     const { sections } = event.systemPromptOptions
-    if (pi.getActiveTools().includes(ASK_TOOL)) sections[PROMPT_SECTION] = GUIDANCE
+    const active = pi.getActiveTools()
+    if (active.includes(ASK_TOOL)) sections[PROMPT_SECTION] = GUIDANCE
     else delete sections[PROMPT_SECTION]
+
+    // The preset list comes from the app (agents.exposure: prompt) and is only injected while the
+    // subagent tool is really declared, so a disabled feature leaves no dangling section.
+    if (agentsSection && active.includes(START_SUBAGENT_TOOL)) sections[AGENTS_SECTION] = agentsSection
+    else delete sections[AGENTS_SECTION]
+
     reportTools()
   })
 }

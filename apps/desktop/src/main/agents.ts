@@ -1,0 +1,273 @@
+/**
+ * Subagent presets: built-in defaults plus the user's `agents.json`.
+ *
+ * A preset is a bundle of start parameters (tools, model, mode, system prompt), never a restriction:
+ * `start_subagent` lets the caller override every field. Presets also feed the `<agents>` system
+ * prompt section when `agents.exposure` is `prompt`.
+ */
+import { promises as fs } from 'node:fs'
+import path from 'node:path'
+
+export type AgentMode = 'sync' | 'background'
+
+export interface AgentModel {
+  provider: string
+  id: string
+  thinking?: string
+}
+
+export interface AgentPreset {
+  id: string
+  name: string
+  description: string
+  tags?: string[]
+  tools?: string[]
+  mode?: AgentMode
+  model?: AgentModel | 'inherit'
+  appendSystemPrompt?: string
+  visible?: boolean
+  timeoutMs?: number
+  source: 'builtin' | 'user'
+}
+
+export type AgentExposure = 'prompt' | 'lazy' | 'hidden'
+
+const SHARED_PROMPT =
+  'You are a subagent started by another agent. Do not ask the user questions and do not wait ' +
+  'for confirmation. Keep the answer short: state the conclusion, the file:line locations that ' +
+  'matter, and anything the caller must decide. Never dump large code blocks.'
+
+export const BUILTIN_AGENTS: AgentPreset[] = [
+  {
+    id: 'explorer',
+    name: '代码探查',
+    description: '只读定位实现、梳理调用链，返回 file:line，不贴大段源码',
+    tags: ['search', 'read', 'locate', '探查', '定位'],
+    tools: ['read', 'grep', 'find', 'ls'],
+    mode: 'background',
+    model: 'inherit',
+    visible: true,
+    source: 'builtin',
+    appendSystemPrompt:
+      `${SHARED_PROMPT}\n\nYou are read-only: search and read, never edit. ` +
+      'Answer with the files and line ranges that matter, and a one-line summary per finding.'
+  },
+  {
+    id: 'reviewer',
+    name: '代码审查',
+    description: '审查当前改动，按严重度报问题与位置，不改代码',
+    tags: ['review', 'audit', '审查', '检查'],
+    tools: ['read', 'grep', 'find', 'ls'],
+    mode: 'sync',
+    model: 'inherit',
+    visible: true,
+    source: 'builtin',
+    appendSystemPrompt:
+      `${SHARED_PROMPT}\n\nYou are a reviewer: do not modify files. Report each issue as ` +
+      '`file:line · severity · problem · suggested fix`, most severe first.'
+  },
+  {
+    id: 'tester',
+    name: '测试与修复',
+    description: '先复现问题，再修，最后附命令与测试输出摘要',
+    tags: ['test', 'fix', 'debug', '测试', '修复', '复现'],
+    tools: ['read', 'edit', 'write', 'bash', 'grep', 'find', 'ls'],
+    mode: 'sync',
+    model: 'inherit',
+    visible: true,
+    source: 'builtin',
+    appendSystemPrompt:
+      `${SHARED_PROMPT}\n\nReproduce before fixing. Finish with the commands you ran and whether ` +
+      'they passed.'
+  },
+  {
+    id: 'worker',
+    name: '功能实现',
+    description: '完整工具集，实现功能并列出改动文件与验证方式',
+    tags: ['implement', 'build', 'feature', '实现', '开发'],
+    mode: 'background',
+    model: 'inherit',
+    visible: true,
+    source: 'builtin',
+    appendSystemPrompt:
+      `${SHARED_PROMPT}\n\nImplement the task end to end. Finish with the changed files and how you ` +
+      'verified the change.'
+  }
+]
+
+interface AgentsFile {
+  agents?: {
+    exposure?: AgentExposure
+    promptLimit?: number
+    presets?: Record<string, Partial<AgentPreset>>
+  }
+}
+
+export interface AgentSettings {
+  exposure: AgentExposure
+  promptLimit: number
+  presets: AgentPreset[]
+}
+
+export function agentsFilePath(userData: string): string {
+  return path.join(userData, 'agents.json')
+}
+
+export async function loadAgents(userData: string): Promise<AgentSettings> {
+  let file: AgentsFile = {}
+  try {
+    file = JSON.parse(await fs.readFile(agentsFilePath(userData), 'utf8')) as AgentsFile
+  } catch {
+    file = {}
+  }
+  const exposure: AgentExposure =
+    file.agents?.exposure === 'lazy' || file.agents?.exposure === 'hidden'
+      ? file.agents.exposure
+      : 'prompt'
+  const promptLimit =
+    typeof file.agents?.promptLimit === 'number' && file.agents.promptLimit > 0
+      ? Math.floor(file.agents.promptLimit)
+      : 8
+  const merged = new Map(BUILTIN_AGENTS.map((preset) => [preset.id, preset]))
+  for (const [id, raw] of Object.entries(file.agents?.presets ?? {})) {
+    if (!raw || typeof raw !== 'object') continue
+    const base = merged.get(id)
+    merged.set(id, {
+      ...(base ?? {
+        id,
+        name: id,
+        description: '',
+        source: 'user' as const
+      }),
+      ...raw,
+      id,
+      name: raw.name ?? base?.name ?? id,
+      description: raw.description ?? base?.description ?? '',
+      source: base ? 'user' : 'user'
+    })
+  }
+  return { exposure, promptLimit, presets: [...merged.values()] }
+}
+
+/** Create `agents.json` with a documented skeleton the first time it is opened. */
+export async function ensureAgentsFile(userData: string): Promise<void> {
+  const file = agentsFilePath(userData)
+  try {
+    await fs.access(file)
+    return
+  } catch {
+    // create below
+  }
+  const skeleton = {
+    agents: {
+      exposure: 'prompt',
+      promptLimit: 8,
+      presets: {
+        'fast-fix': {
+          name: '快速修复',
+          description: '用小模型做小范围修复',
+          tools: ['read', 'edit', 'bash'],
+          mode: 'sync',
+          model: { provider: 'deepseek', id: 'deepseek-flash' }
+        }
+      }
+    }
+  }
+  await fs.mkdir(userData, { recursive: true })
+  await fs.writeFile(file, `${JSON.stringify(skeleton, null, 2)}\n`, 'utf8')
+}
+
+/** Persist only the exposure setting, keeping the presets the user wrote. */
+export async function saveExposure(userData: string, exposure: AgentExposure): Promise<void> {
+  const file = agentsFilePath(userData)
+  let parsed: AgentsFile = {}
+  try {
+    parsed = JSON.parse(await fs.readFile(file, 'utf8')) as AgentsFile
+  } catch {
+    parsed = {}
+  }
+  const next: AgentsFile = {
+    ...parsed,
+    agents: { ...(parsed.agents ?? {}), exposure }
+  }
+  await fs.mkdir(userData, { recursive: true })
+  await fs.writeFile(file, `${JSON.stringify(next, null, 2)}\n`, 'utf8')
+}
+
+function tokenize(text: string): string[] {
+  return text
+    .toLowerCase()
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .split(/[^a-z0-9\u4e00-\u9fa5]+/)
+    .filter((term) => term.length > 0)
+}
+
+/** Rank presets for a query: BM25-ish over id/name/description/tags/tools, id hits weighted up. */
+export function rankAgents(
+  presets: AgentPreset[],
+  query: string | undefined,
+  limit = 5
+): Array<AgentPreset & { score: number }> {
+  const needle = query?.trim().toLowerCase()
+  if (!needle) return presets.slice(0, Math.max(limit, 20)).map((preset) => ({ ...preset, score: 0 }))
+  const terms = tokenize(needle)
+  const scored = presets.map((preset) => {
+    const id = preset.id.toLowerCase()
+    const name = preset.name.toLowerCase()
+    const description = preset.description.toLowerCase()
+    const tags = (preset.tags ?? []).map((tag) => tag.toLowerCase())
+    const tools = (preset.tools ?? []).map((tool) => tool.toLowerCase())
+    let score = 0
+    if (id === needle) score += 40
+    else if (id.includes(needle)) score += 12
+    if (name.includes(needle)) score += 10
+    if (description.includes(needle)) score += 6
+    if (tags.some((tag) => tag.includes(needle))) score += 8
+    for (const term of terms) {
+      if (id.includes(term)) score += 4
+      if (name.includes(term)) score += 3
+      if (tags.some((tag) => tag.includes(term))) score += 2
+      if (description.includes(term)) score += 1
+      if (tools.some((tool) => tool.includes(term))) score += 1
+    }
+    return { ...preset, score }
+  })
+  const hits = scored.filter((preset) => preset.score > 0).sort((a, b) => b.score - a.score)
+  const fallback = scored.slice(0, 3)
+  return (hits.length > 0 ? hits : fallback).slice(0, Math.max(1, limit))
+}
+
+/** The `<agents>` system prompt section, or undefined when nothing should be listed. */
+export function renderAgentsSection(settings: AgentSettings): string | undefined {
+  if (settings.exposure === 'hidden') return undefined
+  if (settings.exposure === 'lazy') {
+    return (
+      'Subagent presets are available: call `search_agents` to find one, then `start_subagent` ' +
+      'with `agent: "<id>"`. Any parameter (model, tools, mode, cwd) overrides the preset.'
+    )
+  }
+  const all = settings.presets
+  const listed =
+    all.length <= settings.promptLimit
+      ? all
+      : all.filter((preset) => preset.visible === true).slice(0, settings.promptLimit)
+  if (listed.length === 0) return undefined
+  const lines = listed.map((preset) => {
+    const ability =
+      preset.tools && preset.tools.length > 0
+        ? preset.tools.includes('edit') || preset.tools.includes('write') || preset.tools.includes('bash')
+          ? 'edits allowed'
+          : 'read-only'
+        : 'full tools'
+    const mode = preset.mode ?? 'background'
+    return `- ${preset.id} (${mode}, ${ability}): ${preset.description}`
+  })
+  return [
+    'Subagents you can start with `start_subagent`:',
+    ...lines,
+    '',
+    'Pass `agent: "<id>"`; any parameter (model, tools, mode, cwd) overrides the preset.',
+    'Use `search_agents` for presets the user added. Use `get_subagent` / `wait_subagent` for the',
+    'final answer and `get_subagent_changes` for what it touched.'
+  ].join('\n')
+}

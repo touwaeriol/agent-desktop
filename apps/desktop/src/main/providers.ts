@@ -470,6 +470,7 @@ export async function listModelChoices(
         providerName: provider?.name ?? model.provider,
         id: model.id,
         name: model.name,
+        contextWindow: model.contextWindow,
         configured: configured.has(model.provider)
       }
     })

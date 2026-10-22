@@ -77,5 +77,14 @@ CodeGraph results list symbols, signatures and `file:line` locations; source bod
 
 Of those, the core ones (`codegraph_explore/search/callers/impact`, `codebase_search`) are declared directly; the rest load on demand through `tool_search`.
 
+### Subagents
+
+The main agent can start subagents — separate `pi` processes that work on a task in the project — and drive them through eight desktop tools: `search_agents`, `list_models`, `start_subagent`, `get_subagent`, `wait_subagent`, `send_subagent_prompt`, `stop_subagent`, `get_subagent_changes`.
+
+- Results are Markdown and, by default, only the final answer plus a summary of what the subagent touched. The transcript is opt-in (`include: ["messages"]`), because a running subagent's full history is the expensive thing to put in context.
+- Four presets ship built in (`explorer`, `reviewer`, `tester`, `worker`) and are stored in `%APPDATA%/agent-desktop/agents.json`; every preset field can be overridden per call.
+- Presets are either listed in the system prompt (`agents.exposure: "prompt"`), found through `search_agents` (`"lazy"`), or not mentioned at all (`"hidden"`). There is no loading step: a preset id works as soon as the model knows it.
+- Subagents run with `--no-mcp`: they cannot ask the user questions or start further subagents.
+
 Every built-in tool can be switched off individually in Settings → MCP; a disabled tool is registered as `hidden`, so the model never sees it. The CodeGraph index (`.codegraph/`) is built automatically when a project has none — re-indexing stays a manual action, because the running server holds the index lock.
 

@@ -95,6 +95,11 @@ const bridge: PiBridge = {
     ipcRenderer.invoke('mcp:set-tool', server, tool, enabled) as Promise<McpState>,
   setMorphApiKey: (key: string | null) =>
     ipcRenderer.invoke('mcp:set-morph-key', key) as Promise<McpState>,
+  setSubagentsEnabled: (enabled: boolean) =>
+    ipcRenderer.invoke('mcp:set-subagents', enabled) as Promise<McpState>,
+  setAgentExposure: (exposure: 'prompt' | 'lazy' | 'hidden') =>
+    ipcRenderer.invoke('agents:set-exposure', exposure) as Promise<McpState>,
+  openAgentsConfig: () => ipcRenderer.invoke('agents:open-config') as Promise<void>,
   chooseMcpEngineEntry: () =>
     ipcRenderer.invoke('mcp:choose-engine-entry') as Promise<string | null>,
   onMcpState: (listener) => {
