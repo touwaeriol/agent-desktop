@@ -1,7 +1,7 @@
 {
   "name": "agent-desktop",
   "private": true,
-  "version": "0.3.3",
+  "version": "0.3.4",
   "description": "Agent desktop client",
   "author": "eriol touwa",
   "workspaces": [
