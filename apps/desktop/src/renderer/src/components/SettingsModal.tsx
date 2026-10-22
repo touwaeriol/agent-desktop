@@ -871,9 +871,7 @@ export function SettingsModal({
                       <div className="update-version">当前版本 {update.currentVersion}</div>
                       <div className={`update-status ${update.status}`}>
                         {updateStatusText(update)}
-                        {update.latestVersion && update.status !== 'upToDate'
-                          ? ` · ${update.latestVersion}`
-                          : ''}
+                        {update.latestVersion ? ` · 最新 ${update.latestVersion}` : ''}
                       </div>
                       {update.checkedAt && (
                         <div className="update-checked">
