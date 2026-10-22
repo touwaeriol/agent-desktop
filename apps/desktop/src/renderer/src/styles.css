@@ -848,7 +848,7 @@ button:disabled {
 .session-nav {
   position: absolute;
   top: 10px;
-  right: 6px;
+  left: 6px;
   bottom: 10px;
   z-index: 6;
   width: 24px;
@@ -888,7 +888,7 @@ button:disabled {
 .nav-outline-panel {
   position: absolute;
   top: -2px;
-  right: 30px;
+  left: 30px;
   width: 300px;
   max-height: 62vh;
   overflow-y: auto;
@@ -971,7 +971,7 @@ button:disabled {
   height: 7px;
   display: flex;
   align-items: center;
-  justify-content: flex-end;
+  justify-content: flex-start;
 }
 
 .nav-tick-line {
@@ -997,7 +997,7 @@ button:disabled {
 .nav-preview {
   position: absolute;
   top: -7px;
-  right: 28px;
+  left: 28px;
   width: 260px;
   padding: 9px 11px;
   border: 1px solid var(--border-strong);
