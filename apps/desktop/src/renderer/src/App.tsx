@@ -15,6 +15,7 @@ import { Sidebar } from './components/Sidebar'
 import { TabBar } from './components/TabBar'
 import { SettingsModal } from './components/SettingsModal'
 import { SessionNavigator } from './components/SessionNavigator'
+import { buildOutline } from './lib/outline'
 import { AskQuestionPanel } from './components/AskQuestionPanel'
 import { SubagentsPanel } from './components/SubagentsPanel'
 import { Markdown } from './components/Markdown'
@@ -151,6 +152,7 @@ export default function App(): React.JSX.Element {
   const [toast, setToast] = useState<string | null>(null)
   const [stick, setStick] = useState(true)
   const [activeUserIndex, setActiveUserIndex] = useState(0)
+  const [activeOutlineId, setActiveOutlineId] = useState<string | undefined>(undefined)
   const [update, setUpdate] = useState<AppUpdateSnapshot>({
     sequence: 0,
     status: 'idle',
@@ -188,6 +190,7 @@ export default function App(): React.JSX.Element {
   stickRef.current = stick
 
   const userItems = useMemo(() => items.filter((item) => item.role === 'user'), [items])
+  const outline = useMemo(() => buildOutline(items), [items])
 
   const syncHistoryNav = useCallback(() => {
     const { stack, index } = historyRef.current
@@ -209,12 +212,8 @@ export default function App(): React.JSX.Element {
   const updateActiveUser = useCallback(() => {
     const container = scrollRef.current
     if (!container || userItems.length === 0) return
-    const distance = container.scrollHeight - container.scrollTop - container.clientHeight
-    if (distance < 24) {
-      setActiveUserIndex(userItems.length - 1)
-      return
-    }
     const containerTop = container.getBoundingClientRect().top
+    const distance = container.scrollHeight - container.scrollTop - container.clientHeight
     let active = 0
     userItems.forEach((item, index) => {
       const element = container.querySelector(
@@ -224,8 +223,20 @@ export default function App(): React.JSX.Element {
         active = index
       }
     })
-    setActiveUserIndex(active)
-  }, [userItems])
+    setActiveUserIndex(distance < 24 ? userItems.length - 1 : active)
+
+    // The outline follows the same anchor rule, so the panel highlights the section in view.
+    let activeEntry: string | undefined
+    for (const entry of outline) {
+      const element = container.querySelector(
+        `[data-message-id="${CSS.escape(entry.messageId)}"]`
+      ) as HTMLElement | null
+      if (element && element.getBoundingClientRect().top - containerTop <= 120) {
+        activeEntry = entry.id
+      }
+    }
+    setActiveOutlineId(activeEntry)
+  }, [userItems, outline])
 
   useEffect(() => {
     updateActiveUser()
@@ -924,7 +935,9 @@ export default function App(): React.JSX.Element {
           {items.length > 0 && (
             <SessionNavigator
               items={items}
+              outline={outline}
               activeUserIndex={activeUserIndex}
+              activeOutlineId={activeOutlineId}
               onJump={jumpToMessage}
             />
           )}
