@@ -30,7 +30,7 @@ export interface WebConfig {
 }
 
 /** Providers whose own search endpoint is implemented below. */
-export const NATIVE_PROVIDERS: readonly string[] = ['anthropic', 'openai', 'google']
+export const NATIVE_PROVIDERS: readonly string[] = ['anthropic', 'openai', 'google', 'deepseek']
 
 const USER_AGENT =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) ' +
@@ -404,9 +404,57 @@ async function nativeSearch(
   count: number
 ): Promise<{ results: SearchResult[]; summary?: string }> {
   if (provider === 'anthropic') return anthropicSearch(query, count)
+  if (provider === 'deepseek') return deepseekSearch(query, count)
   if (provider === 'openai') return openaiSearch(query, count)
   if (provider === 'google') return googleSearch(query)
   throw new WebError('NO_NATIVE', `${provider} 没有原生搜索实现`)
+}
+
+/** Messages endpoint for a provider that speaks the Anthropic wire format. */
+function messagesUrl(baseUrl: string | undefined): string {
+  const base = trimBase(baseUrl || 'https://api.anthropic.com')
+  return /\/v1$/.test(base) ? `${base}/messages` : `${base}/v1/messages`
+}
+
+/** One Messages call carrying Anthropic's native `web_search` server tool. */
+async function messagesSearch(options: {
+  baseUrl?: string
+  headers: Record<string, string>
+  model: string
+  query: string
+  count: number
+}): Promise<{ results: SearchResult[]; summary?: string }> {
+  const json = (await postJson(
+    messagesUrl(options.baseUrl),
+    {
+      model: options.model,
+      max_tokens: 900,
+      messages: [{ role: 'user', content: options.query }],
+      tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: 3 }]
+    },
+    options.headers
+  )) as {
+    content?: Array<{
+      type?: string
+      text?: string
+      content?: Array<{ type?: string; url?: string; title?: string }>
+    }>
+  }
+
+  const results: SearchResult[] = []
+  const texts: string[] = []
+  for (const block of json.content ?? []) {
+    if (block.type === 'web_search_tool_result') {
+      for (const entry of block.content ?? []) {
+        if (!entry.url || results.some((result) => result.url === entry.url)) continue
+        results.push({ title: oneLine(entry.title) || entry.url, url: entry.url })
+        if (results.length >= options.count) break
+      }
+    } else if (block.type === 'text' && block.text?.trim()) {
+      texts.push(block.text.trim())
+    }
+  }
+  return { results, summary: texts.join('\n\n').trim() || undefined }
 }
 
 async function anthropicSearch(
@@ -432,37 +480,53 @@ async function anthropicSearch(
   }
   if (oauth) headers['anthropic-beta'] = mergeBeta(headers['anthropic-beta'], 'oauth-2025-04-20')
 
-  const json = (await postJson(
-    `${trimBase(auth.baseUrl ?? 'https://api.anthropic.com')}/v1/messages`,
-    {
-      model,
-      max_tokens: 900,
-      messages: [{ role: 'user', content: query }],
-      tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: 3 }]
-    },
-    headers
-  )) as {
-    content?: Array<{
-      type?: string
-      text?: string
-      content?: Array<{ type?: string; url?: string; title?: string }>
-    }>
-  }
+  return messagesSearch({
+    baseUrl: auth.baseUrl,
+    headers,
+    model,
+    query,
+    count
+  })
+}
 
-  const results: SearchResult[] = []
-  const texts: string[] = []
-  for (const block of json.content ?? []) {
-    if (block.type === 'web_search_tool_result') {
-      for (const entry of block.content ?? []) {
-        if (!entry.url || results.some((result) => result.url === entry.url)) continue
-        results.push({ title: oneLine(entry.title) || entry.url, url: entry.url })
-        if (results.length >= count) break
-      }
-    } else if (block.type === 'text' && block.text?.trim()) {
-      texts.push(block.text.trim())
+/**
+ * DeepSeek has a dedicated Search API (`POST /v1/tools/search`), backed by its own engine: plain
+ * JSON in, structured results out, no model turn. That is much cheaper than the alternative —
+ * DeepSeek also accepts Anthropic's `web_search_20250305` server tool on `/anthropic`, but then one
+ * search costs a whole model turn and the results only exist inside its prose.
+ *
+ * `models.json` may point the provider at an Anthropic-compatible proxy (`…/anthropic`), so the
+ * path is stripped before appending the Search API route.
+ */
+async function deepseekSearch(
+  query: string,
+  count: number
+): Promise<{ results: SearchResult[]; summary?: string }> {
+  const auth = await authFor('deepseek')
+  if (!auth.apiKey) throw new WebError('NO_CREDENTIAL', 'DeepSeek 还没有配置 API Key')
+  const base = trimBase(auth.baseUrl || 'https://api.deepseek.com').replace(/\/anthropic$/, '')
+  const json = (await postJson(
+    `${base}/v1/tools/search`,
+    { query, count: Math.min(50, Math.max(1, count)), need_content: true },
+    {
+      'content-type': 'application/json',
+      authorization: `Bearer ${auth.apiKey}`,
+      ...auth.headers
     }
+  )) as {
+    results?: Array<{ title?: string; url?: string; summary?: string; content?: string }>
   }
-  return { results, summary: texts.join('\n\n').trim() || undefined }
+  const results: SearchResult[] = []
+  for (const entry of json.results ?? []) {
+    if (!entry.url || results.some((result) => result.url === entry.url)) continue
+    results.push({
+      title: oneLine(entry.title) || entry.url,
+      url: entry.url,
+      description: oneLine(entry.summary) || oneLine(entry.content)
+    })
+    if (results.length >= count) break
+  }
+  return { results }
 }
 
 async function openaiSearch(

@@ -97,6 +97,10 @@ export interface ProviderInfo {
   source?: string
   sourceLabel?: string
   storedType?: ProviderAuthType
+  /** `models.json` override for this provider's endpoint, when one is set. */
+  baseUrl?: string
+  /** True for the providers whose endpoint the window may override. */
+  baseUrlEditable?: boolean
 }
 
 export interface LoginPromptOption {
@@ -434,6 +438,11 @@ export interface PiBridge {
   setThinkingLevel(level: string): Promise<{ ok: boolean; error?: string }>
   listProviderModels(providerId: string): Promise<ProviderModelOption[]>
   setProviderModels(providerId: string, enabledIds: string[]): Promise<{ ok: boolean; error?: string }>
+  /** `null` clears the override and puts the provider back on its default endpoint. */
+  setProviderBaseUrl(
+    providerId: string,
+    baseUrl: string | null
+  ): Promise<{ ok: boolean; error?: string }>
   listProviders(): Promise<ProviderInfo[]>
   startLogin(
     providerId: string,

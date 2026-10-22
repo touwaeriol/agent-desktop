@@ -95,6 +95,7 @@ export async function listProviders(): Promise<ProviderInfo[]> {
   const credentials = await runtime.listCredentials().catch(() => [])
   const configured = await configuredProviderIds(runtime)
   const builtinIds = await getBuiltinProviderIds().catch(() => new Set<string>())
+  const overrides = await getBaseUrlOverrides().catch(() => ({}) as Record<string, string>)
   const stored = new Map(credentials.map((credential) => [credential.providerId, credential.type]))
   const providers: ProviderInfo[] = []
 
@@ -120,7 +121,9 @@ export async function listProviders(): Promise<ProviderInfo[]> {
       builtin: builtinIds.has(provider.id),
       source: stored.has(provider.id) ? 'stored' : undefined,
       sourceLabel: stored.has(provider.id) ? '已保存凭据' : undefined,
-      storedType: stored.get(provider.id) as ProviderAuthType | undefined
+      storedType: stored.get(provider.id) as ProviderAuthType | undefined,
+      baseUrl: overrides[provider.id],
+      baseUrlEditable: BASE_URL_PROVIDERS.includes(provider.id)
     })
   }
 
@@ -260,6 +263,65 @@ export async function saveModelsJson(content: string): Promise<void> {
   }
   await fs.mkdir(AGENT_DIR, { recursive: true })
   await fs.writeFile(MODELS_PATH, `${JSON.stringify(parsed, null, 2)}\n`)
+  resetRuntime()
+}
+
+/**
+ * Providers whose endpoint the window may override.
+ *
+ * `models.json` accepts `providers.<id>.baseUrl` for any provider and keeps that provider's built-in
+ * models, but only these four are exposed in the UI: they are the ones people actually proxy
+ * (Anthropic-compatible gateways, ChatGPT relays, Gemini endpoints, DeepSeek mirrors).
+ */
+export const BASE_URL_PROVIDERS: readonly string[] = ['anthropic', 'openai', 'google', 'deepseek']
+
+type ModelsJsonProviders = Record<string, Record<string, unknown>>
+
+async function readModelsJsonObject(): Promise<Record<string, unknown>> {
+  try {
+    const parsed = JSON.parse(await fs.readFile(MODELS_PATH, 'utf8')) as unknown
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      return parsed as Record<string, unknown>
+    }
+  } catch {
+    // missing or unreadable: start from an empty file
+  }
+  return {}
+}
+
+function providersOf(file: Record<string, unknown>): ModelsJsonProviders {
+  const providers = file.providers
+  if (!providers || typeof providers !== 'object' || Array.isArray(providers)) return {}
+  return { ...(providers as ModelsJsonProviders) }
+}
+
+/** provider id -> configured base URL override (absent when the provider uses its default). */
+export async function getBaseUrlOverrides(): Promise<Record<string, string>> {
+  const providers = providersOf(await readModelsJsonObject())
+  const overrides: Record<string, string> = {}
+  for (const [id, config] of Object.entries(providers)) {
+    if (config && typeof config === 'object' && typeof config.baseUrl === 'string' && config.baseUrl) {
+      overrides[id] = config.baseUrl
+    }
+  }
+  return overrides
+}
+
+/** Set or clear `providers.<id>.baseUrl`, leaving every other field of that provider untouched. */
+export async function setProviderBaseUrl(providerId: string, baseUrl: string | null): Promise<void> {
+  if (!BASE_URL_PROVIDERS.includes(providerId)) throw new Error(`不支持修改 ${providerId} 的地址`)
+  const trimmed = baseUrl?.trim() ?? ''
+  if (trimmed && !/^https?:\/\//i.test(trimmed)) throw new Error('地址必须以 http:// 或 https:// 开头')
+  const file = await readModelsJsonObject()
+  const providers = providersOf(file)
+  const current = { ...(providers[providerId] ?? {}) }
+  if (trimmed) current.baseUrl = trimmed
+  else delete current.baseUrl
+  if (Object.keys(current).length === 0) delete providers[providerId]
+  else providers[providerId] = current
+  file.providers = providers
+  await fs.mkdir(AGENT_DIR, { recursive: true })
+  await fs.writeFile(MODELS_PATH, `${JSON.stringify(file, null, 2)}\n`)
   resetRuntime()
 }
 

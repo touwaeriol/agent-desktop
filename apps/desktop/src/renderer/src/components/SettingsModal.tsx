@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type {
   AppSettings,
   AppUpdateSnapshot,
@@ -72,7 +72,25 @@ const SOURCE_LABELS: Record<string, string> = {
 const PROVIDER_NOTES: Record<string, string> = {
   openai: 'ChatGPT 订阅或 OpenAI API Key，使用标准 OpenAI 模型',
   'openai-codex': '旧版 Codex 渠道，仅支持 ChatGPT Plus/Pro 订阅，模型较少',
-  anthropic: 'Claude 订阅（OAuth）或 Anthropic API Key'
+  anthropic: 'Claude 订阅（OAuth）或 Anthropic API Key',
+  deepseek: '国内海外同一个域名；Anthropic 兼容接口在 /anthropic，联网搜索走的就是它',
+  'moonshotai-cn': 'Kimi 国内：api.moonshot.cn',
+  moonshotai: 'Kimi 海外：api.moonshot.ai',
+  'kimi-coding': 'Kimi 订阅（Coding 套餐）：api.kimi.com/coding',
+  'minimax-cn': 'MiniMax 国内：api.minimaxi.com（Anthropic 兼容）',
+  minimax: 'MiniMax 海外：api.minimax.io（Anthropic 兼容）',
+  zai: 'Z.AI 海外 Coding 套餐：api.z.ai',
+  'zai-coding-cn': 'Z.AI 国内 Coding 套餐：open.bigmodel.cn',
+  'google-vertex': 'Vertex AI：需要项目与区域，走 GCP 凭据',
+  google: 'AI Studio（Gemini API）：generativelanguage.googleapis.com'
+}
+
+/** Default endpoint shown as the placeholder when a provider's URL can be overridden. */
+const BASE_URL_PLACEHOLDER: Record<string, string> = {
+  anthropic: 'https://api.anthropic.com',
+  openai: 'https://api.openai.com/v1',
+  google: 'https://generativelanguage.googleapis.com/v1beta',
+  deepseek: 'https://api.deepseek.com'
 }
 
 function PromptInput({
@@ -348,6 +366,10 @@ export function SettingsModal({
   const [modelConfig, setModelConfig] = useState<ModelConfigState>()
   const [webSearch, setWebSearch] = useState<McpWebState>()
   const [webBusy, setWebBusy] = useState(false)
+  /** Provider whose endpoint editor is open, plus the draft value. */
+  const [baseUrlEdit, setBaseUrlEdit] = useState<string>()
+  const [baseUrlDraft, setBaseUrlDraft] = useState('')
+  const [baseUrlBusy, setBaseUrlBusy] = useState(false)
 
   const loginRef = useRef<LoginState | undefined>(undefined)
   loginRef.current = login
@@ -363,6 +385,35 @@ export function SettingsModal({
       setProvidersLoading(false)
     }
   }, [])
+
+  /**
+   * Save (or clear) a provider's custom endpoint. pi reads `models.json` at startup, so the main
+   * side restarts the session; the provider list is reloaded to show the new value.
+   */
+  const saveBaseUrl = useCallback(
+    async (provider: ProviderInfo, value: string | null) => {
+      setBaseUrlBusy(true)
+      try {
+        const result = await window.pi.setProviderBaseUrl(provider.id, value)
+        if (!result.ok) {
+          setError(result.error ?? '保存失败')
+          return
+        }
+        setBaseUrlEdit(undefined)
+        setNotice(
+          value
+            ? `${provider.name} 的接口地址已改为 ${value}`
+            : `${provider.name} 已恢复默认接口地址`
+        )
+        await loadProviders()
+      } catch (cause) {
+        setError(cause instanceof Error ? cause.message : String(cause))
+      } finally {
+        setBaseUrlBusy(false)
+      }
+    },
+    [loadProviders]
+  )
 
   const loadSettings = useCallback(async () => {
     try {
@@ -796,8 +847,8 @@ export function SettingsModal({
 
               <div className="provider-list">
                 {filteredProviders.map((provider) => (
+                  <Fragment key={provider.id}>
                   <div
-                    key={provider.id}
                     className={`provider-row ${provider.configured ? 'configured' : ''}`}
                   >
                     <div className="provider-mark">{provider.name.slice(0, 1).toUpperCase()}</div>
@@ -818,6 +869,12 @@ export function SettingsModal({
                         <code>{provider.id}</code>
                         <span>{provider.modelCount} 个模型</span>
                         {provider.sourceLabel && <span>{provider.sourceLabel}</span>}
+                        {provider.baseUrl && (
+                          <span className="provider-base-url-tag" title={provider.baseUrl}>
+                            <PlugIcon size={10} />
+                            {provider.baseUrl}
+                          </span>
+                        )}
                       </div>
                       {PROVIDER_NOTES[provider.id] && (
                         <div className="provider-note">{PROVIDER_NOTES[provider.id]}</div>
@@ -864,6 +921,18 @@ export function SettingsModal({
                       >
                         <ListIcon size={12} /> 模型
                       </button>
+                      {provider.baseUrlEditable && (
+                        <button
+                          className={`prov-btn ghost ${provider.baseUrl ? 'on' : ''}`}
+                          onClick={() => {
+                            setBaseUrlEdit(baseUrlEdit === provider.id ? undefined : provider.id)
+                            setBaseUrlDraft(provider.baseUrl ?? '')
+                          }}
+                          title="自定义接口地址（写入 models.json 的 providers.<id>.baseUrl，重启后生效）"
+                        >
+                          <PlugIcon size={12} /> 地址
+                        </button>
+                      )}
                       {provider.storedType && (
                         <button
                           className={`prov-btn ghost ${confirmLogout === provider.id ? 'danger' : ''}`}
@@ -876,6 +945,42 @@ export function SettingsModal({
                       )}
                     </div>
                   </div>
+                  {baseUrlEdit === provider.id && (
+                    <div className="provider-base-url">
+                      <input
+                        autoFocus
+                        value={baseUrlDraft}
+                        spellCheck={false}
+                        placeholder={BASE_URL_PLACEHOLDER[provider.id] ?? 'https://'}
+                        onChange={(event) => setBaseUrlDraft(event.target.value)}
+                        onKeyDown={(event) => {
+                          if (event.key === 'Enter') void saveBaseUrl(provider, baseUrlDraft)
+                          if (event.key === 'Escape') setBaseUrlEdit(undefined)
+                        }}
+                      />
+                      <button
+                        className="prov-btn"
+                        disabled={baseUrlBusy || !baseUrlDraft.trim()}
+                        onClick={() => void saveBaseUrl(provider, baseUrlDraft)}
+                      >
+                        保存
+                      </button>
+                      <button
+                        className="prov-btn ghost"
+                        disabled={baseUrlBusy || !provider.baseUrl}
+                        onClick={() => void saveBaseUrl(provider, null)}
+                      >
+                        用默认
+                      </button>
+                      <button className="prov-btn ghost" onClick={() => setBaseUrlEdit(undefined)}>
+                        取消
+                      </button>
+                      <span className="provider-base-url-hint">
+                        默认 {BASE_URL_PLACEHOLDER[provider.id] ?? '—'}；填代理或镜像地址，留空即恢复默认
+                      </span>
+                    </div>
+                  )}
+                  </Fragment>
                 ))}
                 {filteredProviders.length === 0 && (
                   <div className="provider-empty">

@@ -61,6 +61,8 @@ const bridge: PiBridge = {
     ipcRenderer.invoke('providers:list-provider-models', providerId),
   setProviderModels: (providerId: string, enabledIds: string[]) =>
     ipcRenderer.invoke('providers:set-provider-models', providerId, enabledIds),
+  setProviderBaseUrl: (providerId: string, baseUrl: string | null) =>
+    ipcRenderer.invoke('providers:set-base-url', providerId, baseUrl),
   listProviders: () => ipcRenderer.invoke('providers:list'),
   startLogin: (providerId: string, type: ProviderAuthType, loginId: string) =>
     ipcRenderer.invoke('providers:start-login', providerId, type, loginId),

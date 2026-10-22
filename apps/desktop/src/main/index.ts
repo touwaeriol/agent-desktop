@@ -1639,6 +1639,25 @@ function registerIpc(): void {
       }
     }
   )
+
+  /**
+   * Custom endpoint for a built-in provider, stored as `models.json.providers.<id>.baseUrl`.
+   *
+   * pi reads that file at startup, so the session is restarted; the web engine resolves the same
+   * value through `providers.getRuntime()`, which `setProviderBaseUrl` already invalidated.
+   */
+  ipcMain.handle(
+    'providers:set-base-url',
+    async (_event, providerId: string, baseUrl: string | null) => {
+      try {
+        await providers.setProviderBaseUrl(providerId, baseUrl)
+        await reloadPiConfig()
+        return { ok: true }
+      } catch (error) {
+        return { ok: false, error: error instanceof Error ? error.message : String(error) }
+      }
+    }
+  )
 }
 
 function createWindow(): void {

@@ -2017,6 +2017,50 @@ button:disabled {
   line-height: 1.45;
 }
 
+/* Custom endpoint for a built-in provider: one row under the provider it belongs to. */
+.provider-base-url {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: -2px 0 6px 42px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg-input);
+}
+
+.provider-base-url input {
+  flex: 1 1 260px;
+  min-width: 0;
+  height: 26px;
+  padding: 0 8px;
+  border-radius: 6px;
+  border: 1px solid var(--border-strong);
+  background: var(--bg);
+  color: var(--text);
+  font-family: 'Cascadia Code', 'Consolas', monospace;
+  font-size: 11px;
+}
+
+.provider-base-url-hint {
+  flex: 1 1 100%;
+  color: var(--faint);
+  font-size: 10.4px;
+}
+
+.provider-base-url-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--accent-text);
+  font-family: 'Cascadia Code', 'Consolas', monospace;
+  font-size: 10.2px;
+}
+
 .provider-actions {
   flex: 0 0 auto;
   display: flex;
@@ -2049,6 +2093,12 @@ button:disabled {
 .prov-btn.ghost {
   background: transparent;
   color: var(--dim);
+}
+
+.prov-btn.ghost.on {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--accent-text);
 }
 
 .prov-btn.danger {
