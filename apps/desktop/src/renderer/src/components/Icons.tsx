@@ -249,3 +249,22 @@ export function TrashIcon(props: IconProps) {
     </svg>
   )
 }
+
+export function QuestionIcon(props: IconProps) {
+  return (
+    <svg {...base(props)}>
+      <circle cx="12" cy="12" r="9" />
+      <path d="M9.6 9.2a2.5 2.5 0 0 1 4.85.83c0 1.7-2.45 2.1-2.45 3.72" />
+      <path d="M12 17.1h.01" />
+    </svg>
+  )
+}
+
+export function PlugIcon(props: IconProps) {
+  return (
+    <svg {...base(props)}>
+      <path d="M9 3v5M15 3v5M7 8h10v3.5a5 5 0 0 1-10 0z" />
+      <path d="M12 16.5V21" />
+    </svg>
+  )
+}

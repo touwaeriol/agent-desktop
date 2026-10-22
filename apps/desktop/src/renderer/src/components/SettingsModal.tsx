@@ -22,15 +22,17 @@ import {
   ListIcon,
   LogoutIcon,
   MoonIcon,
+  PlugIcon,
   RefreshIcon,
   SearchIcon,
   SunIcon,
   UserIcon
 } from './Icons'
 import { CustomProvidersPanel } from './CustomProvidersPanel'
+import { McpPanel } from './McpPanel'
 import { updateBusy, updateProgress, updateStatusText } from '../lib/updates'
 
-type Tab = 'providers' | 'custom' | 'general'
+type Tab = 'providers' | 'custom' | 'mcp' | 'general'
 
 const THINKING_LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
 
@@ -644,6 +646,9 @@ export function SettingsModal({
           <button className={tab === 'custom' ? 'active' : ''} onClick={() => setTab('custom')}>
             <KeyIcon size={15} /> 自定义服务商
           </button>
+          <button className={tab === 'mcp' ? 'active' : ''} onClick={() => setTab('mcp')}>
+            <PlugIcon size={15} /> MCP
+          </button>
           <button className={tab === 'general' ? 'active' : ''} onClick={() => setTab('general')}>
             <FolderIcon size={15} /> 通用
           </button>
@@ -657,14 +662,22 @@ export function SettingsModal({
           <header className="settings-head">
             <div>
               <h2>
-                {tab === 'providers' ? '服务商' : tab === 'custom' ? '自定义服务商' : '通用'}
+                {tab === 'providers'
+                  ? '服务商'
+                  : tab === 'custom'
+                    ? '自定义服务商'
+                    : tab === 'mcp'
+                      ? 'MCP'
+                      : '通用'}
               </h2>
               <p>
                 {tab === 'providers'
                   ? '使用 pi 内置的 OAuth 或 API Key 登录，凭据保存到 ~/.pi/agent/auth.json'
                   : tab === 'custom'
                     ? '通过 models.json 配置 OpenAI 兼容端点、baseUrl 与模型列表'
-                    : '当前会话目录、会话存储、默认模型与思考等级'}
+                    : tab === 'mcp'
+                      ? 'MCP 总开关、桌面提问工具与 ~/.pi/agent/mcp.json 里的服务器'
+                      : '当前会话目录、会话存储、默认模型与思考等级'}
               </p>
             </div>
             <button className="icon-btn" onClick={onClose} title="关闭 (Esc)">
@@ -780,6 +793,8 @@ export function SettingsModal({
               onOpenFile={() => void window.pi.openModelsJson()}
             />
           )}
+
+          {tab === 'mcp' && <McpPanel onNotice={setNotice} onError={setError} />}
 
           {tab === 'general' && (
             <div className="settings-content general">

@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import type { ChatItem, ToolCallView } from '../lib/messages'
 import { Markdown } from './Markdown'
+import { MessageImages } from './ImageLightbox'
 import { BranchIcon, ChevronIcon, SparkIcon, ToolIcon } from './Icons'
 
 function formatDuration(ms?: number): string {
@@ -66,7 +67,10 @@ function Message({ item }: { item: ChatItem }) {
         className={`message user ${item.pending ? 'pending' : ''}`}
         data-message-id={item.id}
       >
-        <div className="user-bubble">{item.text}</div>
+        {item.images && item.images.length > 0 && (
+          <MessageImages images={item.images} align="end" />
+        )}
+        {item.text && <div className="user-bubble">{item.text}</div>}
       </article>
     )
   }

@@ -53,6 +53,12 @@ export interface AgentMessage {
   stopReason?: string
 }
 
+export interface PromptImage {
+  type: 'image'
+  data: string
+  mimeType: string
+}
+
 export interface PromptResult {
   ok: boolean
   disposition?: 'started' | 'queued' | 'handled'
@@ -194,6 +200,65 @@ export interface ProxyInfo {
   source: 'system' | 'none'
 }
 
+export interface AskOption {
+  label: string
+  description?: string
+}
+
+export interface AskQuestion {
+  question: string
+  header?: string
+  multiSelect?: boolean
+  options?: AskOption[]
+}
+
+export interface AskRequest {
+  id: string
+  questions: AskQuestion[]
+  createdAt: number
+  tool?: string
+}
+
+export interface AskAnswer {
+  question: string
+  header?: string
+  selected: string[]
+  other?: string
+  skipped?: boolean
+}
+
+export type AskResult =
+  | { cancelled: true; reason?: string }
+  | { cancelled?: false; answers: AskAnswer[] }
+
+export interface BridgeInfo {
+  running: boolean
+  url: string
+  port: number
+  pending: number
+}
+
+export interface McpServerInfo {
+  name: string
+  transport: 'stdio' | 'http'
+  summary: string
+  enabled: boolean
+  exposure?: string
+  description?: string
+  source: 'user' | 'project' | 'extension'
+  builtin?: boolean
+}
+
+export interface McpState {
+  enabled: boolean
+  desktopTool: boolean
+  desktopToolAvailable: boolean
+  servers: McpServerInfo[]
+  userConfigPath: string
+  projectConfigPath: string
+  bridge: BridgeInfo
+}
+
 export interface PiBridge {
   getStatus(): Promise<PiStatus>
   restart(cwd?: string): Promise<PiStatus>
@@ -209,7 +274,11 @@ export interface PiBridge {
   onUpdate(listener: (snapshot: AppUpdateSnapshot) => void): () => void
   getProxyInfo(): Promise<ProxyInfo>
   chooseWorkspace(): Promise<PiStatus | null>
-  prompt(message: string, streamingBehavior?: 'steer' | 'followUp'): Promise<PromptResult>
+  prompt(
+    message: string,
+    streamingBehavior?: 'steer' | 'followUp',
+    images?: PromptImage[]
+  ): Promise<PromptResult>
   abort(): Promise<void>
   newSession(): Promise<SwitchResult>
   switchSession(sessionPath: string): Promise<SwitchResult>
@@ -242,6 +311,17 @@ export interface PiBridge {
     patch: Partial<Pick<AppSettings, 'defaultProvider' | 'defaultModel' | 'defaultThinkingLevel'>>
   ): Promise<{ ok: boolean; error?: string }>
   listModelChoices(): Promise<ModelChoice[]>
+  getMcpState(): Promise<McpState>
+  setMcpEnabled(enabled: boolean): Promise<McpState>
+  setDesktopToolEnabled(enabled: boolean): Promise<McpState>
+  setMcpServerEnabled(name: string, enabled: boolean): Promise<{ ok: boolean; error?: string }>
+  removeMcpServer(name: string): Promise<{ ok: boolean; error?: string }>
+  addMcpServer(name: string, config: string): Promise<{ ok: boolean; error?: string }>
+  openMcpConfig(which: 'user' | 'project'): Promise<void>
+  onAskRequest(listener: (request: AskRequest) => void): () => void
+  onAskCleared(listener: () => void): () => void
+  answerQuestion(id: string, answers: AskAnswer[]): Promise<void>
+  cancelQuestion(id: string, reason?: string): Promise<void>
   onEvent(listener: (record: Record<string, unknown>) => void): () => void
   onStatus(listener: (status: PiStatus) => void): () => void
 }

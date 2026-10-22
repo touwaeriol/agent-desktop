@@ -1,0 +1,13 @@
+{
+  "name": "@agent-desktop/mcp-ask-user",
+  "version": "0.1.0",
+  "private": true,
+  "description": "MCP server that asks the Agent Desktop user a question",
+  "type": "module",
+  "bin": {
+    "agent-desktop-ask-user": "./server.mjs"
+  },
+  "files": [
+    "server.mjs"
+  ]
+}

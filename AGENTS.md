@@ -3,7 +3,7 @@
 ## Layout
 
 - `apps/desktop` — Electron + React 桌面端。主进程 (`src/main`) 以 RPC 子进程方式启动 pi，渲染层 (`src/renderer`) 只通过 preload 暴露的 `window.pi` 通信。
-- `packages/` — 预留给后续给 pi 使用的 MCP 服务器（TypeScript）。
+- `packages/` — 给 pi 使用的 MCP 服务器。目前有 `mcp-ask-user`（桌面提问工具，零依赖 stdio MCP）。
 - `scripts/electron-vite.mjs` — electron-vite 启动器。
 
 ## Commands
@@ -32,6 +32,7 @@ npm run typecheck    # node + web 两个 tsconfig 分别检查
 - 凭据写入 `~/.pi/agent/auth.json`；`models.json` 保存后必须 `resetRuntime()` 再重建，否则模型目录是旧的。`settings.json` 只合并 `defaultProvider` / `defaultModel` / `defaultThinkingLevel`。
 - 凭据、models.json、settings 变更后主进程重启 pi，并用 `--session <当前会话文件>` 保留对话；如果正在流式输出则跳过重启，下次启动生效。
 - 模型切换：输入条模型 chip 打开列表，数据来自 RPC `get_available_models`（只含已配置凭据的服务商），选择后调用 `set_model` 并广播新状态；不要再用 `cycle_model` 盲切。
+- 同一会话内跨服务商切换是 pi 原生能力：`set_model` 只要求新服务商有凭据，会向会话追加 `model_change` 记录，历史保持不变，下一条 assistant 消息记录新的 `provider/model`。恢复会话时 pi 用会话里最后一个 `model_change` / assistant 消息恢复模型（`sdk.js` 的 `getBranchSelection` + `hasConfiguredAuth`）；凭据缺失才回退默认模型并给出 “Could not restore model …”。切换的代价是 prompt cache 归零、换到窗口更小的模型会触发自动压缩；没有 provider 签名的 thinking 块在发给 Anthropic 时会被降级成普通文本（`pi-ai/dist/api/anthropic-messages.js`）。
 
 ## Theme & sidebar
 
@@ -50,6 +51,14 @@ npm run typecheck    # node + web 两个 tsconfig 分别检查
 - OpenAI ChatGPT 订阅登录必须在 `runtime.login` 的 options 里传 `getDeviceId`（稳定的 UUID，保存在 Electron userData 的 `device-id` 文件），否则报 “Sign in with ChatGPT requires a device ID (UUID) for this installation”。
 - 两个 OpenAI 服务商是 pi 内置的：`openai`（ChatGPT 订阅 / API Key，标准模型）和 `openai-codex`（旧版 Codex 渠道，仅 ChatGPT Plus/Pro，模型较少）。设置页对两者有说明文案。
 
+## Composer & images
+
+- 图片走 pi 原生能力：RPC `prompt` / `steer` 的 `images` 字段，元素是 `{type:'image', data: base64, mimeType}`；pi 会把它们写进会话 JSONL 的 image content block，`get_messages` 也返回同样的块。
+- 渲染层 `lib/images.ts` 负责 File → base64（`blobToDraftImage`，上限 8MB）、`clipboardImages`（读 `clipboardData.items`）、`renumberInlineMarkers`（删图后重排文本里的 `[图片N]` 标记）。
+- 粘贴/拖入规则：光标在 **0** 时图片进入「前导区」，在输入框**上方**统一展示（`DraftImageStrip placement="leading"`，无文本标记）；光标在中间时在插入点写入 `[图片N]` 标记，图片在输入框下方以 chip 展示（`placement="inline"`）。编号按附件在数组中的顺序（1 开始），发送时 `images` 按同一顺序传给 pi，所以标记和图片能对上。
+- 点任意缩略图打开 `ImageLightbox`（Esc / 点背景关闭）；会话里用户消息用 `MessageImages` 渲染，图片在气泡**上方**右对齐（`.message.user` 是 column + align-items flex-end）。
+- 允许只发图片不发文字：`prompt` 的 `message` 传空串，pi 接受（实测模型能收到图）。
+
 ## Updates & packaging
 
 - 更新实现：`apps/desktop/src/main/updates.ts` 使用 `electron-updater`。打包版走 electron-updater（GitHub Release 的 `latest.yml` + NSIS 安装包）；开发模式用 GitHub Release API 只做版本检测，`canInstall=false`。启动 5 秒后及每 6 小时自动检查，开关存在 userData 的 `updates.json`。
@@ -64,5 +73,18 @@ npm run typecheck    # node + web 两个 tsconfig 分别检查
 
 - 会话默认与 pi 共用 `~/.pi/agent/sessions`；desktop `config.json` 的 `sessionMode` 为 `isolated` 时，启动 pi 会附加 `--session-dir <userData>/sessions`，`listSessions` 也读该目录。两种模式都由 pi 写 JSONL，结构不变，可随时切回共用。
 - 工作目录是**会话级**的：点击其他项目的会话必须走 `pi:open-session`（以该会话 cwd + `--session <path>` 重启 pi），不能只用 `switch_session`，否则工具会在错误目录运行。设置页只读显示当前会话目录，不提供全局工作目录编辑。
-- `config.json` 保存 `{ cwd, sessionMode }`；`cwd` 只是下次启动/新建会话的默认目录。目录不存在时 `startPi` 会回退到 home，避免 spawn ENOENT。
+- `config.json` 保存 `{ cwd, sessionMode, mcp }`；`cwd` 只是下次启动/新建会话的默认目录。目录不存在时 `startPi` 会回退到 home，避免 spawn ENOENT。
+
+## MCP & desktop tools
+
+- 桌面提问工具 `ask_user_question` 是一条自建链路，四段：
+  1. `packages/mcp-ask-user/server.mjs` — 零依赖 stdio MCP 服务器（手写 JSON-RPC：`initialize` / `tools/list` / `tools/call`，按 `\n` 分帧，日志只走 stderr）。
+  2. `apps/desktop/resources/extension/desktop-mcp.js` — pi 扩展，读 `AGENT_DESKTOP_MCP_URL/TOKEN/SCRIPT` 后 `pi.registerMcpServer('desktop', {...})`。**必须 `exposure: 'direct'`**（默认 `codemode` 不会把工具声明给模型）。**`timeout` 必须传 `Number.POSITIVE_INFINITY`**：pi 把 `config.timeout`（秒）乘 1000 传给 MCP client，`armTimeout` 在 `!Number.isFinite(timeoutMs)` 时不 arm 定时器，所以只有非有限值才真正不超时；填大数字会踩 `setTimeout` 的 2^31-1 ms 上限而立刻超时（默认值是 60 秒）。
+  3. `apps/desktop/src/main/bridge.ts` — 只监听 `127.0.0.1` 的 HTTP 桥，`POST /ask`（`x-agent-desktop-token` 校验）→ 渲染层弹窗 → 回答后返回 JSON。**不要加等待超时**（`server.requestTimeout`/`server.timeout` 都设 0）；取消只来自 `cancelAllAsks`：pi 重启、关窗、退出、以及 `pi:abort`（同时给渲染层发 `ask:cleared` 关掉面板）。
+  4. 渲染层 `AskQuestionPanel.tsx` — **内联面板，固定在输入框上方**（不要做全屏弹窗），高度控制在 ~130-160px：标题行、问题行（tag 内联）、**选项一行一个（不要并排）**、底栏同一行放输入框和按钮。单选 / 多选 / 手动输入；手动输入框常驻，直接打字即可，不用先选“其他”；单选时选项与手动输入互斥，多选时两者可叠加。顶部步骤条（仅多问题时显示）可点击跳回任意问题重新回答，`上一步` / `下一步` / `跳过` / `提交` 支持前后修改。`App.tsx` 用队列保存请求（`askQueue`），一次只显示一个，回答后从队列移除。
+- 工具命名是 pi 生成的 `mcp__desktop__ask_user_question`。验证链路最快的方式：向桥 `POST /ask`（端口和令牌在 `%APPDATA%\agent-desktop\config.json` 的 `mcp.bridgePort/bridgeToken`），不需要真实模型调用。
+- 注册方式选扩展 + `--extension`，**不要**写 `~/.pi/agent/mcp.json`：这样桌面端的工具不会污染终端里的 pi，桥接端口/令牌也不用每次启动改写用户配置。`mcpArgs()` 在总开关关闭时传 `--no-mcp`，桌面工具关闭时不传 `--extension`。
+- 路径解析：打包版从 `process.resourcesPath/extension|mcp` 取（`electron-builder.yml` 的 `extraResources` 负责拷贝），开发版用 `searchUp` 从 `app.getAppPath()` 向上找 `resources/extension/desktop-mcp.js` 和 `packages/mcp-ask-user/server.mjs`。改了资源位置要同时改这两处。
+- 设置 → MCP（`McpPanel.tsx`）管理 `~/.pi/agent/mcp.json`：总开关（`config.json.mcp.enabled`）、桌面工具开关（`mcp.desktopTool`）、服务器启用/删除/新增（新增接受一段 JSON，需含 `command` 或 `url`）。任何变更都会 `reloadPiConfig()` 重启 pi。
+- 项目级 `.pi/mcp.json` 只读展示并合并到列表（同名覆盖用户级），仅在信任项目时由 pi 生效。
 

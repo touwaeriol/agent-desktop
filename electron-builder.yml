@@ -7,8 +7,17 @@ directories:
 files:
   - out/**/*
   - package.json
+extraResources:
+  - from: apps/desktop/resources/extension
+    to: extension
+  - from: packages/mcp-ask-user
+    to: mcp
+    filter:
+      - server.mjs
+      - package.json
 asarUnpack:
   - "**/node_modules/@earendil-works/**"
+  - "**/node_modules/jiti/**"
   - "**/node_modules/quickjs-wasi/**"
   - "**/node_modules/@silvia-odwyer/**"
 win:

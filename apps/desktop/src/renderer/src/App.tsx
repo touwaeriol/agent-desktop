@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { AppUpdateSnapshot, PiStatus, SessionSummary } from '@shared/types'
+import type { AppUpdateSnapshot, AskAnswer, AskRequest, PiStatus, SessionSummary } from '@shared/types'
 import { Conversation } from './components/Conversation'
 import { Composer } from './components/Composer'
 import { IconRail } from './components/IconRail'
@@ -7,8 +7,11 @@ import { Sidebar } from './components/Sidebar'
 import { TabBar } from './components/TabBar'
 import { SettingsModal } from './components/SettingsModal'
 import { SessionNavigator } from './components/SessionNavigator'
+import { AskQuestionPanel } from './components/AskQuestionPanel'
+import type { DraftImage } from './lib/images'
 import { updateStatusText } from './lib/updates'
 import {
+  imagesFromBlocks,
   textFromBlocks,
   thinkingFromBlocks,
   toChatItems,
@@ -96,6 +99,7 @@ export default function App(): React.JSX.Element {
   const [activePath, setActivePath] = useState<string | undefined>(undefined)
   const [items, setItems] = useState<ChatItem[]>([])
   const [draft, setDraft] = useState('')
+  const [draftImages, setDraftImages] = useState<DraftImage[]>([])
   const [sidebarOpen, setSidebarOpen] = useState(true)
   const [toast, setToast] = useState<string | null>(null)
   const [stick, setStick] = useState(true)
@@ -115,13 +119,19 @@ export default function App(): React.JSX.Element {
     error: null
   })
   const [settingsOpen, setSettingsOpen] = useState(false)
-  const [settingsTab, setSettingsTab] = useState<'providers' | 'custom' | 'general'>('providers')
+  const [settingsTab, setSettingsTab] = useState<'providers' | 'custom' | 'mcp' | 'general'>(
+    'providers'
+  )
+  const [askQueue, setAskQueue] = useState<AskRequest[]>([])
   const [theme, setTheme] = useState<'dark' | 'light'>(() =>
     localStorage.getItem('pi-desktop-theme') === 'light' ? 'light' : 'dark'
   )
 
   const statusRef = useRef(status)
   statusRef.current = status
+  const askQueueRef = useRef<AskRequest[]>([])
+  askQueueRef.current = askQueue
+  const ask = askQueue[0]
   const scrollRef = useRef<HTMLDivElement>(null)
   const stickRef = useRef(true)
   stickRef.current = stick
@@ -255,9 +265,11 @@ export default function App(): React.JSX.Element {
             const index = prev.map((item) => item.role === 'user' && item.pending).lastIndexOf(true)
             if (index === -1) return prev
             const next = prev.slice()
+            const images = imagesFromBlocks(message.content)
             next[index] = {
               ...next[index],
               text: textFromBlocks(message.content) || next[index].text,
+              images: images.length > 0 ? images : next[index].images,
               pending: false
             }
             return next
@@ -316,11 +328,33 @@ export default function App(): React.JSX.Element {
     void window.pi.getStatus().then(setStatus)
     const offStatus = window.pi.onStatus(setStatus)
     const offEvent = window.pi.onEvent(handleEvent)
+    const offAsk = window.pi.onAskRequest((request) => setAskQueue((queue) => [...queue, request]))
+    const offAskCleared = window.pi.onAskCleared(() => setAskQueue([]))
     return () => {
       offStatus()
       offEvent()
+      offAsk()
+      offAskCleared()
     }
   }, [handleEvent])
+
+  useEffect(() => {
+    if (status.phase !== 'ready') setAskQueue([])
+  }, [status.phase])
+
+  const answerAsk = useCallback((answers: AskAnswer[]) => {
+    const current = askQueueRef.current[0]
+    if (!current) return
+    setAskQueue((queue) => queue.filter((item) => item.id !== current.id))
+    void window.pi.answerQuestion(current.id, answers)
+  }, [])
+
+  const cancelAsk = useCallback(() => {
+    const current = askQueueRef.current[0]
+    if (!current) return
+    setAskQueue((queue) => queue.filter((item) => item.id !== current.id))
+    void window.pi.cancelQuestion(current.id, '用户取消了提问')
+  }, [])
 
   useEffect(() => {
     if (status.phase === 'ready') {
@@ -355,24 +389,41 @@ export default function App(): React.JSX.Element {
   const send = useCallback(
     async (mode: 'send' | 'queue') => {
       const text = draft.trim()
-      if (!text) return
+      if (!text && draftImages.length === 0) return
       const streaming = statusRef.current.isStreaming
       const behavior = streaming ? (mode === 'queue' ? 'followUp' : 'steer') : undefined
+      const images = draftImages.map((image) => ({
+        type: 'image' as const,
+        data: image.data,
+        mimeType: image.mimeType
+      }))
       setDraft('')
+      setDraftImages([])
       setStick(true)
       const localId = `local-${Date.now()}`
       setItems((prev) => [
         ...prev,
-        { id: localId, role: 'user', text, toolCalls: [], pending: true }
+        {
+          id: localId,
+          role: 'user',
+          text,
+          images: draftImages.map((image) => ({
+            data: image.data,
+            mimeType: image.mimeType
+          })),
+          toolCalls: [],
+          pending: true
+        }
       ])
-      const result = await window.pi.prompt(text, behavior)
+      const result = await window.pi.prompt(text, behavior, images)
       if (!result.ok) {
         setItems((prev) => prev.filter((item) => item.id !== localId))
         setDraft(text)
+        setDraftImages(draftImages)
         setToast(result.error ?? '发送失败')
       }
     },
-    [draft]
+    [draft, draftImages]
   )
 
   const newSession = useCallback(async () => {
@@ -384,6 +435,7 @@ export default function App(): React.JSX.Element {
     setItems([])
     setActivePath(undefined)
     setDraft('')
+    setDraftImages([])
     void loadSessions()
   }, [loadSessions])
 
@@ -416,6 +468,7 @@ export default function App(): React.JSX.Element {
     if (!next) return
     setItems([])
     setDraft('')
+    setDraftImages([])
     setToast(`已在 ${next.cwd} 新建会话`)
   }, [])
 
@@ -429,6 +482,7 @@ export default function App(): React.JSX.Element {
       setItems([])
       setActivePath(undefined)
       setDraft('')
+      setDraftImages([])
       setStick(true)
       setToast(`已在 ${cwd} 新建会话`)
       void loadSessions()
@@ -598,9 +652,21 @@ export default function App(): React.JSX.Element {
           )}
         </div>
 
+        {ask && (
+          <AskQuestionPanel
+            request={ask}
+            queued={askQueue.length - 1}
+            onSubmit={answerAsk}
+            onCancel={cancelAsk}
+          />
+        )}
+
         <Composer
           value={draft}
           onChange={setDraft}
+          images={draftImages}
+          onImagesChange={setDraftImages}
+          onNotice={setToast}
           onSend={(mode) => void send(mode)}
           onStop={() => void window.pi.abort()}
           streaming={Boolean(status.isStreaming)}

@@ -7,12 +7,18 @@ export interface ToolCallView {
   durationMs?: number
 }
 
+export interface MessageImage {
+  data: string
+  mimeType: string
+}
+
 export interface ChatItem {
   id: string
   role: 'user' | 'assistant' | 'system'
   text: string
   thinking?: string
   toolCalls: ToolCallView[]
+  images?: MessageImage[]
   streaming?: boolean
   pending?: boolean
   error?: string
@@ -26,6 +32,8 @@ interface RawBlock {
   id?: string
   name?: string
   arguments?: unknown
+  data?: string
+  mimeType?: string
 }
 
 interface RawMessage {
@@ -41,6 +49,17 @@ function blockText(block: RawBlock): string {
   if (block.type === 'text') return block.text ?? ''
   if (block.type === 'thinking') return block.thinking ?? ''
   return ''
+}
+
+export function imagesFromBlocks(content: unknown): MessageImage[] {
+  if (!Array.isArray(content)) return []
+  return content
+    .map((block) => block as RawBlock)
+    .filter((block) => block.type === 'image' && typeof block.data === 'string' && block.data)
+    .map((block) => ({
+      data: block.data!,
+      mimeType: typeof block.mimeType === 'string' ? block.mimeType : 'image/png'
+    }))
 }
 
 function argsText(value: unknown): string {
@@ -63,11 +82,13 @@ export function toChatItems(messages: RawMessage[]): ChatItem[] {
         typeof message.content === 'string'
           ? message.content
           : (message.content ?? []).map(blockText).filter(Boolean).join('\n')
-      if (!text.trim()) continue
+      const images = imagesFromBlocks(message.content)
+      if (!text.trim() && images.length === 0) continue
       items.push({
         id: `u-${message.timestamp ?? items.length}`,
         role: 'user',
         text,
+        images: images.length > 0 ? images : undefined,
         toolCalls: [],
         timestamp: message.timestamp
       })

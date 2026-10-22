@@ -72,7 +72,7 @@ export class PiRpcClient extends EventEmitter {
     return this.stderr.slice(-4000)
   }
 
-  start(cwd: string, extraArgs: string[] = []): void {
+  start(cwd: string, extraArgs: string[] = [], extraEnv: NodeJS.ProcessEnv = {}): void {
     this.stop()
     const pi = resolvePi()
     console.log('[pi-rpc] spawning', pi.command, [...pi.args, '--mode', 'rpc', ...extraArgs], 'cwd=', cwd)
@@ -80,7 +80,7 @@ export class PiRpcClient extends EventEmitter {
     this.buffer = ''
     const child = spawn(pi.command, [...pi.args, '--mode', 'rpc', ...extraArgs], {
       cwd,
-      env: { ...process.env, ...pi.env },
+      env: { ...process.env, ...pi.env, ...extraEnv },
       stdio: ['pipe', 'pipe', 'pipe'],
       windowsHide: true
     })

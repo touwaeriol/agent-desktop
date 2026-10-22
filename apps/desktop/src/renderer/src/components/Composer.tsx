@@ -9,6 +9,14 @@ import {
   SparkIcon,
   StopIcon
 } from './Icons'
+import { DraftImageStrip, ImageLightbox } from './ImageLightbox'
+import {
+  blobToDraftImage,
+  clipboardImages,
+  imageSrc,
+  renumberInlineMarkers,
+  type DraftImage
+} from '../lib/images'
 
 function contextLabel(value?: number): string {
   if (!value) return ''
@@ -32,6 +40,9 @@ const THINKING_LABELS: Record<string, string> = {
 export function Composer({
   value,
   onChange,
+  images,
+  onImagesChange,
+  onNotice,
   onSend,
   onStop,
   streaming,
@@ -41,6 +52,9 @@ export function Composer({
 }: {
   value: string
   onChange: (value: string) => void
+  images: DraftImage[]
+  onImagesChange: (images: DraftImage[]) => void
+  onNotice?: (message: string) => void
   onSend: (mode: 'send' | 'queue') => void
   onStop: () => void
   streaming: boolean
@@ -61,6 +75,57 @@ export function Composer({
   const [levels, setLevels] = useState<string[]>([])
   const [thinkingLoading, setThinkingLoading] = useState(false)
   const [thinkingError, setThinkingError] = useState<string>()
+  const [preview, setPreview] = useState<DraftImage>()
+  const [dragging, setDragging] = useState(false)
+
+  const addImages = async (files: File[], leading: boolean): Promise<void> => {
+    const added: DraftImage[] = []
+    for (const file of files) {
+      const image = await blobToDraftImage(
+        file,
+        leading ? 'leading' : 'inline',
+        file.name || undefined
+      )
+      if (!image) {
+        onNotice?.('图片超过 8MB，已跳过')
+        continue
+      }
+      added.push(image)
+    }
+    if (added.length === 0) return
+
+    if (leading) {
+      onImagesChange([...images, ...added])
+      return
+    }
+
+    const node = ref.current
+    const caret = node?.selectionStart ?? value.length
+    const next = [...images, ...added]
+    const markers = added.map((image) => `[图片${next.indexOf(image) + 1}]`).join('')
+    onImagesChange(next)
+    onChange(`${value.slice(0, caret)}${markers}${value.slice(caret)}`)
+    requestAnimationFrame(() => {
+      const element = ref.current
+      if (!element) return
+      const position = caret + markers.length
+      element.focus()
+      element.setSelectionRange(position, position)
+    })
+  }
+
+  const removeImage = (id: string): void => {
+    const next = images.filter((image) => image.id !== id)
+    const inline = next.filter((image) => image.placement === 'inline')
+    onImagesChange(next)
+    if (inline.length !== images.filter((image) => image.placement === 'inline').length) {
+      onChange(renumberInlineMarkers(value, inline, next))
+    }
+  }
+
+  const handleFiles = (files: File[], caret: number): void => {
+    void addImages(files, caret === 0)
+  }
 
   useEffect(() => {
     const element = ref.current
@@ -199,14 +264,46 @@ export function Composer({
 
   return (
     <div className="composer-wrap">
-      <div className={`composer ${disabled ? 'disabled' : ''}`}>
+      <div
+        className={`composer ${disabled ? 'disabled' : ''} ${dragging ? 'dragging' : ''}`}
+        onDragOver={(event) => {
+          if (!event.dataTransfer.types.includes('Files')) return
+          event.preventDefault()
+          setDragging(true)
+        }}
+        onDragLeave={(event) => {
+          if (event.currentTarget.contains(event.relatedTarget as Node | null)) return
+          setDragging(false)
+        }}
+        onDrop={(event) => {
+          const files = Array.from(event.dataTransfer.files).filter((file) =>
+            file.type.startsWith('image/')
+          )
+          if (files.length === 0) return
+          event.preventDefault()
+          setDragging(false)
+          handleFiles(files, value.trim() ? value.length : 0)
+        }}
+      >
+        <DraftImageStrip
+          images={images}
+          placement="leading"
+          onRemove={removeImage}
+          onPreview={setPreview}
+        />
         <textarea
           ref={ref}
           value={value}
           rows={1}
           spellCheck={false}
-          placeholder={streaming ? '继续输入，Enter 插入当前回合，Ctrl+Enter 排到结束后' : '给 pi 发消息…'}
+          placeholder={streaming ? '继续输入，Enter 插入当前回合，Ctrl+Enter 排到结束后' : '给 pi 发消息…（可直接粘贴图片）'}
           onChange={(event) => onChange(event.target.value)}
+          onPaste={(event) => {
+            const files = clipboardImages(event.clipboardData)
+            if (files.length === 0) return
+            event.preventDefault()
+            handleFiles(files, ref.current?.selectionStart ?? value.length)
+          }}
           onKeyDown={(event) => {
             if (event.key !== 'Enter') return
             if (event.nativeEvent.isComposing) return
@@ -218,6 +315,12 @@ export function Composer({
               onSend('send')
             }
           }}
+        />
+        <DraftImageStrip
+          images={images}
+          placement="inline"
+          onRemove={removeImage}
+          onPreview={setPreview}
         />
         <div className="composer-foot">
           <div className="composer-left">
@@ -351,7 +454,7 @@ export function Composer({
               <button
                 className="send-btn"
                 onClick={() => onSend('send')}
-                disabled={disabled || !value.trim()}
+                disabled={disabled || (!value.trim() && images.length === 0)}
                 title="发送 (Enter)"
               >
                 <SendIcon size={15} />
@@ -361,8 +464,16 @@ export function Composer({
         </div>
       </div>
       <div className="composer-hint">
-        Enter 发送 · Shift+Enter 换行 · Ctrl+Enter {streaming ? '排到结束后' : '排队发送'}
+        Enter 发送 · Shift+Enter 换行 · Ctrl+Enter {streaming ? '排到结束后' : '排队发送'} · 粘贴或拖入图片
       </div>
+
+      {preview && (
+        <ImageLightbox
+          src={imageSrc(preview)}
+          alt={preview.name}
+          onClose={() => setPreview(undefined)}
+        />
+      )}
     </div>
   )
 }

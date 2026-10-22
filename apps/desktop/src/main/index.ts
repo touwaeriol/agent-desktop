@@ -7,8 +7,18 @@ import { PiRpcClient } from './pi-rpc'
 import { listSessions } from './sessions'
 import * as providers from './providers'
 import * as updates from './updates'
+import * as mcp from './mcp'
+import * as bridge from './bridge'
 import { applySystemProxy, getProxyInfo } from './proxy'
-import type { AppSettings, LoginMessage, PiModel, PiStatus } from '../shared/types'
+import type {
+  AppSettings,
+  AskAnswer,
+  LoginMessage,
+  McpState,
+  PiModel,
+  PiStatus,
+  PromptImage
+} from '../shared/types'
 
 const rpc = new PiRpcClient()
 let mainWindow: BrowserWindow | null = null
@@ -41,9 +51,17 @@ async function migrateLegacyUserData(): Promise<void> {
 
 type SessionMode = 'shared' | 'isolated'
 
+interface McpConfig {
+  enabled?: boolean
+  desktopTool?: boolean
+  bridgePort?: number
+  bridgeToken?: string
+}
+
 interface DesktopConfig {
   cwd?: string
   sessionMode?: SessionMode
+  mcp?: McpConfig
 }
 
 let desktopConfig: DesktopConfig = {}
@@ -82,6 +100,105 @@ function sessionDirArgs(): string[] {
   return currentSessionMode() === 'isolated' ? ['--session-dir', currentSessionDir()] : []
 }
 
+function mcpSettings(): { enabled: boolean; desktopTool: boolean } {
+  const config = desktopConfig.mcp ?? {}
+  return { enabled: config.enabled !== false, desktopTool: config.desktopTool !== false }
+}
+
+function resourceDir(): string {
+  return app.isPackaged ? process.resourcesPath : path.join(app.getAppPath(), 'resources')
+}
+
+function searchUp(start: string, relative: string, depth = 6): string | undefined {
+  let dir = start
+  for (let index = 0; index < depth; index += 1) {
+    const candidate = path.join(dir, relative)
+    if (existsSync(candidate)) return candidate
+    const parent = path.dirname(dir)
+    if (parent === dir) break
+    dir = parent
+  }
+  return undefined
+}
+
+function desktopExtensionPath(): string {
+  if (app.isPackaged) return path.join(resourceDir(), 'extension', 'desktop-mcp.js')
+  return (
+    searchUp(app.getAppPath(), path.join('resources', 'extension', 'desktop-mcp.js')) ??
+    searchUp(
+      app.getAppPath(),
+      path.join('apps', 'desktop', 'resources', 'extension', 'desktop-mcp.js')
+    ) ??
+    path.join(resourceDir(), 'extension', 'desktop-mcp.js')
+  )
+}
+
+function mcpServerScript(): string {
+  if (app.isPackaged) return path.join(resourceDir(), 'mcp', 'server.mjs')
+  return (
+    searchUp(app.getAppPath(), path.join('packages', 'mcp-ask-user', 'server.mjs')) ??
+    path.join(app.getAppPath(), '..', '..', 'packages', 'mcp-ask-user', 'server.mjs')
+  )
+}
+
+function desktopToolAvailable(): boolean {
+  return existsSync(desktopExtensionPath()) && existsSync(mcpServerScript())
+}
+
+function mcpArgs(): string[] {
+  const settings = mcpSettings()
+  if (!settings.enabled) return ['--no-mcp']
+  if (!settings.desktopTool || !desktopToolAvailable()) return []
+  return ['--extension', desktopExtensionPath()]
+}
+
+function mcpEnv(): NodeJS.ProcessEnv {
+  const settings = mcpSettings()
+  const url = bridge.getBridgeUrl()
+  if (!settings.enabled || !settings.desktopTool || !url) return {}
+  return {
+    AGENT_DESKTOP_MCP_URL: url,
+    AGENT_DESKTOP_MCP_TOKEN: bridge.getBridgeToken(),
+    AGENT_DESKTOP_MCP_SCRIPT: mcpServerScript()
+  }
+}
+
+async function buildMcpState(): Promise<McpState> {
+  const settings = mcpSettings()
+  const [userServers, projectServers] = await Promise.all([
+    mcp.listUserServers().catch(() => []),
+    mcp.listProjectServers(status.cwd).catch(() => [])
+  ])
+  const servers = [...userServers]
+  for (const entry of projectServers) {
+    const index = servers.findIndex((server) => server.name === entry.name)
+    if (index >= 0) servers[index] = entry
+    else servers.push(entry)
+  }
+  const available = desktopToolAvailable()
+  if (settings.enabled && settings.desktopTool && available) {
+    servers.unshift({
+      name: 'desktop',
+      transport: 'stdio',
+      summary: 'Agent Desktop 内置：ask_user_question',
+      enabled: true,
+      exposure: 'direct',
+      description: '在桌面窗口弹窗向用户提问（单选 / 多选 / 手动输入）',
+      source: 'extension',
+      builtin: true
+    })
+  }
+  return {
+    enabled: settings.enabled,
+    desktopTool: settings.desktopTool,
+    desktopToolAvailable: available,
+    servers,
+    userConfigPath: mcp.USER_MCP_PATH,
+    projectConfigPath: mcp.projectMcpPath(status.cwd),
+    bridge: bridge.getBridgeInfo()
+  }
+}
+
 let cachedDeviceId: string | undefined
 
 async function getDeviceId(): Promise<string> {
@@ -105,6 +222,11 @@ async function getDeviceId(): Promise<string> {
 
 function broadcastStatus(): void {
   mainWindow?.webContents.send('pi:status', status)
+}
+
+function cancelPendingAsks(reason: string): void {
+  bridge.cancelAllAsks(reason)
+  mainWindow?.webContents.send('ask:cleared')
 }
 
 function setStatus(patch: Partial<PiStatus>): void {
@@ -162,6 +284,7 @@ async function startPi(cwd?: string, extraArgs: string[] = []): Promise<PiStatus
   if (starting) return status
   starting = true
   await applySystemProxy()
+  cancelPendingAsks('pi 已重启')
   let workspace = cwd ?? status.cwd
   if (!existsSync(workspace)) {
     console.warn(`[pi] workspace does not exist, falling back to home: ${workspace}`)
@@ -170,7 +293,7 @@ async function startPi(cwd?: string, extraArgs: string[] = []): Promise<PiStatus
   rpc.stop()
   setStatus({ phase: 'starting', cwd: workspace, error: undefined, stderrTail: undefined })
   try {
-    rpc.start(workspace, [...extraArgs, ...sessionDirArgs()])
+    rpc.start(workspace, [...extraArgs, ...sessionDirArgs(), ...mcpArgs()], mcpEnv())
     const data = await waitForReady()
     status = { phase: 'ready', cwd: workspace }
     applyState(data)
@@ -283,12 +406,18 @@ function registerIpc(): void {
 
   ipcMain.handle(
     'pi:prompt',
-    async (_event, message: string, streamingBehavior?: 'steer' | 'followUp') => {
+    async (
+      _event,
+      message: string,
+      streamingBehavior?: 'steer' | 'followUp',
+      images?: PromptImage[]
+    ) => {
       if (!rpc.running) return { ok: false, error: 'pi 未运行' }
       try {
         const response = await rpc.request<{ data?: { disposition?: string } }>('prompt', {
           message,
-          ...(streamingBehavior ? { streamingBehavior } : {})
+          ...(streamingBehavior ? { streamingBehavior } : {}),
+          ...(images && images.length > 0 ? { images } : {})
         })
         return {
           ok: true,
@@ -301,6 +430,7 @@ function registerIpc(): void {
   )
 
   ipcMain.handle('pi:abort', async () => {
+    cancelPendingAsks('用户中止了本次运行')
     if (!rpc.running) return
     try {
       await rpc.request('abort', {}, 30000)
@@ -361,6 +491,62 @@ function registerIpc(): void {
   })
 
   ipcMain.handle('providers:list', () => providers.listProviders())
+
+  ipcMain.handle('ask:answer', (_event, id: string, answers: AskAnswer[]) => {
+    bridge.answerAsk(id, Array.isArray(answers) ? answers : [])
+  })
+
+  ipcMain.handle('ask:cancel', (_event, id: string, reason?: string) => {
+    bridge.cancelAsk(id, reason ?? '用户取消了提问')
+  })
+
+  ipcMain.handle('mcp:state', () => buildMcpState())
+
+  ipcMain.handle('mcp:set-enabled', async (_event, enabled: boolean) => {
+    await saveConfig({ mcp: { ...desktopConfig.mcp, enabled: Boolean(enabled) } })
+    await reloadPiConfig()
+    return buildMcpState()
+  })
+
+  ipcMain.handle('mcp:set-desktop-tool', async (_event, enabled: boolean) => {
+    await saveConfig({ mcp: { ...desktopConfig.mcp, desktopTool: Boolean(enabled) } })
+    await reloadPiConfig()
+    return buildMcpState()
+  })
+
+  ipcMain.handle('mcp:set-server-enabled', async (_event, name: string, enabled: boolean) => {
+    try {
+      await mcp.setServerEnabled(name, Boolean(enabled))
+      await reloadPiConfig()
+      return { ok: true }
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) }
+    }
+  })
+
+  ipcMain.handle('mcp:remove-server', async (_event, name: string) => {
+    try {
+      await mcp.removeServer(name)
+      await reloadPiConfig()
+      return { ok: true }
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) }
+    }
+  })
+
+  ipcMain.handle('mcp:add-server', async (_event, name: string, config: string) => {
+    try {
+      await mcp.addServer(name, config)
+      await reloadPiConfig()
+      return { ok: true }
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) }
+    }
+  })
+
+  ipcMain.handle('mcp:open-config', (_event, which: 'user' | 'project') =>
+    mcp.openConfig(status.cwd, which === 'project' ? 'project' : 'user')
+  )
 
   ipcMain.handle(
     'providers:start-login',
@@ -578,8 +764,23 @@ app.whenReady().then(async () => {
   desktopConfig = await loadConfig()
   const cwd = desktopConfig.cwd || process.env.PI_DESKTOP_CWD || process.cwd()
   status = { phase: 'stopped', cwd }
+  await startBridge()
+  bridge.setAskListener((request) => {
+    if (mainWindow) mainWindow.webContents.send('ask:request', request)
+    else bridge.cancelAsk(request.id, '桌面窗口未就绪')
+  })
   createWindow()
   updates.setupUpdates((next) => mainWindow?.webContents.send('app-update', next))
+  console.log(
+    '[mcp] settings=',
+    JSON.stringify(mcpSettings()),
+    'available=',
+    desktopToolAvailable(),
+    'extension=',
+    desktopExtensionPath(),
+    'script=',
+    mcpServerScript()
+  )
   void startPi(cwd)
 
   app.on('activate', () => {
@@ -587,10 +788,28 @@ app.whenReady().then(async () => {
   })
 })
 
+async function startBridge(): Promise<void> {
+  const config = desktopConfig.mcp ?? {}
+  const token = config.bridgeToken ?? randomUUID()
+  try {
+    const info = await bridge.startBridge({ preferredPort: config.bridgePort, token })
+    if (config.bridgePort !== info.port || config.bridgeToken !== token) {
+      await saveConfig({ mcp: { ...desktopConfig.mcp, bridgePort: info.port, bridgeToken: token } })
+    }
+  } catch (error) {
+    console.error('[bridge] failed to start:', error instanceof Error ? error.message : error)
+  }
+}
+
 app.on('window-all-closed', () => {
+  cancelPendingAsks('桌面窗口已关闭')
   rpc.stop()
   status = { ...status, phase: 'stopped' }
   if (process.platform !== 'darwin') app.quit()
 })
 
-app.on('before-quit', () => rpc.stop())
+app.on('before-quit', () => {
+  bridge.cancelAllAsks('桌面端已退出')
+  bridge.stopBridge()
+  rpc.stop()
+})

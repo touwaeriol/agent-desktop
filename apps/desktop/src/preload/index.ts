@@ -2,9 +2,13 @@ import { contextBridge, ipcRenderer } from 'electron'
 import type {
   AgentMessage,
   AppUpdateSnapshot,
+  AskAnswer,
+  AskRequest,
   LoginMessage,
+  McpState,
   PiBridge,
   PiStatus,
+  PromptImage,
   ProviderAuthType,
   SessionSummary
 } from '../shared/types'
@@ -34,8 +38,8 @@ const bridge: PiBridge = {
   },
   getProxyInfo: () => ipcRenderer.invoke('app:proxy'),
   chooseWorkspace: () => ipcRenderer.invoke('pi:choose-workspace') as Promise<PiStatus | null>,
-  prompt: (message: string, streamingBehavior?: 'steer' | 'followUp') =>
-    ipcRenderer.invoke('pi:prompt', message, streamingBehavior),
+  prompt: (message: string, streamingBehavior?: 'steer' | 'followUp', images?: PromptImage[]) =>
+    ipcRenderer.invoke('pi:prompt', message, streamingBehavior, images),
   abort: () => ipcRenderer.invoke('pi:abort') as Promise<void>,
   newSession: () => ipcRenderer.invoke('pi:new-session'),
   switchSession: (sessionPath: string) => ipcRenderer.invoke('pi:switch-session', sessionPath),
@@ -74,6 +78,31 @@ const bridge: PiBridge = {
   getAppSettings: () => ipcRenderer.invoke('settings:get'),
   saveAppSettings: (patch) => ipcRenderer.invoke('settings:save', patch),
   listModelChoices: () => ipcRenderer.invoke('settings:models'),
+  getMcpState: () => ipcRenderer.invoke('mcp:state') as Promise<McpState>,
+  setMcpEnabled: (enabled: boolean) => ipcRenderer.invoke('mcp:set-enabled', enabled) as Promise<McpState>,
+  setDesktopToolEnabled: (enabled: boolean) =>
+    ipcRenderer.invoke('mcp:set-desktop-tool', enabled) as Promise<McpState>,
+  setMcpServerEnabled: (name: string, enabled: boolean) =>
+    ipcRenderer.invoke('mcp:set-server-enabled', name, enabled),
+  removeMcpServer: (name: string) => ipcRenderer.invoke('mcp:remove-server', name),
+  addMcpServer: (name: string, config: string) =>
+    ipcRenderer.invoke('mcp:add-server', name, config),
+  openMcpConfig: (which: 'user' | 'project') =>
+    ipcRenderer.invoke('mcp:open-config', which) as Promise<void>,
+  onAskRequest: (listener) => {
+    const handler = (_event: Electron.IpcRendererEvent, request: AskRequest): void => listener(request)
+    ipcRenderer.on('ask:request', handler)
+    return () => ipcRenderer.removeListener('ask:request', handler)
+  },
+  onAskCleared: (listener) => {
+    const handler = (): void => listener()
+    ipcRenderer.on('ask:cleared', handler)
+    return () => ipcRenderer.removeListener('ask:cleared', handler)
+  },
+  answerQuestion: (id: string, answers: AskAnswer[]) =>
+    ipcRenderer.invoke('ask:answer', id, answers) as Promise<void>,
+  cancelQuestion: (id: string, reason?: string) =>
+    ipcRenderer.invoke('ask:cancel', id, reason) as Promise<void>,
   onEvent: (listener) => {
     const handler = (_event: Electron.IpcRendererEvent, record: Record<string, unknown>): void =>
       listener(record)
