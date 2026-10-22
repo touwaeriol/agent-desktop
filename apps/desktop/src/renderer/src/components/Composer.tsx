@@ -351,7 +351,6 @@ export function Composer({
               onClick={() => void openContextPicker()}
             >
               <span className="at-mark">@</span>
-              <span>引用上下文</span>
             </button>
             {contextOpen && (
               <div className="context-picker">
