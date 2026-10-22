@@ -450,10 +450,6 @@ export function SettingsModal({
   }, [])
 
   /**
-   * Turn auto-compaction on or off. Enabling also makes the main process write the reserve that
-   * puts the trigger at `AUTO_COMPACT_RATIO` of the current model's window, then restart pi.
-   */
-  /**
    * Switch the profile the window reads. Nothing is moved: the other directory simply becomes the
    * source, and pi is restarted on it.
    */
@@ -499,6 +495,10 @@ export function SettingsModal({
     }
   }, [loadProviders, loadSettings])
 
+  /**
+   * Turn auto-compaction on or off. Enabling also makes the main process write the reserve that
+   * puts the trigger at `AUTO_COMPACT_RATIO` of the current model's window, then restart pi.
+   */
   const toggleAutoCompact = useCallback(
     async (enabled: boolean) => {
       try {

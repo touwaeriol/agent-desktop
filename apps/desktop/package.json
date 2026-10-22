@@ -1,6 +1,6 @@
 {
   "name": "@agent-desktop/desktop",
-  "version": "0.3.15",
+  "version": "0.3.16",
   "private": true,
   "description": "Agent desktop client",
   "main": "./out/main/index.js",
