@@ -17,7 +17,7 @@ import { SettingsModal } from './components/SettingsModal'
 import { SessionNavigator } from './components/SessionNavigator'
 import { buildOutline } from './lib/outline'
 import { AskQuestionPanel } from './components/AskQuestionPanel'
-import { SubagentsPanel } from './components/SubagentsPanel'
+import { SubagentsDrawer } from './components/SubagentsDrawer'
 import { RunStatusBar } from './components/RunStatusBar'
 import { Markdown } from './components/Markdown'
 import type { DraftImage } from './lib/images'
@@ -913,7 +913,9 @@ export default function App(): React.JSX.Element {
             </div>
           )}
 
-        <div className="chat-area">
+        <div className="main-body">
+          <div className="chat-column">
+            <div className="chat-area">
           <div
             className="scroll"
             ref={scrollRef}
@@ -1021,16 +1023,19 @@ export default function App(): React.JSX.Element {
           }
         />
 
-        {subagentsOpen && (
-          <SubagentsPanel
-            records={subagents}
-            initialId={subagentFocus}
-            onClose={() => {
-              setSubagentsOpen(false)
-              setSubagentFocus(undefined)
-            }}
-          />
-        )}
+          </div>
+
+          {subagentsOpen && (
+            <SubagentsDrawer
+              records={subagents}
+              initialId={subagentFocus}
+              onClose={() => {
+                setSubagentsOpen(false)
+                setSubagentFocus(undefined)
+              }}
+            />
+          )}
+        </div>
 
         {mcpOpen && (
           <div

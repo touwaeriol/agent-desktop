@@ -161,7 +161,8 @@ npm run typecheck    # node + web 两个 tsconfig 分别检查
 - 父会话重启（换模型）时扩展重新加载、长轮询重连，队列里没投递的事件会补发；所以事件队列在**主进程**里，不要在扩展里缓存。
 - 控制语义映射到 pi：`interrupt` = `abort` + `prompt`，`steer` = `prompt(..., streamingBehavior: 'steer')`，`follow-up` = `'followUp'`。
 - 限制：并发 4（超出报 `SUBAGENT_LIMIT`，不排队）、单次总运行 15 分钟、空闲 30 分钟回收、sync 最长等 300s 后转后台、应用退出 `stopAll(true)`。**主会话重启（换模型等）不杀子代理**，它们本来就是独立进程。
-- **子代理界面**：顶栏 `.subagent-btn`（运行中显示数字并高亮，否则显示已完成数）打开 `SubagentsPanel.tsx` 浮层，左侧列表 + 右侧详情（结论 Markdown、改动文件、过程消息、引导/追加/打断 + 停止）。数据来自 IPC `subagents:list|get|stop|prompt|reveal` 与事件 `subagents:update`（`serializeSubagent`）。每行带 `.subagent-avatar` 图标徽标（按状态着色），面板支持 `initialId` 直接选中某次运行。
+- **子代理界面**：顶栏 `.subagent-btn`（运行中显示数字并高亮，否则显示已完成数）打开右侧抽屉 `SubagentsDrawer.tsx`：列表 ↔ 详情两态（详情有返回按钮），详情含结论 Markdown、改动文件、过程消息、引导/追加/打断 + 停止。数据来自 IPC `subagents:list|get|stop|prompt|reveal` 与事件 `subagents:update`（`serializeSubagent`）。每行带 `.subagent-avatar` 图标徽标（按状态着色），抽屉支持 `initialId` 直接选中某次运行。
+- 抽屉是布局的一部分，不是覆盖层：`App.tsx` 的 `.main-body` 是横向 flex（`.chat-column` + `.subagent-drawer`），打开时会话区与输入框一起变窄（实测 chat 1108→708、composer 860→644），不会盖住正文。新增右侧面板时照这个结构放，别用 absolute 遮罩。
 - **运行状态条在输入框上方**（`RunStatusBar.tsx`，通过 `Composer` 的 `statusBar` 插槽放进 `.composer-wrap`）：父会话在跑时显示耗时 / tokens / 工具数，空闲时显示「子代理运行中 N」；每个运行中的子代理是一枚 `.run-task` chip（图标 + 名称 + 耗时），点击打开面板并选中该运行。
 - **对话里的子代理卡片**：`start_subagent` 的工具调用不再混进「调用 N 个工具」，而是渲染成 `.subagent-card`（图标、label、预设、状态、id、耗时），展开可看实时输出 / 最终结论，并有「查看详细进程」跳到面板。匹配记录靠工具结果里的 `sa_xxxxxxxx`，结果还没回来时按 `label` 匹配。
 - 子代理的**实时进度**：`SubagentsManager.onEvent` 里 `message_end`（assistant 文本）直接追加进 `record.messages` 并 `emit`，所以运行中也能在卡片和面板看到它刚说的话；settle 时 `collect()` 用 `get_messages` 整体重写，不会重复。

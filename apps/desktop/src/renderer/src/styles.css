@@ -837,6 +837,20 @@ button:disabled {
   display: flex;
 }
 
+/* Chat and the subagent drawer share the row: the drawer takes width, it does not cover text. */
+.main-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+
+.chat-column {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
 .chat-area .scroll {
   flex: 1;
   min-height: 0;
@@ -5499,6 +5513,96 @@ button:disabled {
 }
 
 /* ---------- subagents panel ---------- */
+
+.subagent-drawer {
+  flex: 0 0 400px;
+  width: 400px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  border-left: 1px solid var(--border);
+  background: var(--bg-sidebar);
+  animation: drawer-in 0.16s ease;
+}
+
+@keyframes drawer-in {
+  from {
+    transform: translateX(12px);
+    opacity: 0;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+
+.drawer-head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 40px;
+  padding: 0 8px 0 10px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-strong);
+  font-size: 12.4px;
+}
+
+.drawer-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.drawer-count {
+  flex: none;
+  padding: 0 6px;
+  border-radius: 5px;
+  background: var(--bg-hover);
+  color: var(--text-dim);
+  font-size: 10.5px;
+}
+
+.drawer-spacer {
+  flex: 1;
+}
+
+.drawer-back {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 6px;
+  color: var(--faint);
+}
+
+.drawer-back:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+.drawer-back svg {
+  transform: rotate(180deg);
+}
+
+.drawer-list-wrap {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 6px;
+}
+
+.drawer-foot {
+  flex: none;
+  padding: 7px 10px;
+  border-top: 1px solid var(--border);
+  color: var(--faint);
+  font-size: 10.2px;
+  line-height: 1.5;
+}
 .subagent-btn {
   display: inline-flex;
   align-items: center;
@@ -5522,11 +5626,6 @@ button:disabled {
   background: var(--bg-hover);
 }
 
-.subagents-card {
-  width: min(880px, 94%);
-  height: min(560px, 82%);
-}
-
 .subagents-count {
   margin-left: 6px;
   padding: 0 6px;
@@ -5536,17 +5635,10 @@ button:disabled {
   font-size: 10.5px;
 }
 
-.subagents-body {
+.subagents-list {
   flex: 1;
   min-height: 0;
-  display: grid;
-  grid-template-columns: 232px 1fr;
-}
-
-.subagents-list {
   overflow-y: auto;
-  padding: 6px;
-  border-right: 1px solid var(--border);
   display: flex;
   flex-direction: column;
   gap: 2px;
@@ -5705,7 +5797,9 @@ button:disabled {
 }
 
 .subagent-detail {
+  flex: 1;
   min-width: 0;
+  min-height: 0;
   overflow-y: auto;
   padding: 10px 12px;
   display: flex;
