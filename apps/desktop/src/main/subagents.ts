@@ -393,6 +393,21 @@ export class SubagentManager {
       case 'agent_end':
         void this.collect(internal)
         return
+      case 'message_end': {
+        // Live progress: collect() rewrites the transcript when the turn settles, but until then
+        // the panel and the transcript card should show what the subagent is saying.
+        const message = event.message as Record<string, unknown> | undefined
+        if (!message || message.role !== 'assistant') return
+        const text = extractText(message)
+        if (!text.trim()) return
+        record.messages.push({
+          role: 'assistant',
+          text,
+          ts: typeof message.timestamp === 'number' ? message.timestamp : Date.now()
+        })
+        this.emit(record)
+        return
+      }
       default:
     }
   }

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import type { SubagentView } from '@shared/types'
-import { RefreshIcon, StopIcon } from './Icons'
+import { RefreshIcon, SparkIcon, StopIcon } from './Icons'
 import { Markdown } from './Markdown'
 
 const STATUS_LABEL: Record<SubagentView['status'], string> = {
@@ -38,12 +38,14 @@ function isRunning(record: SubagentView): boolean {
 
 export function SubagentsPanel({
   records,
+  initialId,
   onClose
 }: {
   records: SubagentView[]
+  initialId?: string
   onClose: () => void
 }) {
-  const [selectedId, setSelectedId] = useState<string | null>(null)
+  const [selectedId, setSelectedId] = useState<string | null>(initialId ?? null)
   const [draft, setDraft] = useState('')
   const [mode, setMode] = useState<'steer' | 'follow-up' | 'interrupt'>('steer')
   const [busy, setBusy] = useState(false)
@@ -64,6 +66,11 @@ export function SubagentsPanel({
     () => visible.find((record) => record.id === selectedId) ?? visible[0],
     [visible, selectedId]
   )
+
+  // Opening the panel from a task chip or a transcript card selects that run.
+  useEffect(() => {
+    if (initialId) setSelectedId(initialId)
+  }, [initialId])
 
   useEffect(() => {
     setDraft('')
@@ -124,7 +131,9 @@ export function SubagentsPanel({
                   className={`subagent-row ${record.id === selected?.id ? 'active' : ''}`}
                   onClick={() => setSelectedId(record.id)}
                 >
-                  <span className={`subagent-dot ${record.status}`} />
+                  <span className={`subagent-avatar ${record.status}`}>
+                    <SparkIcon size={11} />
+                  </span>
                   <span className="subagent-row-main">
                     <span className="subagent-row-head">
                       {record.label ?? record.agent ?? record.id}

@@ -18,6 +18,7 @@ import { SessionNavigator } from './components/SessionNavigator'
 import { buildOutline } from './lib/outline'
 import { AskQuestionPanel } from './components/AskQuestionPanel'
 import { SubagentsPanel } from './components/SubagentsPanel'
+import { RunStatusBar } from './components/RunStatusBar'
 import { Markdown } from './components/Markdown'
 import type { DraftImage } from './lib/images'
 
@@ -135,6 +136,7 @@ export default function App(): React.JSX.Element {
   const [btw, setBtw] = useState<BtwAnswer | undefined>(undefined)
   const [mcpOpen, setMcpOpen] = useState(false)
   const [subagentsOpen, setSubagentsOpen] = useState(false)
+  const [subagentFocus, setSubagentFocus] = useState<string | undefined>(undefined)
   const [subagents, setSubagents] = useState<SubagentView[]>([])
   const [mcpState, setMcpState] = useState<McpState | undefined>(undefined)
   const queueRef = useRef<QueuedMessage[]>([])
@@ -524,6 +526,11 @@ export default function App(): React.JSX.Element {
         tokens: run.tokens
       }
     : undefined
+
+  const openSubagents = useCallback((id?: string) => {
+    setSubagentFocus(id)
+    setSubagentsOpen(true)
+  }, [])
 
   const deliver = useCallback(
     async (text: string, images: DraftImage[], behavior?: 'steer' | 'followUp'): Promise<boolean> => {
@@ -922,7 +929,8 @@ export default function App(): React.JSX.Element {
               workspace={status.cwd}
               connected={status.phase === 'ready'}
               loggedIn={Boolean(status.model)}
-            runStatus={runStatus}
+              subagents={subagents}
+              onOpenSubagent={openSubagents}
               onSuggestion={(text) => {
                 setDraft(text)
                 requestAnimationFrame(() => {
@@ -999,10 +1007,29 @@ export default function App(): React.JSX.Element {
           disabled={status.phase !== 'ready'}
           status={status}
           onChooseWorkspace={() => void chooseWorkspace()}
+          statusBar={
+            runStatus?.active || subagents.some(isSubagentRunning) ? (
+              <RunStatusBar
+                active={Boolean(runStatus?.active)}
+                elapsedMs={runStatus?.elapsedMs ?? 0}
+                tokens={runStatus?.tokens}
+                runningTools={runStatus?.runningTools ?? 0}
+                subagents={subagents}
+                onOpenSubagent={openSubagents}
+              />
+            ) : undefined
+          }
         />
 
         {subagentsOpen && (
-          <SubagentsPanel records={subagents} onClose={() => setSubagentsOpen(false)} />
+          <SubagentsPanel
+            records={subagents}
+            initialId={subagentFocus}
+            onClose={() => {
+              setSubagentsOpen(false)
+              setSubagentFocus(undefined)
+            }}
+          />
         )}
 
         {mcpOpen && (

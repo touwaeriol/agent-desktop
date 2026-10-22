@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import type { ReactNode } from 'react'
 import type { ModelOption, PiStatus } from '@shared/types'
 import {
   CheckIcon,
@@ -56,7 +57,8 @@ export function Composer({
   streaming,
   disabled,
   status,
-  onChooseWorkspace
+  onChooseWorkspace,
+  statusBar
 }: {
   value: string
   onChange: (value: string) => void
@@ -73,6 +75,8 @@ export function Composer({
   disabled: boolean
   status: PiStatus
   onChooseWorkspace: () => void
+  /** Run summary rendered directly above the input, so it reads as part of the composer. */
+  statusBar?: ReactNode
 }) {
   const ref = useRef<HTMLTextAreaElement>(null)
   const contextRef = useRef<HTMLDivElement>(null)
@@ -340,6 +344,7 @@ export function Composer({
 
   return (
     <div className="composer-wrap">
+      {statusBar}
       <div
         className={`composer ${disabled ? 'disabled' : ''} ${dragging ? 'dragging' : ''}`}
         onDragOver={(event) => {

@@ -1,29 +1,40 @@
 import { useState } from 'react'
+import type { SubagentView } from '@shared/types'
 import type { ChatItem, ToolCallView } from '../lib/messages'
 import { Markdown } from './Markdown'
 import { MessageImages } from './ImageLightbox'
 import { ChevronIcon, SparkIcon, ToolIcon } from './Icons'
 
+const SUBAGENT_STATUS: Record<SubagentView['status'], string> = {
+  starting: '启动中',
+  streaming: '运行中',
+  idle: '已完成',
+  error: '出错',
+  stopped: '已停止'
+}
+
+/** The desktop tool that starts a run: these get a card of their own instead of a generic row. */
+function isSubagentStart(name: string): boolean {
+  return name.endsWith('start_subagent')
+}
+
+function subagentIdFrom(text: string | undefined): string | undefined {
+  return /sa_[0-9a-f]{6,}/.exec(text ?? '')?.[0]
+}
+
+function subagentHint(call: ToolCallView): { label?: string; agent?: string } {
+  try {
+    const args = JSON.parse(call.args) as { label?: string; agent?: string; task?: string }
+    return { label: args.label, agent: args.agent }
+  } catch {
+    return {}
+  }
+}
+
 function formatDuration(ms?: number): string {
   if (ms === undefined) return ''
   if (ms < 1000) return `${Math.round(ms)}ms`
   return `${(ms / 1000).toFixed(1)}s`
-}
-
-function formatElapsed(ms: number): string {
-  const total = Math.max(0, Math.round(ms / 1000))
-  if (total < 60) return `${total}s`
-  const minutes = Math.floor(total / 60)
-  const seconds = total % 60
-  if (minutes < 60) return `${minutes}m ${seconds}s`
-  return `${Math.floor(minutes / 60)}h ${minutes % 60}m`
-}
-
-function formatTokens(value?: number): string | undefined {
-  if (!value) return undefined
-  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`
-  if (value >= 1000) return `${(value / 1000).toFixed(1)}k`
-  return String(value)
 }
 
 type ToolKind = 'read' | 'write' | 'bash' | 'search' | 'other'
@@ -120,8 +131,74 @@ function ToolCard({ call }: { call: ToolCallView }) {
   )
 }
 
-function Thinking({ text }: { text: string }) {
+/**
+ * A subagent run as it appears in the transcript: its own icon, live status, and — when expanded —
+ * the child's latest output plus a way into the full panel.
+ */
+function SubagentCard({
+  call,
+  record,
+  onOpen
+}: {
+  call: ToolCallView
+  record?: SubagentView
+  onOpen: (id?: string) => void
+}) {
+  const hint = subagentHint(call)
+  const id = record?.id ?? subagentIdFrom(call.result)
+  const status = record?.status ?? (call.status === 'running' ? 'streaming' : 'idle')
   const [open, setOpen] = useState(false)
+  const label = record?.label ?? hint.label ?? record?.agent ?? hint.agent ?? '子代理'
+  const lastMessage = record?.messages?.[record.messages.length - 1]?.text
+  const running = status === 'starting' || status === 'streaming'
+
+  return (
+    <div className={`subagent-card ${status}`}>
+      <button className="subagent-card-head" onClick={() => setOpen((value) => !value)}>
+        <span className={`subagent-card-icon ${status}`}>
+          <SparkIcon size={12} />
+        </span>
+        <span className="subagent-card-title">{label}</span>
+        {record?.agent && record.agent !== label && (
+          <span className="subagent-card-agent">{record.agent}</span>
+        )}
+        <span className={`subagent-card-state ${status}`}>{SUBAGENT_STATUS[status]}</span>
+        {id && <span className="subagent-card-id">{id}</span>}
+        <span className="subagent-card-spacer" />
+        {record?.runtimeMs !== undefined && (
+          <span className="subagent-card-meta">{formatDuration(record.runtimeMs)}</span>
+        )}
+        <ChevronIcon size={11} className={`activity-chevron ${open ? 'open' : ''}`} />
+      </button>
+      {open && (
+        <div className="subagent-card-body">
+          {record?.error && <div className="message-error">{record.error}</div>}
+          {running && !record?.finalText && (
+            <div className="subagent-card-live">
+              <span className="pulse-dot" />
+              <span>{lastMessage ? lastMessage.replace(/\s+/g, ' ').slice(0, 240) : '正在处理…'}</span>
+            </div>
+          )}
+          {record?.finalText && (
+            <div className="subagent-card-final">
+              <Markdown>{record.finalText}</Markdown>
+            </div>
+          )}
+          {!record && !running && call.result && (
+            <pre className="tool-result">{call.result}</pre>
+          )}
+          <div className="subagent-card-actions">
+            <button className="ghost" onClick={() => onOpen(id)}>
+              查看详细进程
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function Thinking({ text }: { text: string }) {  const [open, setOpen] = useState(false)
   return (
     <div className="thinking">
       <button className="thinking-head" onClick={() => setOpen((value) => !value)}>
@@ -134,7 +211,15 @@ function Thinking({ text }: { text: string }) {
   )
 }
 
-function Message({ item }: { item: ChatItem }) {
+function Message({
+  item,
+  subagents,
+  onOpenSubagent
+}: {
+  item: ChatItem
+  subagents: SubagentView[]
+  onOpenSubagent: (id?: string) => void
+}) {
   if (item.role === 'system') {
     return (
       <article className="message system" data-message-id={item.id}>
@@ -158,12 +243,32 @@ function Message({ item }: { item: ChatItem }) {
       </article>
     )
   }
+  const starts = item.toolCalls.filter((call) => isSubagentStart(call.name))
+  const others = item.toolCalls.filter((call) => !isSubagentStart(call.name))
   return (
     <article className="message assistant" data-message-id={item.id}>
       <div className="assistant-body">
         {item.thinking && <Thinking text={item.thinking} />}
         {item.text && <Markdown>{item.text}</Markdown>}
-        {item.toolCalls.length > 0 && <Activity calls={item.toolCalls} />}
+        {starts.map((call) => {
+          const id = subagentIdFrom(call.result)
+          const record = id
+            ? subagents.find((entry) => entry.id === id)
+            : (() => {
+                const hint = subagentHint(call)
+                if (!hint.label) return undefined
+                return subagents.find((entry) => entry.label === hint.label)
+              })()
+          return (
+            <SubagentCard
+              key={call.id}
+              call={call}
+              record={record}
+              onOpen={onOpenSubagent}
+            />
+          )
+        })}
+        {others.length > 0 && <Activity calls={others} />}
         {item.error && <div className="message-error">{item.error}</div>}
         {item.streaming && !item.text && item.toolCalls.length === 0 && (
           <div className="typing">
@@ -189,14 +294,16 @@ export function Conversation({
   workspace,
   connected,
   loggedIn,
-  runStatus,
+  subagents,
+  onOpenSubagent,
   onSuggestion
 }: {
   items: ChatItem[]
   workspace: string
   connected: boolean
   loggedIn: boolean
-  runStatus?: { active: boolean; elapsedMs: number; runningTools: number; tokens?: number }
+  subagents: SubagentView[]
+  onOpenSubagent: (id?: string) => void
   onSuggestion: (text: string) => void
 }) {
   if (items.length === 0) {
@@ -225,32 +332,13 @@ export function Conversation({
   return (
     <div className="conversation">
       {items.map((item) => (
-        <Message key={item.id} item={item} />
+        <Message
+          key={item.id}
+          item={item}
+          subagents={subagents}
+          onOpenSubagent={onOpenSubagent}
+        />
       ))}
-      {runStatus && (runStatus.active || runStatus.elapsedMs > 0) && (
-        <div className="run-status">
-          <span className={`run-dot ${runStatus.active ? 'active' : ''}`} />
-          <span>{formatElapsed(runStatus.elapsedMs)}</span>
-          {formatTokens(runStatus.tokens) && (
-            <>
-              <span className="run-sep">·</span>
-              <span>{formatTokens(runStatus.tokens)} tokens</span>
-            </>
-          )}
-          {runStatus.runningTools > 0 && (
-            <>
-              <span className="run-sep">·</span>
-              <span>{runStatus.runningTools} 个任务运行中</span>
-            </>
-          )}
-          {runStatus.active && (
-            <>
-              <span className="run-sep">·</span>
-              <span>运行中</span>
-            </>
-          )}
-        </div>
-      )}
     </div>
   )
 }
