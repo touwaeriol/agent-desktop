@@ -2012,6 +2012,18 @@ button:disabled {
   font-weight: 600;
 }
 
+/* Brand mark: tinted with the provider's own colour, `currentColor` for brands that would vanish
+   on one of the two themes (see `ProviderMark.tsx`). */
+.provider-mark.branded {
+  color: var(--provider-color, var(--text));
+  background: color-mix(in srgb, var(--provider-color, var(--bg-hover)) 14%, var(--bg-hover));
+  border-color: color-mix(in srgb, var(--provider-color, var(--border-strong)) 28%, var(--border-strong));
+}
+
+.provider-mark.branded svg {
+  display: block;
+}
+
 .provider-main {
   flex: 1;
   min-width: 0;

@@ -313,6 +313,10 @@ export function Sidebar({
   }, [moreOpen])
 
   const groups = useMemo<SessionGroup[]>(() => {
+    // A pinned session lives in the 置顶 block only: showing it again under its project made the
+    // same conversation appear twice.
+    const pinnedPaths = new Set(pinned)
+    const visible = sessions.filter((session) => !pinnedPaths.has(session.path))
     const sortSessions = (list: SessionSummary[]): SessionSummary[] =>
       list.slice().sort((a, b) => {
         if (prefs.sort === 'name') return a.title.localeCompare(b.title, 'zh-CN')
@@ -341,8 +345,8 @@ export function Sidebar({
     }
 
     if (prefs.group === 'none') {
-      if (sessions.length === 0) return []
-      const view = applyProjectView('none', sessions)
+      if (visible.length === 0) return []
+      const view = applyProjectView('none', visible)
       return [
         {
           key: 'none',
@@ -358,7 +362,7 @@ export function Sidebar({
 
     if (prefs.group === 'date') {
       const buckets = new Map<string, { order: number; list: SessionSummary[] }>()
-      for (const session of sessions) {
+      for (const session of visible) {
         const { label, order } = dateGroup(session.updatedAt)
         const bucket = buckets.get(label) ?? { order, list: [] }
         bucket.list.push(session)
@@ -382,7 +386,7 @@ export function Sidebar({
     }
 
     const folders = new Map<string, SessionSummary[]>()
-    for (const session of sessions) {
+    for (const session of visible) {
       const key = session.cwd || ''
       const list = folders.get(key) ?? []
       list.push(session)
@@ -390,7 +394,7 @@ export function Sidebar({
     }
     if (prefs.showEmptyGroups) {
       const known = new Set<string>([status.cwd])
-      for (const session of sessions) known.add(session.cwd || '')
+      for (const session of visible) known.add(session.cwd || '')
       for (const key of known) {
         if (!folders.has(key)) folders.set(key, [])
       }
@@ -413,7 +417,7 @@ export function Sidebar({
       prefs.sort === 'name' ? a.label.localeCompare(b.label, 'zh-CN') : b.latest - a.latest
     )
     return result
-  }, [sessions, prefs, archived, projectStatus, projectQueries, status.cwd])
+  }, [sessions, pinned, prefs, archived, projectStatus, projectQueries, status.cwd])
 
   useEffect(() => {
     if (!activePath) return
@@ -704,7 +708,7 @@ export function Sidebar({
       )}
 
       <div className="session-list">
-        {groups.length === 0 && (
+        {groups.length === 0 && pinnedSessions.length === 0 && (
           <div className="session-empty">
             {sessions.length === 0
               ? '还没有会话，发送第一条消息即可创建'

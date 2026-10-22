@@ -34,6 +34,7 @@ import {
 import { CustomProvidersPanel } from './CustomProvidersPanel'
 import { McpPanel } from './McpPanel'
 import { AgentsPanel } from './AgentsPanel'
+import { ProviderMark } from './ProviderMark'
 import { Toggle } from './Toggle'
 import { updateBusy, updateProgress, updateStatusText } from '../lib/updates'
 
@@ -940,7 +941,7 @@ export function SettingsModal({
                   <div
                     className={`provider-row ${provider.configured ? 'configured' : ''}`}
                   >
-                    <div className="provider-mark">{provider.name.slice(0, 1).toUpperCase()}</div>
+                    <ProviderMark id={provider.id} name={provider.name} />
                     <div className="provider-main">
                       <div className="provider-name">
                         {provider.name}

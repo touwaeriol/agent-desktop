@@ -42,7 +42,7 @@ npm run typecheck    # node + web 两个 tsconfig 分别检查
 - 主题：`document.documentElement.dataset.theme` 为 `dark` / `light`，持久化在 localStorage `pi-desktop-theme`。样式全部走 `styles.css` 顶部的 CSS 变量；新增样式不要写死颜色，否则亮色主题会破。切换主题时同时调用 `app:set-theme` 同步 Electron 标题栏 overlay 颜色。
 - 侧栏顶部按参考产品（Claude 桌面端）排：`.sidebar-toolbar`（☰ 收起侧栏 / ▭ 视图选项 / ← → 会话前进后退）、`.sidebar-nav`（新建 / 自定义 / 更多，更多展开 `.nav-menu`）、`.pinned-block`（置顶会话，编号徽标）。
 - 会话前进后退由 `App.tsx` 的 `historyRef`（stack + index，上限 50）驱动：`selectSession(session, { remember: false })` 用于历史跳转，避免再次入栈。
-- 置顶存在 localStorage `pi-pinned-sessions`（路径数组），会话悬停时的第一个 `.session-archive` 按钮是置顶、第二个是归档。
+- 置顶存在 localStorage `pi-pinned-sessions`（路径数组），会话悬停时的第一个 `.session-archive` 按钮是置顶、第二个是归档。**置顶的会话只在 `.pinned-block` 里出现，必须从项目分组里过滤掉**（`groups` 用 `visible = sessions.filter(!pinned)`）——否则同一个会话在两处重复，用户会以为有两条。
 - 侧栏：按 `session.cwd` 分项目，默认每个项目显示 10 条，超出显示“显示其余 N 个”；折叠/展开状态在 `Sidebar` 内部。项目标题右侧 `+` 通过 `pi:new-project-session` 切换 cwd 并开新会话。
 - `PiRpcClient` 的 `exit` / `error` 回调必须确认 `this.child === child` 再处理，否则重启时旧进程的退出事件会把新进程引用置空并误报“pi 进程已退出”。
 
@@ -93,6 +93,7 @@ npm run typecheck    # node + web 两个 tsconfig 分别检查
 ## 设置界面
 
 - 设置弹窗可拖右下角缩放（CSS `resize: both`，最小 720×460），尺寸存 `localStorage["pi-settings-size"]`，由 `ResizeObserver` 在 400ms 防抖后写入；`SettingsModal` 常驻挂载，所以关闭再打开尺寸不会丢。
+- 服务商列表左侧的 `.provider-mark` 用**品牌图标**（`ProviderMark.tsx`）：路径来自 `@lobehub/icons-static-svg`（MIT）并**内联进源码**，不要再装那个包。图标是单色、用 `currentColor` 上色，颜色取 `--provider-color`；品牌色在黑/白主题之一会消失时（OpenAI、Kimi、Anthropic 这类近黑，Hugging Face 这类近黄）退回 `currentColor`。图标集里没有的品牌（Radius、小米）显示首字母，不要自己重画 logo。
 - MCP 页的行要压扁：描述一律单行省略（`.mcp-row-sub` 的 `nowrap`），行内边距 6px 10px，内置引擎卡片 7px 10px，工具列表默认折叠。不要再让一段说明换两三行——一个服务器占半屏时下面的服务器列表会被挤出视野。
 
 ## 消息队列
