@@ -148,6 +148,10 @@ export default function App(): React.JSX.Element {
   const [subagentFocus, setSubagentFocus] = useState<string | undefined>(undefined)
   const [subagents, setSubagents] = useState<SubagentView[]>([])
   const [mcpState, setMcpState] = useState<McpState | undefined>(undefined)
+  /** Context-window usage of the current session, shown next to the composer. */
+  const [contextUsage, setContextUsage] = useState<
+    { tokens?: number | null; contextWindow?: number; percent?: number | null } | undefined
+  >(undefined)
   const queueRef = useRef<QueuedMessage[]>([])
   useEffect(() => {
     queueRef.current = queued
@@ -292,6 +296,7 @@ export default function App(): React.JSX.Element {
       setStick(true)
       const stats = await window.pi.getSessionStats().catch(() => undefined)
       setRun({ runningTools: 0, tokens: stats?.tokens?.total })
+      setContextUsage(stats?.contextUsage)
     } catch {
       // ignore
     }
@@ -429,7 +434,10 @@ export default function App(): React.JSX.Element {
         setRun((prev) => ({ ...prev, endedAt: Date.now(), runningTools: 0 }))
         void window.pi
           .getSessionStats()
-          .then((stats) => setRun((prev) => ({ ...prev, tokens: stats.tokens?.total })))
+          .then((stats) => {
+            setRun((prev) => ({ ...prev, tokens: stats.tokens?.total }))
+            setContextUsage(stats.contextUsage)
+          })
           .catch(() => undefined)
         void loadSessions()
         break
@@ -1103,6 +1111,8 @@ export default function App(): React.JSX.Element {
           images={draftImages}
           onImagesChange={setDraftImages}
           queued={queued}
+          contextUsage={contextUsage}
+          autoCompactPercent={status.autoCompactPercent}
           onQueueRemove={(id) => setQueued((prev) => prev.filter((item) => item.id !== id))}
           onQueueEdit={(id) => {
             const target = queued.find((item) => item.id === id)

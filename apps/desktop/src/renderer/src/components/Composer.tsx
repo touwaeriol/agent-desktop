@@ -57,6 +57,8 @@ export function Composer({
   streaming,
   disabled,
   status,
+  contextUsage,
+  autoCompactPercent,
   onChooseWorkspace,
   statusBar
 }: {
@@ -74,6 +76,10 @@ export function Composer({
   streaming: boolean
   disabled: boolean
   status: PiStatus
+  /** Current context-window usage from `get_session_stats`. */
+  contextUsage?: { tokens?: number | null; contextWindow?: number; percent?: number | null }
+  /** Where auto-compaction starts, as a percentage; shown in the meter's tooltip. */
+  autoCompactPercent?: number
   onChooseWorkspace: () => void
   /** Run summary rendered directly above the input, so it reads as part of the composer. */
   statusBar?: ReactNode
@@ -342,6 +348,30 @@ export function Composer({
       status.model.id)
     : '未登录 / 无可用模型'
 
+  /**
+   * Context-window usage. `percent` is null right after compaction (pi has no fresh usage yet), so
+   * fall back to computing it from the token count and show 0 rather than a stale number.
+   */
+  const contextMeter = (() => {
+    const window = contextUsage?.contextWindow
+    if (!window) return undefined
+    const used = typeof contextUsage?.tokens === 'number' ? contextUsage.tokens : undefined
+    const percent =
+      typeof contextUsage?.percent === 'number'
+        ? Math.round(contextUsage.percent)
+        : used
+          ? Math.round((used / window) * 100)
+          : 0
+    const limit = autoCompactPercent ?? 90
+    const tone = percent >= limit ? 'danger' : percent >= Math.max(50, limit - 15) ? 'warn' : ''
+    return {
+      percent,
+      tone,
+      usedLabel: used ? contextLabel(used) : '—',
+      windowLabel: contextLabel(window)
+    }
+  })()
+
   return (
     <div className="composer-wrap">
       {statusBar}
@@ -532,6 +562,23 @@ export function Composer({
             </button>
           </div>
           <div className="composer-right">
+            {contextMeter && (
+              <div
+                className={`context-meter ${contextMeter.tone}`}
+                title={
+                  `上下文窗口 ${contextMeter.usedLabel} / ${contextMeter.windowLabel}` +
+                  (autoCompactPercent
+                    ? `（${autoCompactPercent}% 时自动压缩）`
+                    : '（自动压缩已关闭）')
+                }
+              >
+                <span className="context-ring" style={{ ['--p' as string]: `${contextMeter.percent}%` }} />
+                <span className="context-meter-value">{contextMeter.percent}%</span>
+                <span className="context-meter-sub">
+                  {contextMeter.usedLabel} / {contextMeter.windowLabel}
+                </span>
+              </div>
+            )}
             <div className="model-pill" ref={pickerRef}>
               <button
                 className={`pill-seg model ${status.model ? '' : 'warn'} ${modelOpen ? 'open' : ''}`}

@@ -162,6 +162,17 @@ export function CustomProvidersPanel({
       setEditorError('自定义服务商需要选择 API 类型')
       return
     }
+    // pi needs the window to decide when to compact and how much it can send; a model without one
+    // silently loses auto-compaction (the reserve falls back to a flat 16K tokens).
+    const missingWindow = draft.models.find(
+      (model) => model.id.trim() && !(Number(model.contextWindow) > 0)
+    )
+    if (missingWindow) {
+      setEditorError(
+        `模型 ${missingWindow.id.trim()} 必须填写上下文窗口大小（contextWindow），否则自动压缩与用量显示都会失准`
+      )
+      return
+    }
     const models = draft.models
       .filter((model) => model.id.trim())
       .map((model) => {
@@ -466,7 +477,8 @@ export function CustomProvidersPanel({
                       <input
                         type="number"
                         value={model.contextWindow}
-                        placeholder="上下文"
+                        placeholder="上下文（必填）"
+                        title="上下文窗口大小，例如 200000；自动压缩按它的 90% 触发"
                         onChange={(event) =>
                           updateModel(index, { contextWindow: event.target.value })
                         }

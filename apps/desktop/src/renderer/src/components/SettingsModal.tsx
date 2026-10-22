@@ -34,11 +34,25 @@ import {
 import { CustomProvidersPanel } from './CustomProvidersPanel'
 import { McpPanel } from './McpPanel'
 import { AgentsPanel } from './AgentsPanel'
+import { Toggle } from './Toggle'
 import { updateBusy, updateProgress, updateStatusText } from '../lib/updates'
 
 type Tab = 'providers' | 'custom' | 'mcp' | 'agents' | 'general'
 
 const THINKING_LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
+
+/** `349K` / `1M` — the same shape the composer's context meter uses. */
+function formatTokens(value: number): string {
+  if (value >= 1_000_000) {
+    const millions = value / 1_000_000
+    return `${Number.isInteger(millions) ? millions : millions.toFixed(1)}M`
+  }
+  if (value >= 1000) {
+    const thousands = value / 1000
+    return `${thousands >= 100 ? Math.round(thousands) : thousands.toFixed(1)}K`
+  }
+  return String(value)
+}
 
 interface LoginState {
   loginId: string
@@ -434,6 +448,35 @@ export function SettingsModal({
       setError(cause instanceof Error ? cause.message : String(cause))
     }
   }, [])
+
+  /**
+   * Turn auto-compaction on or off. Enabling also makes the main process write the reserve that
+   * puts the trigger at `AUTO_COMPACT_RATIO` of the current model's window, then restart pi.
+   */
+  const toggleAutoCompact = useCallback(
+    async (enabled: boolean) => {
+      try {
+        const result = await window.pi.setAutoCompact(enabled)
+        if (!result.ok) {
+          setError(result.error ?? '设置失败')
+          return
+        }
+        setNotice(
+          !enabled
+            ? '自动压缩已关闭'
+            : result.warning
+              ? result.warning
+              : `自动压缩已开启：到 ${status.autoCompactPercent ?? 90}% 时压缩（保留 ${formatTokens(
+                  result.reserveTokens ?? 0
+                )} tokens）`
+        )
+        await loadSettings()
+      } catch (cause) {
+        setError(cause instanceof Error ? cause.message : String(cause))
+      }
+    },
+    [loadSettings, status.autoCompactPercent]
+  )
 
   const loadModelsJson = useCallback(async () => {
     const file = await window.pi.getModelsJson()
@@ -1057,6 +1100,31 @@ export function SettingsModal({
                 <p className="field-hint">
                   独立：<code>{desktopConfig?.isolatedSessionDir ?? '应用数据目录/sessions'}</code>
                   ，只给桌面端使用，文件格式与 pi 完全一致，可随时切回共用。
+                </p>
+              </div>
+
+              <div className="field">
+                <label>自动压缩</label>
+                <div className="field-row">
+                  <Toggle
+                    checked={settings?.compaction?.enabled !== false}
+                    onChange={(enabled) => void toggleAutoCompact(enabled)}
+                  />
+                  <span className="field-inline">
+                    {settings?.compaction?.enabled === false
+                      ? '已关闭：上下文满了会直接报错'
+                      : `到 ${status.autoCompactPercent ?? 90}% 时自动压缩`}
+                    {settings?.compaction?.enabled !== false &&
+                      status.model?.contextWindow &&
+                      `（约 ${formatTokens(
+                        Math.round(((status.autoCompactPercent ?? 90) / 100) * status.model.contextWindow)
+                      )} / 窗口 ${formatTokens(status.model.contextWindow)}）`}
+                  </span>
+                </div>
+                <p className="field-hint">
+                  阈值按当前模型的上下文窗口换算成 pi 的 <code>reserveTokens</code>
+                  ，换模型时会重新计算（需要重启 pi 才生效）。没有窗口信息的自定义模型请先补上
+                  <code>contextWindow</code>。
                 </p>
               </div>
 

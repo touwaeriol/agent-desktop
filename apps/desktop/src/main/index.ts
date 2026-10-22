@@ -107,6 +107,8 @@ interface DesktopConfig {
   cwd?: string
   sessionMode?: SessionMode
   mcp?: McpConfig
+  /** Auto-compaction policy; `ratio` is the fraction of the window that triggers it. */
+  autoCompact?: { ratio?: number }
 }
 
 let desktopConfig: DesktopConfig = {}
@@ -133,6 +135,43 @@ async function saveConfig(patch: Partial<DesktopConfig>): Promise<void> {
 
 function currentSessionMode(): SessionMode {
   return desktopConfig.sessionMode === 'isolated' ? 'isolated' : 'shared'
+}
+
+/** Auto-compaction starts at this fraction of the model's context window. */
+const AUTO_COMPACT_RATIO = 0.9
+
+function autoCompactRatio(): number {
+  const ratio = desktopConfig.autoCompact?.ratio
+  return typeof ratio === 'number' && ratio > 0.3 && ratio < 0.99 ? ratio : AUTO_COMPACT_RATIO
+}
+
+/**
+ * Free context pi keeps below the window, i.e. the number that makes it compact at `ratio`.
+ *
+ * pi compacts when `contextTokens > contextWindow - reserveTokens`, so 90% of a 1M window is a
+ * 100K reserve.
+ */
+function reserveFor(window: number, ratio: number): number {
+  return Math.max(1000, Math.round(window * (1 - ratio)))
+}
+
+/**
+ * Keep pi's compaction reserve in step with the active model's window.
+ *
+ * pi reads `reserveTokens` from settings.json at startup, so a changed window only takes effect
+ * after a restart (`reloadPiConfig`, which defers while a run is in flight). Returns the reserve it
+ * settled on, or undefined when auto-compaction is off or the model has no window.
+ */
+async function syncAutoCompact(options: { restart?: boolean } = {}): Promise<number | undefined> {
+  const settings = await providers.getAppSettings().catch(() => undefined)
+  if (!settings?.compaction?.enabled) return undefined
+  const window = status.model?.contextWindow
+  if (!window) return undefined
+  const reserve = reserveFor(window, autoCompactRatio())
+  if (settings.compaction.reserveTokens === reserve) return reserve
+  await providers.setCompactionSettings({ enabled: true, reserveTokens: reserve })
+  if (options.restart) await reloadPiConfig()
+  return reserve
 }
 
 function currentSessionDir(): string {
@@ -631,7 +670,18 @@ async function getDeviceId(): Promise<string> {
 }
 
 function broadcastStatus(): void {
-  mainWindow?.webContents.send('pi:status', status)
+  mainWindow?.webContents.send('pi:status', statusSnapshot())
+}
+
+/** pi's own default is on, so the window starts assuming 90% until settings say otherwise. */
+let autoCompactEnabled = true
+
+/** Status as the window should see it: the compaction target belongs with the model info. */
+function statusSnapshot(): PiStatus {
+  return {
+    ...status,
+    autoCompactPercent: autoCompactEnabled ? Math.round(autoCompactRatio() * 100) : undefined
+  }
 }
 
 function cancelPendingAsks(reason: string): void {
@@ -973,7 +1023,7 @@ function sendLoginMessage(message: LoginMessage): void {
 }
 
 function registerIpc(): void {
-  ipcMain.handle('pi:get-status', () => status)
+  ipcMain.handle('pi:get-status', () => statusSnapshot())
 
   ipcMain.handle('pi:restart', async (_event, cwd?: string) => {
     if (btwActive) await closeSideChat()
@@ -1306,30 +1356,46 @@ function registerIpc(): void {
     }
   })
 
+  /**
+   * Auto-compaction toggle. Turning it on also writes the reserve that makes pi compact at
+   * `AUTO_COMPACT_RATIO` of the current model's window, then restarts pi so it reads that value.
+   */
   ipcMain.handle('pi:set-auto-compact', async (_event, enabled: boolean) => {
     try {
       await rpc.request('set_auto_compaction', { enabled }, 10_000)
       await providers.setCompactionSettings({ enabled })
-      return { ok: true }
+      autoCompactEnabled = enabled
+      broadcastStatus()
+      if (!enabled) return { ok: true }
+      const reserveTokens = await syncAutoCompact({ restart: true })
+      if (reserveTokens === undefined) {
+        return {
+          ok: true,
+          warning: '当前模型没有上下文窗口信息，自动压缩沿用 pi 的默认余量（16K tokens）'
+        }
+      }
+      return { ok: true, contextWindow: status.model?.contextWindow, reserveTokens }
     } catch (error) {
       return { ok: false, error: error instanceof Error ? error.message : String(error) }
     }
   })
 
-  /** `/autocompact 500000`: start compacting once the context passes that many tokens. */
+  /**
+   * `/autocompact 500000`: compact once the context passes that many tokens.
+   *
+   * The number is stored as a ratio of the window, so a later model switch recomputes it instead of
+   * keeping a token count that no longer means anything.
+   */
   ipcMain.handle('pi:set-compact-threshold', async (_event, tokens: number) => {
     try {
-      const choices = await providers.listModelChoices()
-      const current = status.model
-      const match = choices.find(
-        (choice) => choice.provider === current?.provider && choice.id === current?.id
-      )
-      const contextWindow = match?.contextWindow
+      const contextWindow = status.model?.contextWindow
       if (!contextWindow) {
         return { ok: false, error: '当前模型没有上下文窗口信息，无法换算阈值' }
       }
-      const reserveTokens = Math.max(0, contextWindow - Math.max(1000, Math.round(tokens)))
+      const target = Math.max(1000, Math.round(tokens))
+      const reserveTokens = Math.max(0, contextWindow - target)
       await providers.setCompactionSettings({ enabled: true, reserveTokens })
+      await saveConfig({ autoCompact: { ratio: Math.min(0.99, target / contextWindow) } })
       if (btwActive) await closeSideChat()
       await startPi(status.cwd, sessionArgs())
       return { ok: true, contextWindow, reserveTokens }
@@ -1594,6 +1660,9 @@ function registerIpc(): void {
       const model = modelFromState({ model: response.data })
       if (model) setStatus({ model })
       await refreshState()
+      // A different window means a different 90% point; pi only reads the reserve at startup, so
+      // this restarts when (and only when) the number actually changed.
+      await syncAutoCompact({ restart: true }).catch(() => undefined)
       return { ok: true }
     } catch (error) {
       return { ok: false, error: error instanceof Error ? error.message : String(error) }
@@ -1782,7 +1851,15 @@ app.whenReady().then(async () => {
   subagentManager()
   void providers.listProviders().catch(() => undefined)
   void providers.listModelChoices().catch(() => undefined)
-  void startPi(cwd)
+  // Keep the compaction reserve matched to whatever model the session restores.
+  void providers
+    .getAppSettings()
+    .then((settings) => {
+      autoCompactEnabled = settings.compaction?.enabled !== false
+      broadcastStatus()
+    })
+    .catch(() => undefined)
+  void startPi(cwd).then(() => syncAutoCompact())
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()

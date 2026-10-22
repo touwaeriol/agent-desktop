@@ -427,6 +427,7 @@ export async function setCompactionSettings(next: {
 
 export async function getAppSettings(): Promise<AppSettings> {
   const raw = await readRawSettings()
+  const compaction = (raw.compaction as Record<string, unknown> | undefined) ?? {}
   return {
     defaultProvider:
       typeof raw.defaultProvider === 'string' ? raw.defaultProvider : undefined,
@@ -436,7 +437,12 @@ export async function getAppSettings(): Promise<AppSettings> {
     enabledModels: readEnabledModels(raw),
     settingsPath: SETTINGS_PATH,
     modelsPath: MODELS_PATH,
-    authPath: AUTH_PATH
+    authPath: AUTH_PATH,
+    compaction: {
+      enabled: compaction.enabled !== false,
+      reserveTokens:
+        typeof compaction.reserveTokens === 'number' ? compaction.reserveTokens : undefined
+    }
   }
 }
 

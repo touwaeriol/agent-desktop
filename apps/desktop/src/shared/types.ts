@@ -20,6 +20,8 @@ export interface PiStatus {
   isStreaming?: boolean
   /** pi is rewriting the context; prompts are refused until it finishes. */
   compacting?: boolean
+  /** Percentage of the window at which auto-compaction starts; absent when it is off. */
+  autoCompactPercent?: number
   error?: string
   stderrTail?: string
 }
@@ -157,6 +159,14 @@ export interface AppSettings {
   settingsPath: string
   modelsPath: string
   authPath: string
+  /** Auto-compaction as `~/.pi/agent/settings.json` has it, plus the percentage we target. */
+  compaction?: {
+    enabled: boolean
+    /** Free context pi keeps below the window; compaction starts at `window - reserveTokens`. */
+    reserveTokens?: number
+    /** Where that reserve puts the trigger, as a percentage of the window. */
+    thresholdPercent?: number
+  }
 }
 
 export interface ProviderModelOption {
@@ -474,7 +484,14 @@ export interface PiBridge {
   setAgentExposure(exposure: 'prompt' | 'lazy' | 'hidden'): Promise<McpState>
   openAgentsConfig(): Promise<void>
   compactSession(instructions?: string): Promise<{ ok: boolean; summary?: string; error?: string }>
-  setAutoCompact(enabled: boolean): Promise<{ ok: boolean; error?: string }>
+  setAutoCompact(enabled: boolean): Promise<{
+    ok: boolean
+    error?: string
+    /** Set when the model has no window, so pi's default reserve is kept. */
+    warning?: string
+    contextWindow?: number
+    reserveTokens?: number
+  }>
   setCompactThreshold(tokens: number): Promise<{
     ok: boolean
     contextWindow?: number

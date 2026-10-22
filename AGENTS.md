@@ -32,6 +32,7 @@ npm run typecheck    # node + web 两个 tsconfig 分别检查
 - 凭据写入 `~/.pi/agent/auth.json`；`models.json` 保存后必须 `resetRuntime()` 再重建，否则模型目录是旧的。`settings.json` 只合并 `defaultProvider` / `defaultModel` / `defaultThinkingLevel`。
 - 凭据、models.json、settings 变更后主进程重启 pi，并用 `--session <当前会话文件>` 保留对话；如果正在流式输出则跳过重启，下次启动生效（`configPending`，见「运行状态」）。
 - **自定义接口地址**只对 `BASE_URL_PROVIDERS`（anthropic / openai / google / deepseek）开放，写进 `models.json` 的 `providers.<id>.baseUrl`——pi 文档保证「只给已有服务商设 baseUrl/headers 会保留其内置模型」，所以不需要重写模型列表。`setProviderBaseUrl` 会保留该 provider 的其他字段，清空时连空的 provider 对象一起删掉。改完必须重启 pi（`reloadPiConfig()`），web 引擎则通过 `providers.getRuntime()` 立刻看到新地址。
+- **自定义服务商的每个模型必须填 `contextWindow`**（`CustomProvidersPanel` 保存时校验）。缺了它 pi 只能用默认 16K 余量做自动压缩，用量显示也会失准；官方内置服务商的窗口 pi 目录里已有，不需要用户填。
 - 区域/订阅版本是 pi 的**独立 provider id**，不要合并：`moonshotai-cn`/`moonshotai`（Kimi 国内/海外）、`kimi-coding`（Kimi 订阅）、`minimax-cn`/`minimax`、`zai`/`zai-coding-cn`（Z.AI 海外/国内订阅）、`google`（AI Studio）/`google-vertex`。设置页用 `PROVIDER_NOTES` 给这些 id 加中文说明，而不是改名字或做映射。
 - 模型切换：输入条模型 chip 打开列表，数据来自 RPC `get_available_models`（只含已配置凭据的服务商），选择后调用 `set_model` 并广播新状态；不要再用 `cycle_model` 盲切。
 - 同一会话内跨服务商切换是 pi 原生能力：`set_model` 只要求新服务商有凭据，会向会话追加 `model_change` 记录，历史保持不变，下一条 assistant 消息记录新的 `provider/model`。恢复会话时 pi 用会话里最后一个 `model_change` / assistant 消息恢复模型（`sdk.js` 的 `getBranchSelection` + `hasConfiguredAuth`）；凭据缺失才回退默认模型并给出 “Could not restore model …”。切换的代价是 prompt cache 归零、换到窗口更小的模型会触发自动压缩；没有 provider 签名的 thinking 块在发给 Anthropic 时会被降级成普通文本（`pi-ai/dist/api/anthropic-messages.js`）。
@@ -72,6 +73,8 @@ npm run typecheck    # node + web 两个 tsconfig 分别检查
 - 渲染层 `lib/images.ts` 负责 File → base64（`blobToDraftImage`，上限 8MB）和 `clipboardImages`（读 `clipboardData.items`）。**图片是纯附件**：不写文件名、不插入 `[图片N]` 标记，统一在输入框上方以 42×42 圆角方块展示（`object-fit: cover`，不同长宽比也对齐），悬停才出现删除按钮；发送时按数组顺序传给 pi。
 - 点任意缩略图打开 `ImageLightbox`（Esc / 点背景关闭）；会话里用户消息用 `MessageImages` 渲染，图片在气泡**上方**右对齐（`.message.user` 是 column + align-items flex-end）。
 - 允许只发图片不发文字：`prompt` 的 `message` 传空串，pi 接受（实测模型能收到图）。
+- **上下文用量**：输入框右下角的小圆环 + `2% 20K / 1M`，数据来自 `get_session_stats().contextUsage`（`{tokens, contextWindow, percent}`）。`App.tsx` 在 `loadMessages` 和 `agent_settled` 时刷新；`percent` 在刚压缩完时是 `null`，此时按 `tokens/window` 兜底、拿不到就显示 0。颜色：到自动压缩阈值变红、阈值前 15 个百分点变琥珀。**不要**显示 prompt cache 到期时间——pi 不提供，也不该猜。
+- **自动压缩**：目标是窗口的 90%（`AUTO_COMPACT_RATIO`）。pi 在 `contextTokens > contextWindow - reserveTokens` 时压缩，所以 `reserveTokens = window × (1 - ratio)`（1M 窗口 → 100K 余量）。写入 `~/.pi/agent/settings.json` 的 `compaction.{enabled,reserveTokens}`；**pi 只在启动时读这个值**，所以改完必须重启（`reloadPiConfig`，忙时会延后）。`syncAutoCompact()` 在启用、换模型、启动时各跑一次，值没变就不重启。`/autocompact <tokens>` 会把它换算成比例存进 `config.json` 的 `autoCompact.ratio`，换模型时按比例重算。模型没有 `contextWindow` 时保留 pi 默认的 16K 余量并在设置里提示。
 
 ## 斜杠命令
 
