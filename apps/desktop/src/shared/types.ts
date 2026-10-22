@@ -18,6 +18,8 @@ export interface PiStatus {
   sessionName?: string
   sessionFile?: string
   isStreaming?: boolean
+  /** pi is rewriting the context; prompts are refused until it finishes. */
+  compacting?: boolean
   error?: string
   stderrTail?: string
 }
@@ -68,6 +70,8 @@ export interface PromptImage {
 export interface PromptResult {
   ok: boolean
   disposition?: 'started' | 'queued' | 'handled'
+  /** pi was busier than the window thought and queued the message instead of rejecting it. */
+  queued?: boolean
   error?: string
 }
 
@@ -256,7 +260,7 @@ export interface McpServerInfo {
   builtin?: boolean
 }
 
-export type McpEngineId = 'codegraph' | 'warpgrep'
+export type McpEngineId = 'codegraph' | 'warpgrep' | 'web'
 
 export interface McpToolInfo {
   name: string
@@ -346,12 +350,37 @@ export interface SubagentView {
   error?: string
 }
 
+/** `auto` = provider native when the active model's provider has it on, else Brave. */
+export type WebSearchMode = 'auto' | 'brave' | 'native'
+
+/** Web search / fetch engine as the settings panel sees it. */
+export interface McpWebState {
+  enabled: boolean
+  /** At least one backend is usable (Brave key or an enabled native provider). */
+  available: boolean
+  mode: WebSearchMode
+  /** Masked Brave key (`BSA…abcd`), never the key itself. */
+  braveKeyHint?: string
+  count: number
+  maxChars: number
+  /** Providers whose own web search this app can call. */
+  nativeSupported: string[]
+  /** Providers the user turned native search on for. */
+  nativeProviders: string[]
+  /** Provider of the active model, which decides the route in `auto` mode. */
+  activeProvider?: string
+  /** Backend the next `web_search` would use. */
+  route: string
+  error?: string
+}
+
 export interface McpState {
   enabled: boolean
   desktopTool: boolean
   desktopToolAvailable: boolean
   desktopTools: McpToolInfo[]
   engines: McpEngineState[]
+  web: McpWebState
   subagents: SubagentState
   /** Masked Morph API key (`sk-w_…abcd`), never the key itself. */
   morphKeyHint?: string
@@ -359,6 +388,14 @@ export interface McpState {
   userConfigPath: string
   projectConfigPath: string
   bridge: BridgeInfo
+}
+
+/** One turn of a `/btw` side chat: the fork's answer, or why it failed. */
+export interface SideChatResult {
+  ok: boolean
+  answer?: string
+  settled?: boolean
+  error?: string
 }
 
 export interface PiBridge {
@@ -421,6 +458,9 @@ export interface PiBridge {
   setMcpEngineEnabled(id: McpEngineId, enabled: boolean): Promise<McpState>
   setMcpEngineEntry(id: McpEngineId, entry: string | null): Promise<McpState>
   setMorphApiKey(key: string | null): Promise<McpState>
+  setBraveApiKey(key: string | null): Promise<McpState>
+  setWebSearchMode(mode: WebSearchMode): Promise<McpState>
+  setProviderWebSearch(providerId: string, enabled: boolean): Promise<McpState>
   setSubagentsEnabled(enabled: boolean): Promise<McpState>
   setAgentExposure(exposure: 'prompt' | 'lazy' | 'hidden'): Promise<McpState>
   openAgentsConfig(): Promise<void>
@@ -432,12 +472,9 @@ export interface PiBridge {
     reserveTokens?: number
     error?: string
   }>
-  sideQuestion(question: string): Promise<{
-    ok: boolean
-    answer?: string
-    settled?: boolean
-    error?: string
-  }>
+  startSideChat(question: string): Promise<SideChatResult>
+  askSideChat(question: string): Promise<SideChatResult>
+  closeSideChat(): Promise<{ ok: boolean }>
   saveAgentPreset(draft: AgentPresetDraft): Promise<{ ok: boolean; error?: string; state?: McpState }>
   deleteAgentPreset(id: string): Promise<{ ok: boolean; error?: string; state?: McpState }>
   refreshMcpEngines(): Promise<McpState>

@@ -14,8 +14,30 @@
 const CORE_SERVER = 'desktop'
 const ASK_TOOL = 'mcp__desktop__ask_user_question'
 const START_SUBAGENT_TOOL = 'mcp__desktop__start_subagent'
+const WEB_SEARCH_TOOL = 'mcp__web__web_search'
+const WEB_FETCH_TOOL = 'mcp__web__web_fetch'
 const PROMPT_SECTION = 'desktop_tools'
 const AGENTS_SECTION = 'subagents'
+const WEB_SECTION = 'web_tools'
+const BATCH_SECTION = 'batching'
+
+/**
+ * Every run gets this one. pi asks the model once per assistant turn, so "one tool call, one thought"
+ * turns a simple job into a dozen round trips; the section pushes back toward a plan followed by a
+ * batch of independent calls, and toward carrying that plan forward instead of re-deriving it.
+ */
+const BATCH_GUIDANCE = [
+  'Work in batches. Once a step is clear, issue every independent tool call it needs in the same turn:',
+  'parallel reads, searches, status checks and edits that do not depend on each other belong together.',
+  'One round trip for several calls beats one round trip per call.',
+  '',
+  'Do not re-plan between mechanical steps. When a result is what you expected, continue the plan you',
+  'already have instead of restating it: repeated reasoning between calls is the most expensive way to',
+  'make no progress. Keep one running plan for the task and amend it in place.',
+  '',
+  'Think again only when a result contradicts the plan, a real decision appears, or the next step is',
+  'irreversible — and then say what changed, so the next batch starts from it.'
+].join('\n')
 
 /**
  * Guidance for the model. An MCP server cannot supply a system prompt: pi only uses a server's
@@ -38,6 +60,25 @@ const GUIDANCE = [
   'can apply. The user can always type their own answer, so keep options representative rather than',
   'exhaustive. Questions are shown one at a time: ask everything you need in one call instead of several.',
   'If the result says the user cancelled, do not invent an answer; ask how to proceed.'
+].join('\n')
+
+/**
+ * Guidance for the web gateway. Same reason as above: a `direct` MCP server cannot bring a system
+ * prompt, so the extension injects one — only while the tools are actually declared.
+ */
+const WEB_GUIDANCE = [
+  '`mcp__web__web_search` returns titles, URLs and snippets; `mcp__web__web_fetch` downloads one',
+  'page and converts it to Markdown. Both run on the user\'s configured backend; you never pick one.',
+  '',
+  'Search when the answer depends on something newer than your weights or outside this repository:',
+  'library releases and changelogs, API docs, error messages, version-specific behavior, comparisons.',
+  'Do not search for things the repository already answers.',
+  '',
+  'A snippet is not a source: after searching, fetch the one or two most promising URLs and answer',
+  'from their content. Give the URL for every claim you took from the web, and say plainly when the',
+  'pages do not support an answer instead of filling the gap from memory.',
+  '',
+  'Local and private addresses are refused by design; use the repository tools or bash for those.'
 ].join('\n')
 
 function parseJson(value, fallback) {
@@ -122,8 +163,17 @@ export default function desktopMcp(pi) {  const url = process.env.AGENT_DESKTOP_
 
   /** Tell the window which tools each built-in server offers, for the per-tool switches. */
   const reportTools = () => {
+    let tools
+    try {
+      tools = pi.getAllTools()
+    } catch {
+      // `new_session`, `clone`, `switch_session` and `reload` invalidate this captured ctx. A timer
+      // callback that throws here kills the whole pi process, so bail out instead: the next run
+      // reports again from `before_agent_start`.
+      return
+    }
     const servers = {}
-    for (const tool of pi.getAllTools()) {
+    for (const tool of tools) {
       const match = /^mcp__(.+?)__(.+)$/.exec(tool.name)
       if (!match) continue
       const [, server, name] = match
@@ -162,6 +212,14 @@ export default function desktopMcp(pi) {  const url = process.env.AGENT_DESKTOP_
     // subagent tool is really declared, so a disabled feature leaves no dangling section.
     if (agentsSection && active.includes(START_SUBAGENT_TOOL)) sections[AGENTS_SECTION] = agentsSection
     else delete sections[AGENTS_SECTION]
+
+    // Same rule for the web gateway: no search tool declared, no guidance.
+    if (active.includes(WEB_SEARCH_TOOL) || active.includes(WEB_FETCH_TOOL)) {
+      sections[WEB_SECTION] = WEB_GUIDANCE
+    } else delete sections[WEB_SECTION]
+
+    // Unconditional: batching is about how the run uses whatever tools it has.
+    sections[BATCH_SECTION] = BATCH_GUIDANCE
 
     reportTools()
   })

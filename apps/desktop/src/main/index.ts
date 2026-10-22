@@ -1,6 +1,6 @@
 import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron'
 import { randomUUID } from 'node:crypto'
-import { existsSync, promises as fs } from 'node:fs'
+import { existsSync, promises as fs, unlinkSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { PiRpcClient } from './pi-rpc'
@@ -10,6 +10,7 @@ import * as updates from './updates'
 import * as mcp from './mcp'
 import * as engines from './engines'
 import * as gateway from './gateway'
+import * as web from './web'
 import * as agents from './agents'
 import { SubagentManager, type SubagentRecord } from './subagents'
 import { createApiHandler } from './api'
@@ -34,6 +35,19 @@ const rpc = new PiRpcClient()
 let mainWindow: BrowserWindow | null = null
 let status: PiStatus = { phase: 'stopped', cwd: process.cwd() }
 let starting = false
+/**
+ * pi is busy from `agent_start` until `agent_settled`.
+ *
+ * `agent_end` is *not* idle: automatic retry, overflow recovery, compaction retry and queued
+ * messages can still start another run, and `prompt` rejects anything that arrives in that window
+ * ("Agent is already processing…" / "Cannot submit a prompt while compaction is in progress").
+ * Sending on `agent_end` is what made a queued message bounce back into the composer.
+ */
+let busy = false
+/** Auto-compaction counts as busy: pi refuses prompts until it finishes. */
+let compacting = false
+/** An MCP/agent config change arrived mid-run and still has to restart pi. */
+let configPending = false
 
 if (process.env.PI_DEBUG_PORT) {
   app.commandLine.appendSwitch('remote-debugging-port', process.env.PI_DEBUG_PORT)
@@ -79,9 +93,11 @@ interface McpConfig {
   desktopTool?: boolean
   bridgePort?: number
   bridgeToken?: string
-  engines?: Partial<Record<'codegraph' | 'warpgrep', McpEngineConfig>>
+  engines?: Partial<Record<McpEngineId, McpEngineConfig>>
   /** Morph API key for WarpGrep. */
   morphApiKey?: string
+  /** Web search / fetch: Brave key, per-provider native search, budgets. */
+  web?: web.WebConfig
   /** server -> tool -> enabled. A tool set to false is registered as `hidden`. */
   toolToggles?: Record<string, Record<string, boolean>>
   subagents?: SubagentConfig
@@ -134,8 +150,43 @@ function mcpSettings(): { enabled: boolean; desktopTool: boolean } {
   return { enabled: config.enabled !== false, desktopTool: config.desktopTool !== false }
 }
 
-function engineConfig(): Partial<Record<'codegraph' | 'warpgrep', McpEngineConfig>> {
+function engineConfig(): Partial<Record<McpEngineId, McpEngineConfig>> {
   return desktopConfig.mcp?.engines ?? {}
+}
+
+/** Web config with the defaults applied, in the shape `web.ts` expects. */
+function webConfig(): web.WebConfig {
+  const config = desktopConfig.mcp?.web ?? {}
+  return {
+    mode: config.mode === 'brave' || config.mode === 'native' ? config.mode : 'auto',
+    braveApiKey: config.braveApiKey?.trim() || undefined,
+    native: config.native ?? {},
+    count: config.count,
+    maxChars: config.maxChars
+  }
+}
+
+function saveWebConfig(patch: Partial<web.WebConfig>): Promise<void> {
+  return saveConfig({
+    mcp: { ...desktopConfig.mcp, web: { ...(desktopConfig.mcp?.web ?? {}), ...patch } }
+  })
+}
+
+/** Web tools need at least one backend, otherwise the endpoint stays unregistered. */
+function webReady(): boolean {
+  const config = webConfig()
+  return Boolean(config.braveApiKey) || web.nativeProviderEnabled(config).length > 0
+}
+
+/** Which backend the next `web_search` would use, for the settings panel. */
+function webRouteLabel(config: web.WebConfig): string {
+  const route = web.describeRoute(status.model?.provider, config)
+  if (route.backend === 'native') return `${route.provider} 原生搜索`
+  // `mode: native` refuses to fall back, so say so instead of pretending Brave will answer.
+  if (config.mode === 'native') return `不可用（${route.reason ?? '当前服务商没有原生搜索'}）`
+  if (config.mode === 'brave') return config.braveApiKey ? 'Brave Search API' : 'Brave（未配置 Key）'
+  if (route.reason) return `Brave（${route.reason}）`
+  return config.braveApiKey ? 'Brave Search API' : 'Brave（未配置 Key）'
 }
 
 function toolToggles(): Record<string, Record<string, boolean>> {
@@ -299,7 +350,8 @@ async function mcpLaunch(
   const targets = await engines.buildEngineTargets({
     cwd,
     config: engineConfig(),
-    morphApiKey: desktopConfig.mcp?.morphApiKey
+    morphApiKey: desktopConfig.mcp?.morphApiKey,
+    webAvailable: webReady()
   })
   // The endpoints must exist before pi connects to them.
   gateway.configure(targets)
@@ -472,6 +524,8 @@ async function buildMcpState(): Promise<McpState> {
   }
   const indexState = engineIndexStatus.codegraph
   const codegraphIndexed = engines.findCodegraphIndex(status.cwd)
+  const webConf = webConfig()
+  const webNatives = web.nativeProviderEnabled(webConf)
   const engineStates = await engines.engineStates({
     config: engineConfig(),
     morphApiKey: desktopConfig.mcp?.morphApiKey,
@@ -483,8 +537,10 @@ async function buildMcpState(): Promise<McpState> {
     },
     gatewayErrors: {
       codegraph: gateway.gatewayError('codegraph'),
-      warpgrep: gateway.gatewayError('warpgrep')
-    }
+      warpgrep: gateway.gatewayError('warpgrep'),
+      web: gateway.gatewayError('web')
+    },
+    web: { braveKey: webConf.braveApiKey, nativeProviders: webNatives }
   })
   const baseUrl = bridge.getBridgeUrl()
   for (const engine of engineStates) {
@@ -511,6 +567,19 @@ async function buildMcpState(): Promise<McpState> {
       enabled: toolToggles().desktop?.[tool.name] !== false
     })),
     engines: engineStates,
+    web: {
+      enabled: Boolean(engineConfig().web?.enabled),
+      available: Boolean(webConf.braveApiKey) || webNatives.length > 0,
+      mode: webConf.mode ?? 'auto',
+      braveKeyHint: maskKey(webConf.braveApiKey),
+      count: webConf.count ?? 8,
+      maxChars: webConf.maxChars ?? 6000,
+      nativeSupported: [...web.NATIVE_PROVIDERS],
+      nativeProviders: webNatives,
+      activeProvider: status.model?.provider,
+      route: webRouteLabel(webConf),
+      error: engineStates.find((engine) => engine.id === 'web')?.error
+    },
     subagents: {
       enabled: subagentConfig().enabled,
       exposure: agentSettings.exposure,
@@ -570,8 +639,17 @@ function cancelPendingAsks(reason: string): void {
   mainWindow?.webContents.send('ask:cleared')
 }
 
-/** While a /btw fork is running the window must not see that session at all. */
+/**
+ * `/btw` parks the process on a fork of the current session. While that is true the window must not
+ * see the fork at all (no `pi:event`), and everything that switches sessions has to close it first.
+ */
 let btwActive = false
+/** Session to return to when the side chat closes. */
+let btwOriginal: string | undefined
+/** File of the fork that is currently being talked to. */
+let btwFork: string | undefined
+/** Bumped on every start/close so a start that is still waiting for the run to settle gives up. */
+let btwGeneration = 0
 
 function setStatus(patch: Partial<PiStatus>): void {
   status = { ...status, ...patch }
@@ -596,13 +674,18 @@ function modelFromState(data: Record<string, unknown> | undefined): PiModel | un
 
 function applyState(data: Record<string, unknown> | undefined): void {
   if (!data) return
+  // `get_state` is authoritative: it already folds queued work and compaction into `isStreaming`,
+  // and reports compaction separately.
+  busy = Boolean(data.isStreaming) || Boolean(data.isCompacting)
+  compacting = Boolean(data.isCompacting)
   status = {
     ...status,
     model: modelFromState(data) ?? status.model,
     thinkingLevel: typeof data.thinkingLevel === 'string' ? data.thinkingLevel : status.thinkingLevel,
     sessionName: typeof data.sessionName === 'string' ? data.sessionName : undefined,
     sessionFile: typeof data.sessionFile === 'string' ? data.sessionFile : status.sessionFile,
-    isStreaming: Boolean(data.isStreaming)
+    isStreaming: busy,
+    compacting
   }
   broadcastStatus()
 }
@@ -636,6 +719,8 @@ async function startPi(cwd?: string, extraArgs: string[] = []): Promise<PiStatus
     workspace = os.homedir()
   }
   rpc.stop()
+  busy = false
+  compacting = false
   setStatus({ phase: 'starting', cwd: workspace, error: undefined, stderrTail: undefined })
   try {
     const launch = await mcpLaunch(workspace)
@@ -676,11 +761,62 @@ function waitForSettle(timeoutMs: number): Promise<boolean> {
   })
 }
 
+/**
+ * Wait until pi really has nothing left to do (no retry, compaction or queued turn).
+ *
+ * `busy` is event-driven, so a settle that lands between two checks would otherwise be missed;
+ * `get_state` is polled as the fallback.
+ */
+async function waitForIdle(timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs
+  while (busy && Date.now() < deadline) {
+    const left = deadline - Date.now()
+    const settled = await waitForSettle(Math.min(3000, Math.max(250, left)))
+    if (settled) return true
+    if (!rpc.running) return false
+    const state = await rpc.request<{ data?: Record<string, unknown> }>('get_state', {}, 5000).catch(
+      () => undefined
+    )
+    if (state?.data && !state.data.isStreaming && !state.data.isCompacting) {
+      busy = false
+      compacting = false
+      return true
+    }
+  }
+  return !busy
+}
+
 function forwardEvent(record: Record<string, unknown>): void {
-  if (record.type === 'agent_start') setStatus({ isStreaming: true })
-  if (record.type === 'agent_settled' || record.type === 'agent_end') {
-    setStatus({ isStreaming: false })
+  if (record.type === 'agent_start') {
+    busy = true
+    setStatus({ isStreaming: true })
+  }
+  if (record.type === 'agent_end') {
+    // One low-level run ended, but retries, compaction recovery and queued messages may continue.
+    // Refresh the model/context info; the session only becomes idle at `agent_settled`.
+    void refreshState()
+  }
+  if (record.type === 'agent_settled') {
+    busy = false
+    compacting = false
+    setStatus({ isStreaming: false, compacting: false })
     for (const waiter of settleWaiters.splice(0)) waiter()
+    void refreshState()
+    if (configPending) {
+      // The run is over, so the deferred MCP/agent restart can finally happen.
+      configPending = false
+      void startPi(status.cwd, sessionArgs())
+    }
+  }
+  if (record.type === 'compaction_start') {
+    compacting = true
+    setStatus({ isStreaming: true, compacting: true })
+  }
+  if (record.type === 'compaction_end') {
+    compacting = false
+    setStatus({ compacting: false })
+    // A manual `/compact` never starts an agent run, and `willRetry` may or may not continue the
+    // current one: `get_state` is the only reliable answer for "busy".
     void refreshState()
   }
   if (record.type === 'thinking_level_changed' && typeof record.level === 'string') {
@@ -704,15 +840,131 @@ async function refreshState(): Promise<void> {
 }
 
 function sessionArgs(): string[] {
-  return status.sessionFile ? ['--session', status.sessionFile] : []
+  // While a `/btw` side chat is open the process sits on a fork; a restart must land back on the
+  // real session, not on the throwaway branch.
+  const file = btwActive ? btwOriginal ?? status.sessionFile : status.sessionFile
+  return file ? ['--session', file] : []
+}
+
+/**
+ * Park the pi process back on the main session and throw the `/btw` fork away.
+ *
+ * Every path that switches or restarts the session calls this first: a follow-up question must never
+ * be delivered to whatever session happened to be active after the switch.
+ */
+async function closeSideChat(): Promise<void> {
+  // A start that is still waiting for the current run to settle must not fork afterwards.
+  btwGeneration += 1
+  if (!btwActive) return
+  const original = btwOriginal
+  const fork = btwFork
+  btwActive = false
+  btwOriginal = undefined
+  btwFork = undefined
+  try {
+    if (busy && rpc.running) {
+      await rpc.request('abort', {}, 15_000).catch(() => undefined)
+      await waitForSettle(15_000)
+    }
+    if (original && rpc.running) {
+      await rpc.request('switch_session', { sessionPath: original }, 20_000)
+    }
+  } catch {
+    // `refreshState` below re-syncs whatever pi ended up on.
+  }
+  if (fork && fork !== original) await fs.unlink(fork).catch(() => undefined)
+  await refreshState()
+  broadcastStatus()
+}
+
+/** One turn on the session pi is currently parked on (the `/btw` fork while a side chat is open). */
+async function btwPrompt(message: string): Promise<{ text: string; settled: boolean }> {
+  // Arm the waiter first: a short answer can settle before the prompt response even arrives.
+  const settling = waitForSettle(300_000)
+  await rpc.request('prompt', { message }, 30_000)
+  const settled = await settling
+  const last = await rpc.request<{ data?: { text?: string | null } }>(
+    'get_last_assistant_text',
+    {},
+    10_000
+  )
+  const text = last.data?.text ?? ''
+  if (text.trim()) return { text, settled }
+  return { text: settled ? '（没有回答）' : '（超过 5 分钟仍未结束，可以关闭窗口）', settled }
+}
+
+interface PromptResult {
+  ok: boolean
+  disposition?: 'started' | 'queued' | 'handled'
+  /** True when the window thought pi was idle but pi queued it anyway. */
+  queued?: boolean
+  error?: string
+}
+
+/**
+ * Send one prompt and survive the moments where the window and pi disagree about "busy".
+ *
+ * pi is busy until `agent_settled`: retries, overflow recovery, compaction and queued turns keep it
+ * alive after `agent_end`, and `prompt` rejects anything that arrives in between. Rather than
+ * bouncing the text back into the composer, the message is queued exactly like `streamingBehavior`
+ * would queue it, and a running compaction is waited out.
+ */
+async function submitPrompt(
+  message: string,
+  behavior?: 'steer' | 'followUp',
+  images?: PromptImage[]
+): Promise<PromptResult> {
+  if (!rpc.running) return { ok: false, error: 'pi 未运行' }
+  const payload = {
+    message,
+    ...(behavior ? { streamingBehavior: behavior } : {}),
+    ...(images && images.length > 0 ? { images } : {})
+  }
+  const send = async (extra: Record<string, unknown> = {}): Promise<PromptResult['disposition']> => {
+    const response = await rpc.request<{ data?: { disposition?: string } }>('prompt', {
+      ...payload,
+      ...extra
+    })
+    return (response.data?.disposition as PromptResult['disposition']) ?? 'started'
+  }
+  const fail = (error: unknown): PromptResult => ({
+    ok: false,
+    error: error instanceof Error ? error.message : String(error)
+  })
+  try {
+    return { ok: true, disposition: await send() }
+  } catch (error) {
+    const text = error instanceof Error ? error.message : String(error)
+    if (/compaction is in progress/i.test(text)) {
+      if (!(await waitForIdle(180_000))) return { ok: false, error: '上下文压缩还没结束，稍后再发' }
+      try {
+        return { ok: true, disposition: await send() }
+      } catch (retryError) {
+        return fail(retryError)
+      }
+    }
+    if (/already processing/i.test(text) && !behavior) {
+      try {
+        return { ok: true, disposition: await send({ streamingBehavior: 'followUp' }), queued: true }
+      } catch (retryError) {
+        return fail(retryError)
+      }
+    }
+    return fail(error)
+  }
 }
 
 async function reloadPiConfig(): Promise<void> {
+  if (btwActive) await closeSideChat()
   await refreshAgents()
-  if (status.isStreaming) {
+  if (busy) {
+    // pi cannot pick up new MCP servers mid-run; remember it and restart when the run settles,
+    // otherwise the switch the user just flipped would silently never apply.
+    configPending = true
     mainWindow?.webContents.send('pi:config-pending', true)
     return
   }
+  configPending = false
   await startPi(status.cwd, sessionArgs())
 }
 
@@ -724,16 +976,19 @@ function registerIpc(): void {
   ipcMain.handle('pi:get-status', () => status)
 
   ipcMain.handle('pi:restart', async (_event, cwd?: string) => {
+    if (btwActive) await closeSideChat()
     if (cwd) await saveConfig({ cwd })
     return startPi(cwd ?? status.cwd, sessionArgs())
   })
 
   ipcMain.handle('pi:new-project-session', async (_event, cwd: string) => {
+    if (btwActive) await closeSideChat()
     await saveConfig({ cwd })
     return startPi(cwd)
   })
 
   ipcMain.handle('pi:open-session', async (_event, sessionPath: string, cwd: string) => {
+    if (btwActive) await closeSideChat()
     await saveConfig({ cwd })
     return startPi(cwd, ['--session', sessionPath])
   })
@@ -754,6 +1009,7 @@ function registerIpc(): void {
   ipcMain.handle('app:proxy', () => getProxyInfo())
 
   ipcMain.handle('desktop:set-session-mode', async (_event, mode: SessionMode) => {
+    if (btwActive) await closeSideChat()
     await saveConfig({ sessionMode: mode === 'isolated' ? 'isolated' : 'shared' })
     return startPi(status.cwd)
   })
@@ -777,22 +1033,7 @@ function registerIpc(): void {
       message: string,
       streamingBehavior?: 'steer' | 'followUp',
       images?: PromptImage[]
-    ) => {
-      if (!rpc.running) return { ok: false, error: 'pi 未运行' }
-      try {
-        const response = await rpc.request<{ data?: { disposition?: string } }>('prompt', {
-          message,
-          ...(streamingBehavior ? { streamingBehavior } : {}),
-          ...(images && images.length > 0 ? { images } : {})
-        })
-        return {
-          ok: true,
-          disposition: response.data?.disposition as 'started' | 'queued' | 'handled' | undefined
-        }
-      } catch (error) {
-        return { ok: false, error: error instanceof Error ? error.message : String(error) }
-      }
-    }
+    ) => submitPrompt(message, streamingBehavior, images)
   )
 
   ipcMain.handle('pi:abort', async () => {
@@ -811,6 +1052,7 @@ function registerIpc(): void {
 
   ipcMain.handle('pi:new-session', async () => {
     if (!rpc.running) return { ok: false, error: 'pi 未运行' }
+    if (btwActive) await closeSideChat()
     try {
       const response = await rpc.request<{ data?: { cancelled?: boolean } }>('new_session')
       await refreshState()
@@ -822,6 +1064,7 @@ function registerIpc(): void {
 
   ipcMain.handle('pi:switch-session', async (_event, sessionPath: string) => {
     if (!rpc.running) return { ok: false, error: 'pi 未运行' }
+    if (btwActive) await closeSideChat()
     try {
       const response = await rpc.request<{ data?: { cancelled?: boolean } }>('switch_session', {
         sessionPath
@@ -998,6 +1241,41 @@ function registerIpc(): void {
     return buildMcpState()
   })
 
+  ipcMain.handle('mcp:set-brave-key', async (_event, key: string | null) => {
+    await saveWebConfig({ braveApiKey: key && key.trim() ? key.trim() : undefined })
+    await reloadPiConfig()
+    return buildMcpState()
+  })
+
+  ipcMain.handle(
+    'mcp:set-web-mode',
+    async (_event, mode: 'auto' | 'brave' | 'native') => {
+      const next = mode === 'brave' || mode === 'native' ? mode : 'auto'
+      // The route is resolved per call, so no restart is needed here.
+      await saveWebConfig({ mode: next })
+      void broadcastMcpState()
+      return buildMcpState()
+    }
+  )
+
+  ipcMain.handle(
+    'mcp:set-provider-web-search',
+    async (_event, providerId: string, enabled: boolean) => {
+      if (typeof providerId !== 'string' || !providerId.trim()) return buildMcpState()
+      const before = webReady()
+      const current = webConfig().native ?? {}
+      const native = { ...current }
+      if (enabled) native[providerId.trim()] = true
+      else delete native[providerId.trim()]
+      await saveWebConfig({ native })
+      // Turning the last backend on/off changes whether the gateway registers `/mcp/web` at all, so
+      // that transition needs the same restart as any other registration change.
+      if (webReady() !== before) await reloadPiConfig()
+      else void broadcastMcpState()
+      return buildMcpState()
+    }
+  )
+
   ipcMain.handle('mcp:set-subagents', async (_event, enabled: boolean) => {
     await saveConfig({
       mcp: { ...desktopConfig.mcp, subagents: { ...(desktopConfig.mcp?.subagents ?? {}), enabled: Boolean(enabled) } }
@@ -1050,6 +1328,7 @@ function registerIpc(): void {
       }
       const reserveTokens = Math.max(0, contextWindow - Math.max(1000, Math.round(tokens)))
       await providers.setCompactionSettings({ enabled: true, reserveTokens })
+      if (btwActive) await closeSideChat()
       await startPi(status.cwd, sessionArgs())
       return { ok: true, contextWindow, reserveTokens }
     } catch (error) {
@@ -1058,52 +1337,65 @@ function registerIpc(): void {
   })
 
   /**
-   * `/btw <question>`: fork the session at its current tip, ask there, then come back. The window
-   * never sees the fork, so the side answer cannot leak into the transcript.
+   * `/btw <question>`: open a side chat on a *fresh fork* of the current branch.
+   *
+   * `clone` duplicates the session at its current position, so the fork starts exactly at the branch
+   * node the user is looking at — same as asking a subagent, except the fork carries this
+   * conversation's context. The fork stays alive while the panel is open (follow-ups keep talking to
+   * it) and is thrown away when the panel closes.
+   *
+   * `/btw` is a local command, so it is never queued behind the run: if pi is still working, the
+   * fork is taken as soon as it settles, and a second `/btw` replaces the previous fork with a new
+   * branch from the node the user is on now.
    */
-  ipcMain.handle('pi:btw', async (_event, question: string) => {
+  ipcMain.handle('pi:btw-start', async (_event, question: string) => {
     const trimmed = question.trim()
     if (!trimmed) return { ok: false, error: '缺少问题' }
-    if (status.isStreaming) return { ok: false, error: '正在回复中，等这一轮结束再问' }
+    if (!rpc.running) return { ok: false, error: 'pi 未运行' }
+    if (btwActive) await closeSideChat()
+    const generation = ++btwGeneration
+    if (busy && !(await waitForIdle(600_000))) {
+      return { ok: false, error: '当前回合还没结束，稍后再问' }
+    }
+    if (generation !== btwGeneration) return { ok: false, error: '侧边提问已取消' }
     const original = status.sessionFile
     if (!original) return { ok: false, error: '当前会话还没有保存到文件，先发一条消息' }
     btwActive = true
-    let forkPath: string | undefined
+    btwOriginal = original
     try {
-      // `clone` duplicates the session at its current position, which is exactly the snapshot a
-      // side question needs; `fork` requires a specific entry id and rejects the leaf.
+      // `fork` requires a specific entry id and rejects the leaf; `clone` is the snapshot we want.
       const cloned = await rpc.request<{ data?: { cancelled?: boolean } }>('clone', {}, 20_000)
-      if (cloned.data?.cancelled) return { ok: false, error: '克隆会话被取消' }
+      if (cloned.data?.cancelled) throw new Error('克隆会话被取消')
       const state = await rpc.request<{ data?: Record<string, unknown> }>('get_state', {}, 5000)
-      forkPath = typeof state.data?.sessionFile === 'string' ? state.data.sessionFile : undefined
-      await rpc.request('prompt', { message: trimmed }, 30_000)
-      const settled = await waitForSettle(300_000)
-      const last = await rpc.request<{ data?: { text?: string | null } }>(
-        'get_last_assistant_text',
-        {},
-        10_000
-      )
-      return {
-        ok: true,
-        answer: last.data?.text ?? '',
-        settled,
-        forkPath
-      }
+      if (typeof state.data?.sessionFile === 'string') btwFork = state.data.sessionFile
+      const answer = await btwPrompt(trimmed)
+      return { ok: true, answer: answer.text, settled: answer.settled, forkPath: btwFork }
+    } catch (error) {
+      await closeSideChat()
+      return { ok: false, error: error instanceof Error ? error.message : String(error) }
+    }
+  })
+
+  /** Follow-up turn inside the open side chat: same fork, same context. */
+  ipcMain.handle('pi:btw-ask', async (_event, question: string) => {
+    const trimmed = question.trim()
+    if (!trimmed) return { ok: false, error: '缺少问题' }
+    if (!btwActive) return { ok: false, error: '侧边提问已经关闭了' }
+    if (busy && !(await waitForIdle(600_000))) {
+      return { ok: false, error: '上一轮还在回答，稍等一下' }
+    }
+    if (!btwActive) return { ok: false, error: '侧边提问已经关闭了' }
+    try {
+      const answer = await btwPrompt(trimmed)
+      return { ok: true, answer: answer.text, settled: answer.settled }
     } catch (error) {
       return { ok: false, error: error instanceof Error ? error.message : String(error) }
-    } finally {
-      try {
-        await rpc.request('switch_session', { sessionPath: original }, 20_000)
-      } catch {
-        // restore below
-      }
-      btwActive = false
-      if (forkPath && forkPath !== original) {
-        await fs.unlink(forkPath).catch(() => undefined)
-      }
-      await refreshState()
-      broadcastStatus()
     }
+  })
+
+  ipcMain.handle('pi:btw-close', async () => {
+    await closeSideChat()
+    return { ok: true }
   })
 
   ipcMain.handle('agents:save-preset', async (_event, draft: agents.PresetDraft) => {
@@ -1383,10 +1675,29 @@ function createWindow(): void {
 }
 
 rpc.on('event', forwardEvent)
+/** Bounded restarts: an extension that crashes on every start must not loop forever. */
+let crashRestarts = 0
+let crashWindowStart = 0
+let shuttingDown = false
 rpc.on('exit', () => {
-  if (status.phase !== 'stopped') {
-    setStatus({ phase: 'error', error: rpc.stderrTail || 'pi 进程已退出', isStreaming: false })
+  busy = false
+  compacting = false
+  if (status.phase === 'stopped') return
+  setStatus({ phase: 'error', error: rpc.stderrTail || 'pi 进程已退出', isStreaming: false })
+  if (shuttingDown) return
+  // pi died on its own (a crashing extension, an OOM kill). Leaving the window dead means the next
+  // message is lost with "pi 未运行", so bring it back on the same session.
+  const now = Date.now()
+  if (now - crashWindowStart > 120_000) {
+    crashWindowStart = now
+    crashRestarts = 0
   }
+  if (crashRestarts >= 3) return
+  crashRestarts += 1
+  console.warn(`[pi] exited unexpectedly, restarting (${crashRestarts}/3)`)
+  setTimeout(() => {
+    if (!shuttingDown && !rpc.running && !starting) void startPi(status.cwd, sessionArgs())
+  }, 1000)
 })
 
 app.whenReady().then(async () => {
@@ -1395,6 +1706,12 @@ app.whenReady().then(async () => {
   await applySystemProxy()
   desktopConfig = await loadConfig()
   await loadToolCache()
+  // Web tools resolve their backend per call, so a model switch or a config edit needs no restart.
+  web.configure({
+    config: () => webConfig(),
+    provider: () => status.model?.provider,
+    model: () => status.model?.id
+  })
   const cwd = desktopConfig.cwd || process.env.PI_DESKTOP_CWD || process.cwd()
   status = { phase: 'stopped', cwd }
   await startBridge()
@@ -1410,7 +1727,7 @@ app.whenReady().then(async () => {
     void saveToolCache(next).then(() => broadcastMcpState())
   })
   bridge.setMcpHandler((engine, message) => {
-    if (engine !== 'codegraph' && engine !== 'warpgrep') {
+    if (engine !== 'codegraph' && engine !== 'warpgrep' && engine !== 'web') {
       return Promise.reject(new Error(`未知网关端点：${engine}`))
     }
     return gateway.handleMessage(engine, message)
@@ -1465,6 +1782,7 @@ async function startBridge(): Promise<void> {
 }
 
 app.on('window-all-closed', () => {
+  shuttingDown = true
   cancelPendingAsks('桌面窗口已关闭')
   rpc.killNow()
   subagents?.stopAll(true)
@@ -1474,9 +1792,18 @@ app.on('window-all-closed', () => {
 })
 
 app.on('before-quit', () => {
+  shuttingDown = true
   bridge.cancelAllAsks('桌面端已退出')
   subagents?.stopAll(true)
   gateway.stopAll(true)
   bridge.stopBridge()
+  // A `/btw` fork is a throwaway branch: do not leave it behind as an orphan session.
+  if (btwFork) {
+    try {
+      unlinkSync(btwFork)
+    } catch {
+      // already gone
+    }
+  }
   rpc.killNow()
 })

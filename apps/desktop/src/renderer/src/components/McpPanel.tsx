@@ -1,5 +1,12 @@
 import { useCallback, useEffect, useState } from 'react'
-import type { McpEngineId, McpEngineState, McpState, McpToolInfo } from '@shared/types'
+import type {
+  McpEngineId,
+  McpEngineState,
+  McpState,
+  McpToolInfo,
+  McpWebState,
+  WebSearchMode
+} from '@shared/types'
 import {
   ChevronIcon,
   CloseIcon,
@@ -25,7 +32,14 @@ const TEMPLATE_HTTP = `{
 
 const INSTALL_HINTS: Record<McpEngineId, string> = {
   codegraph: 'npm i -g @colbymchenry/codegraph',
-  warpgrep: '在 Morph 控制台创建 API Key 后粘贴到下方'
+  warpgrep: '在 Morph 控制台创建 API Key 后粘贴到下方',
+  web: '在 Brave Search API 控制台创建订阅令牌后粘贴到下方'
+}
+
+const ENGINE_LABELS: Record<string, string> = {
+  codegraph: 'CodeGraph',
+  warpgrep: 'WarpGrep',
+  web: '网络搜索'
 }
 
 function ToolSection({
@@ -99,6 +113,7 @@ function EngineCard({
   engine,
   busy,
   morphKeyHint,
+  web,
   toolsOpen,
   onToolsOpenChange,
   onToggle,
@@ -106,11 +121,14 @@ function EngineCard({
   onClearEntry,
   onBuildIndex,
   onSaveKey,
+  onSaveBraveKey,
+  onSetWebMode,
   onToggleTool
 }: {
   engine: McpEngineState
   busy: boolean
   morphKeyHint?: string
+  web?: McpWebState
   toolsOpen: boolean
   onToolsOpenChange: (open: boolean) => void
   onToggle: (id: McpEngineId, enabled: boolean) => void
@@ -118,9 +136,12 @@ function EngineCard({
   onClearEntry: (id: McpEngineId) => void
   onBuildIndex: () => void
   onSaveKey: (key: string | null) => void
+  onSaveBraveKey: (key: string | null) => void
+  onSetWebMode: (mode: WebSearchMode) => void
   onToggleTool: (server: string, tool: string, enabled: boolean) => void
 }): React.JSX.Element {
   const [keyDraft, setKeyDraft] = useState('')
+  const [braveDraft, setBraveDraft] = useState('')
   const indexLabel: Record<string, string> = {
     indexed: '已索引',
     missing: '未建立索引',
@@ -130,6 +151,8 @@ function EngineCard({
     unknown: '索引状态未知'
   }
   const isWarpGrep = engine.id === 'warpgrep'
+  const isWeb = engine.id === 'web'
+  const webHint = web?.braveKeyHint
   return (
     <div className={`mcp-engine ${engine.enabled ? '' : 'disabled'}`}>
       <div className="mcp-row">
@@ -140,22 +163,33 @@ function EngineCard({
             {engine.enabled && <span className="badge">网关</span>}
           </span>
           <span className="mcp-row-sub">
-            {isWarpGrep
-              ? 'Morph WarpGrep：自然语言代码搜索，多轮 grep / 读取后在项目内定位代码。默认只返回文件与行号。'
-              : '代码索引：符号搜索、调用关系、影响面分析。默认只返回符号与位置，不返回源码。'}
+            {isWeb
+              ? 'web_search（服务商原生搜索或 Brave）+ web_fetch（本地抓取并转 Markdown）。不需要二进制，只认 Key。'
+              : isWarpGrep
+                ? 'Morph WarpGrep：自然语言代码搜索，多轮 grep / 读取后在项目内定位代码。默认只返回文件与行号。'
+                : '代码索引：符号搜索、调用关系、影响面分析。默认只返回符号与位置，不返回源码。'}
           </span>
           {engine.error && <span className="mcp-row-warn">{engine.error}</span>}
-          {engine.enabled && !engine.error && !isWarpGrep && (
+          {isWeb && web && (
+            <span className="mcp-row-meta">
+              当前路由：{web.route}
+              {web.nativeProviders.length > 0 ? ` · 已开启原生：${web.nativeProviders.join(' / ')}` : ''}
+              {` · 每次 ${web.count} 条 / 抓取 ${web.maxChars} 字符`}
+            </span>
+          )}
+          {engine.enabled && !engine.error && !isWarpGrep && !isWeb && (
             <span className="mcp-row-meta">
               {indexLabel[engine.index ?? 'unknown']}
               {engine.indexMessage ? ` · ${engine.indexMessage}` : ''}
             </span>
           )}
-          <span className="mcp-row-meta mcp-entry" title={engine.entry}>
-            {isWarpGrep
-              ? `api.morphllm.com/v1${morphKeyHint ? ` · Key ${morphKeyHint}` : ' · 未配置 Key'}`
-              : engine.entry ?? '未找到入口'}
-          </span>
+          {!isWeb && (
+            <span className="mcp-row-meta mcp-entry" title={engine.entry}>
+              {isWarpGrep
+                ? `api.morphllm.com/v1${morphKeyHint ? ` · Key ${morphKeyHint}` : ' · 未配置 Key'}`
+                : engine.entry ?? '未找到入口'}
+            </span>
+          )}
         </div>
         <Toggle
           checked={engine.enabled}
@@ -165,8 +199,14 @@ function EngineCard({
       </div>
       {!engine.available && (
         <div className="mcp-install">
-          <span>{isWarpGrep ? '未配置 Morph API Key。' : '未找到 CodeGraph。安装：'}</span>
-          {!isWarpGrep && (
+          <span>
+            {isWeb
+              ? 'web_search 还没有后端：填一个 Brave Search API Key，或到 设置 → 服务商 给某个服务商打开「联网」。'
+              : isWarpGrep
+                ? '未配置 Morph API Key。'
+                : '未找到 CodeGraph。安装：'}
+          </span>
+          {!isWarpGrep && !isWeb && (
             <>
               <code>{INSTALL_HINTS.codegraph}</code>
               <button
@@ -185,9 +225,65 @@ function EngineCard({
               Key 只在本地保存，搜索时随请求发给 Morph；搜索过程中读取的文件片段也会发送到 Morph API。
             </span>
           )}
+          {isWeb && (
+            <span className="mcp-install-alt">
+              web_fetch 不需要 Key，只用 Brave 时需要；服务商原生搜索沿用该服务商已登录的凭据。
+            </span>
+          )}
         </div>
       )}
-      {isWarpGrep ? (
+      {isWeb ? (
+        <>
+          <div className="mcp-web-mode">
+            <span className="mcp-web-label">搜索来源</span>
+            <div className="mcp-seg">
+              {(
+                [
+                  ['auto', '自动'],
+                  ['brave', '仅 Brave'],
+                  ['native', '仅服务商']
+                ] as Array<[WebSearchMode, string]>
+              ).map(([mode, label]) => (
+                <button
+                  key={mode}
+                  className={(web?.mode ?? 'auto') === mode ? 'active' : ''}
+                  disabled={busy || !engine.enabled}
+                  onClick={() => onSetWebMode(mode)}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+            <span className="mcp-web-note">
+              自动：当前服务商开了「联网」就用它的原生搜索，否则用 Brave。
+            </span>
+          </div>
+          <div className="mcp-key-row">
+            <input
+              type="password"
+              value={braveDraft}
+              placeholder={webHint ? `已保存 ${webHint}，输入新 Key 覆盖` : 'Brave Search API Key'}
+              onChange={(event) => setBraveDraft(event.target.value)}
+              spellCheck={false}
+            />
+            <button
+              className="ghost"
+              disabled={busy || !braveDraft.trim()}
+              onClick={() => {
+                onSaveBraveKey(braveDraft.trim())
+                setBraveDraft('')
+              }}
+            >
+              保存 Key
+            </button>
+            {webHint && (
+              <button className="ghost" disabled={busy} onClick={() => onSaveBraveKey(null)}>
+                清除
+              </button>
+            )}
+          </div>
+        </>
+      ) : isWarpGrep ? (
         <div className="mcp-key-row">
           <input
             type="password"
@@ -350,6 +446,28 @@ export function McpPanel({
     [run]
   )
 
+  const saveBraveKey = useCallback(
+    (key: string | null) => {
+      void run(
+        () => window.pi.setBraveApiKey(key),
+        key ? 'Brave Search Key 已保存' : '已清除 Brave Search Key'
+      )
+    },
+    [run]
+  )
+
+  const setWebMode = useCallback(
+    (mode: WebSearchMode) => {
+      const labels: Record<WebSearchMode, string> = {
+        auto: '搜索来源：自动（服务商优先，否则 Brave）',
+        brave: '搜索来源：仅 Brave',
+        native: '搜索来源：仅服务商原生'
+      }
+      void run(() => window.pi.setWebSearchMode(mode), labels[mode])
+    },
+    [run]
+  )
+
   return (
     <div className="settings-content mcp">
       <div className="field">
@@ -435,12 +553,13 @@ export function McpPanel({
             engine={engine}
             busy={busy}
             morphKeyHint={state.morphKeyHint}
+            web={state.web}
             toolsOpen={openTools[engine.id] === true}
             onToolsOpenChange={(open) => setToolsOpen(engine.id, open)}
             onToggle={(id, enabled) =>
               void run(
                 () => window.pi.setMcpEngineEnabled(id, enabled),
-                enabled ? `${id === 'codegraph' ? 'CodeGraph' : 'WarpGrep'} 已启用` : '已关闭'
+                `${ENGINE_LABELS[id] ?? id}${enabled ? ' 已启用' : ' 已关闭'}`
               )
             }
             onPickEntry={pickEntry}
@@ -453,6 +572,8 @@ export function McpPanel({
               })
             }
             onSaveKey={saveKey}
+            onSaveBraveKey={saveBraveKey}
+            onSetWebMode={setWebMode}
             onToggleTool={toggleTool}
           />
         ))}

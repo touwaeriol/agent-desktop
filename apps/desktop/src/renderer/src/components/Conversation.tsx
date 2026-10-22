@@ -331,7 +331,7 @@ export function Conversation({
 
   return (
     <div className="conversation">
-      {items.map((item) => (
+      {groupRounds(items).map((item) => (
         <Message
           key={item.id}
           item={item}
@@ -341,4 +341,36 @@ export function Conversation({
       ))}
     </div>
   )
+}
+
+/**
+ * Fold finished assistant rounds that only thought and called tools into one block.
+ *
+ * pi asks the model once per turn, so a task that reads ten files arrives as ten assistant messages
+ * with a thinking block each — the transcript then reads "thought, tool, thought, tool". Grouping
+ * the finished rounds gives the shape the run actually had: one plan, then the calls it made.
+ * Items with visible text, running items, and user/system entries stay on their own.
+ */
+function groupRounds(items: ChatItem[]): ChatItem[] {
+  const merged: ChatItem[] = []
+  for (const item of items) {
+    const last = merged[merged.length - 1]
+    const groupable = (candidate: ChatItem): boolean =>
+      candidate.role === 'assistant' &&
+      !candidate.text &&
+      !candidate.streaming &&
+      // A subagent card is an anchor of its own; keep it where the call happened.
+      candidate.toolCalls.every((call) => !isSubagentStart(call.name)) &&
+      (Boolean(candidate.thinking) || candidate.toolCalls.length > 0)
+    if (last && groupable(last) && groupable(item)) {
+      merged[merged.length - 1] = {
+        ...last,
+        thinking: [last.thinking, item.thinking].filter(Boolean).join('\n\n') || undefined,
+        toolCalls: [...last.toolCalls, ...item.toolCalls]
+      }
+      continue
+    }
+    merged.push(item)
+  }
+  return merged
 }

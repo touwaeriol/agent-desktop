@@ -5977,3 +5977,176 @@ button:disabled {
 .subagent-compose .ghost:disabled {
   opacity: 0.45;
 }
+
+/* Web search engine card */
+.mcp-web-mode {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 6px 10px;
+}
+
+.mcp-web-label {
+  color: var(--text-dim);
+  font-size: 11.5px;
+}
+
+.mcp-web-note {
+  color: var(--faint);
+  font-size: 10.8px;
+}
+
+.mcp-seg {
+  display: inline-flex;
+  padding: 2px;
+  border-radius: 7px;
+  border: 1px solid var(--border-strong);
+  background: var(--bg-input);
+}
+
+.mcp-seg button {
+  padding: 3px 9px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.mcp-seg button.active {
+  background: var(--accent-soft);
+  color: var(--accent-text);
+}
+
+.mcp-seg button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.prov-btn.web.on {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--accent-text);
+}
+
+/* /btw side chat: one fresh fork per panel, several turns inside it */
+.btw-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 70;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(12, 13, 17, 0.55);
+}
+
+[data-theme='light'] .btw-overlay {
+  background: rgba(24, 25, 32, 0.32);
+}
+
+.btw-dialog {
+  width: min(720px, calc(100vw - 96px));
+  max-height: min(78vh, 720px);
+  display: flex;
+  flex-direction: column;
+  border-radius: 14px;
+  border: 1px solid var(--border);
+  background: var(--bg-elev);
+  box-shadow: var(--shadow-xl);
+  overflow: hidden;
+}
+
+.btw-dialog-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-sidebar);
+}
+
+.btw-dialog-title {
+  color: var(--text-strong);
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.btw-dialog-sub {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  color: var(--faint);
+  font-size: 10.8px;
+}
+
+.btw-dialog-body {
+  flex: 1;
+  min-height: 80px;
+  overflow-y: auto;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.btw-turn {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.btw-q {
+  align-self: flex-end;
+  max-width: 82%;
+  padding: 6px 10px;
+  border-radius: 9px;
+  background: var(--accent-soft);
+  color: var(--text);
+  font-size: 12.2px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.btw-a {
+  font-size: 12.6px;
+  line-height: 1.7;
+  color: var(--text);
+}
+
+.btw-dialog .btw-loading {
+  color: var(--faint);
+  font-size: 11.5px;
+}
+
+.btw-dialog .btw-error {
+  color: var(--danger-text);
+  font-size: 11.5px;
+  line-height: 1.6;
+}
+
+.btw-dialog-input {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-top: 1px solid var(--border);
+  background: var(--bg-sidebar);
+}
+
+.btw-dialog-input input {
+  flex: 1;
+  min-width: 0;
+  height: 32px;
+  padding: 0 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border-strong);
+  background: var(--bg-input);
+  color: var(--text);
+  font-size: 12.5px;
+}

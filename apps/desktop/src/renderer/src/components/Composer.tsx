@@ -420,7 +420,13 @@ export function Composer({
           value={value}
           rows={1}
           spellCheck={false}
-          placeholder={streaming ? '继续输入，Enter 排队，Ctrl+Enter 强制引导' : '给 pi 发消息…（可直接粘贴图片）'}
+          placeholder={
+            status.compacting
+              ? '正在压缩上下文，结束后会自动继续…'
+              : streaming
+                ? '继续输入，Enter 排队，Ctrl+Enter 强制引导'
+                : '给 pi 发消息…（可直接粘贴图片）'
+          }
           onChange={(event) => {
             const next = event.target.value
             if (next !== slashPicked) setSlashPicked(undefined)

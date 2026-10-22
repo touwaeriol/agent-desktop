@@ -6,6 +6,7 @@ import type {
   McpState,
   PiStatus,
   SessionSummary,
+  SideChatResult,
   SubagentView
 } from '@shared/types'
 import { Conversation } from './components/Conversation'
@@ -22,11 +23,16 @@ import { RunStatusBar } from './components/RunStatusBar'
 import { Markdown } from './components/Markdown'
 import type { DraftImage } from './lib/images'
 
-export interface BtwAnswer {
+export interface BtwTurn {
   question: string
   answer?: string
   error?: string
-  loading?: boolean
+}
+
+/** The `/btw` panel: several turns on one fork, thrown away when the panel closes. */
+export interface BtwChat {
+  turns: BtwTurn[]
+  busy: boolean
 }
 
 function isSubagentRunning(record: SubagentView): boolean {
@@ -133,7 +139,8 @@ export default function App(): React.JSX.Element {
   const [draftImages, setDraftImages] = useState<DraftImage[]>([])
   // Messages written while a run is streaming: they wait here and are sent when it settles.
   const [queued, setQueued] = useState<QueuedMessage[]>([])
-  const [btw, setBtw] = useState<BtwAnswer | undefined>(undefined)
+  const [btwChat, setBtwChat] = useState<BtwChat | undefined>(undefined)
+  const [btwDraft, setBtwDraft] = useState('')
   const [mcpOpen, setMcpOpen] = useState(false)
   const [subagentsOpen, setSubagentsOpen] = useState(false)
   const [subagentFocus, setSubagentFocus] = useState<string | undefined>(undefined)
@@ -180,12 +187,19 @@ export default function App(): React.JSX.Element {
 
   const statusRef = useRef(status)
   statusRef.current = status
+  /** pi refuses prompts while it runs or compacts, so both count as busy everywhere. */
+  const piBusy = useCallback(
+    () => Boolean(statusRef.current.isStreaming || statusRef.current.compacting),
+    []
+  )
   const sessionsRef = useRef<SessionSummary[]>([])
   sessionsRef.current = sessions
   const historyRef = useRef<{ stack: string[]; index: number }>({ stack: [], index: -1 })
   const [historyNav, setHistoryNav] = useState({ canBack: false, canForward: false })
   const askQueueRef = useRef<AskRequest[]>([])
   askQueueRef.current = askQueue
+  const btwChatRef = useRef<BtwChat | undefined>(undefined)
+  btwChatRef.current = btwChat
   const ask = askQueue[0]
   const scrollRef = useRef<HTMLDivElement>(null)
   const stickRef = useRef(true)
@@ -534,6 +548,11 @@ export default function App(): React.JSX.Element {
 
   const deliver = useCallback(
     async (text: string, images: DraftImage[], behavior?: 'steer' | 'followUp'): Promise<boolean> => {
+      // pi is parked on the `/btw` fork while that panel is open; nothing may go there by accident.
+      if (btwChatRef.current) {
+        setToast('先关闭侧边提问窗口')
+        return false
+      }
       setStick(true)
       const localId = `local-${Date.now()}`
       setItems((prev) => [
@@ -563,6 +582,7 @@ export default function App(): React.JSX.Element {
         setToast(result.error ?? '发送失败')
         return false
       }
+      if (result.queued) setToast('pi 还在收尾，这条已排队，会在本轮结束后发送')
       return true
     },
     []
@@ -582,7 +602,10 @@ export default function App(): React.JSX.Element {
    * the second item races the first one into pi while `isStreaming` is still false.
    */
   useEffect(() => {
-    if (status.isStreaming || status.phase !== 'ready') return
+    // `compacting` counts as busy: pi refuses prompts while it rewrites the context.
+    if (status.isStreaming || status.compacting || status.phase !== 'ready') return
+    // The queue belongs to the main session: never flush it into an open `/btw` fork.
+    if (btwChatRef.current) return
     const next = queueRef.current[0]
     if (!next) return
     setQueued((prev) => prev.filter((item) => item.id !== next.id))
@@ -590,7 +613,7 @@ export default function App(): React.JSX.Element {
       if (ok) return
       setQueued((prev) => (prev.some((item) => item.id === next.id) ? prev : [next, ...prev]))
     })
-  }, [status.isStreaming, status.phase, deliver])
+  }, [status.isStreaming, status.compacting, status.phase, deliver])
 
   const newSession = useCallback(async () => {
     const result = await window.pi.newSession()
@@ -613,11 +636,19 @@ export default function App(): React.JSX.Element {
       const arg = space === -1 ? '' : text.slice(space + 1).trim()
       switch (name) {
         case '/clear': {
+          if (piBusy()) {
+            setToast('正在回复中，先停止或等这一轮结束')
+            return true
+          }
           await newSession()
           setToast('已清空当前会话')
           return true
         }
         case '/compact': {
+          if (piBusy()) {
+            setToast('正在回复中，等这一轮结束再压缩')
+            return true
+          }
           setToast(arg ? `正在压缩（自定义提示词：${arg}）…` : '正在压缩上下文…')
           const result = await window.pi.compactSession(arg || undefined)
           if (!result.ok) {
@@ -643,6 +674,10 @@ export default function App(): React.JSX.Element {
             setToast('阈值要写数字，例如 /autocompact 500000')
             return true
           }
+          if (piBusy()) {
+            setToast('正在回复中，等这一轮结束再改阈值')
+            return true
+          }
           const result = await window.pi.setCompactThreshold(tokens)
           setToast(
             result.ok
@@ -661,30 +696,95 @@ export default function App(): React.JSX.Element {
             setToast('用法：/btw <问题>')
             return true
           }
-          setBtw({ question: arg, loading: true })
-          const result = await window.pi.sideQuestion(arg)
-          setBtw({
-            question: arg,
-            answer: result.answer,
-            error: result.ok ? undefined : (result.error ?? '侧边提问失败')
-          })
+          // A local command: it never joins the queue. If pi is still working, the fork is taken as
+          // soon as it settles, and a second `/btw` replaces the old fork with a new branch.
+          setBtwDraft('')
+          setBtwChat({ busy: true, turns: [{ question: arg }] })
+          let result: SideChatResult
+          try {
+            result = await window.pi.startSideChat(arg)
+          } catch (cause) {
+            result = { ok: false, error: cause instanceof Error ? cause.message : String(cause) }
+          }
+          if (!result.ok) {
+            // The branch is already discarded on the main side; leave no half-open panel behind.
+            setBtwChat(undefined)
+            setToast(result.error ?? '侧边提问失败')
+            return true
+          }
+          setBtwChat({ busy: false, turns: [{ question: arg, answer: result.answer }] })
           return true
         }
         default:
           return false
       }
     },
-    [loadMessages, newSession]
+    [loadMessages, newSession, piBusy]
   )
+
+  const closeBtw = useCallback(async () => {
+    if (!btwChatRef.current) return
+    setBtwChat(undefined)
+    setBtwDraft('')
+    try {
+      await window.pi.closeSideChat()
+    } catch {
+      // the branch is discarded on the main side anyway
+    }
+  }, [])
+
+  const askBtw = useCallback(async () => {
+    const text = btwDraft.trim()
+    const current = btwChatRef.current
+    if (!text || !current || current.busy) return
+    setBtwDraft('')
+    setBtwChat({ busy: true, turns: [...current.turns, { question: text }] })
+    let result: SideChatResult
+    try {
+      result = await window.pi.askSideChat(text)
+    } catch (cause) {
+      result = { ok: false, error: cause instanceof Error ? cause.message : String(cause) }
+    }
+    setBtwChat((prev) => {
+      if (!prev) return prev
+      const turns = [...prev.turns]
+      const last = turns.length - 1
+      turns[last] = {
+        question: turns[last].question,
+        answer: result.ok ? result.answer : undefined,
+        error: result.ok ? undefined : (result.error ?? '提问失败')
+      }
+      return { busy: false, turns }
+    })
+  }, [btwDraft])
+
+  useEffect(() => {
+    if (!btwChat) return
+    const handler = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape') void closeBtw()
+    }
+    window.addEventListener('keydown', handler)
+    return () => window.removeEventListener('keydown', handler)
+  }, [btwChat, closeBtw])
   const send = useCallback(
     async (mode: 'send' | 'steer') => {
       const text = draft.trim()
       if (!text && draftImages.length === 0) return
-      if (text.startsWith('/') && !statusRef.current.isStreaming) {
-        setDraft('')
-        if (await runCommand(text)) return
+      // pi is parked on the `/btw` fork while that panel is open; nothing may go there by accident.
+      if (btwChatRef.current) {
+        setToast('先关闭侧边提问窗口')
+        return
       }
-      const streaming = statusRef.current.isStreaming
+      // Slash commands are local: they run here and never become a message, streaming or not.
+      // Only an unknown `/xxx` falls through and goes to pi like any other prompt.
+      if (text.startsWith('/') && draftImages.length === 0) {
+        const handled = await runCommand(text)
+        if (handled) {
+          setDraft('')
+          return
+        }
+      }
+      const streaming = piBusy()
       if (streaming && mode === 'send') {
         setQueued((prev) => [
           ...prev,
@@ -841,7 +941,7 @@ export default function App(): React.JSX.Element {
         <TabBar
           title={title}
           status={status}
-          streaming={Boolean(status.isStreaming)}
+          streaming={Boolean(status.isStreaming || status.compacting)}
           sidebarOpen={sidebarOpen}
           subagentsRunning={subagents.filter(isSubagentRunning).length}
           subagentsFinished={
@@ -962,26 +1062,6 @@ export default function App(): React.JSX.Element {
           />
         )}
 
-        {btw && (
-          <div className="btw-card">
-            <div className="btw-head">
-              <span className="btw-title">侧边提问</span>
-              <span className="btw-question">{btw.question}</span>
-              <button className="btw-close" onClick={() => setBtw(undefined)} title="关闭">
-                ×
-              </button>
-            </div>
-            <div className="btw-body">
-              {btw.loading && <span className="btw-loading">正在基于当前会话开分支回答…</span>}
-              {!btw.loading && btw.error && <span className="btw-error">{btw.error}</span>}
-              {!btw.loading && !btw.error && <Markdown>{btw.answer || '（没有回答）'}</Markdown>}
-            </div>
-            <div className="btw-foot">
-              基于发送时点的会话快照，在临时分支里回答；分支已丢弃，主会话未受影响。
-            </div>
-          </div>
-        )}
-
         <Composer
           value={draft}
           onChange={setDraft}
@@ -1005,8 +1085,8 @@ export default function App(): React.JSX.Element {
           onNotice={setToast}
           onSend={(mode) => void send(mode)}
           onStop={() => void window.pi.abort()}
-          streaming={Boolean(status.isStreaming)}
-          disabled={status.phase !== 'ready'}
+          streaming={Boolean(status.isStreaming || status.compacting)}
+          disabled={status.phase !== 'ready' || Boolean(btwChat)}
           status={status}
           onChooseWorkspace={() => void chooseWorkspace()}
           statusBar={
@@ -1036,6 +1116,66 @@ export default function App(): React.JSX.Element {
             />
           )}
         </div>
+
+        {btwChat && (
+          <div
+            className="btw-overlay"
+            onMouseDown={(event) => {
+              if (event.target === event.currentTarget) void closeBtw()
+            }}
+          >
+            <div className="btw-dialog">
+              <div className="btw-dialog-head">
+                <span className="btw-dialog-title">侧边提问</span>
+                <span className="btw-dialog-sub">
+                  从当前分支节点新开一个分支，在这里可以继续追问；关闭后分支丢弃，主会话不受影响
+                </span>
+                <button className="icon-btn" onClick={() => void closeBtw()} title="关闭（Esc）">
+                  ×
+                </button>
+              </div>
+              <div className="btw-dialog-body">
+                {btwChat.turns.map((turn, index) => (
+                  <div className="btw-turn" key={`btw-${index}`}>
+                    <div className="btw-q">{turn.question}</div>
+                    {turn.answer !== undefined && (
+                      <div className="btw-a">
+                        <Markdown>{turn.answer}</Markdown>
+                      </div>
+                    )}
+                    {turn.error && <div className="btw-error">{turn.error}</div>}
+                    {btwChat.busy &&
+                      index === btwChat.turns.length - 1 &&
+                      turn.answer === undefined &&
+                      !turn.error && <div className="btw-loading">正在回答…</div>}
+                  </div>
+                ))}
+              </div>
+              <form
+                className="btw-dialog-input"
+                onSubmit={(event) => {
+                  event.preventDefault()
+                  void askBtw()
+                }}
+              >
+                <input
+                  autoFocus
+                  value={btwDraft}
+                  disabled={btwChat.busy}
+                  placeholder="继续追问（Enter 发送，Esc 关闭）"
+                  onChange={(event) => setBtwDraft(event.target.value)}
+                />
+                <button
+                  type="submit"
+                  className="primary"
+                  disabled={btwChat.busy || !btwDraft.trim()}
+                >
+                  发送
+                </button>
+              </form>
+            </div>
+          </div>
+        )}
 
         {mcpOpen && (
           <div

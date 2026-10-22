@@ -47,6 +47,7 @@ npm run typecheck    # node + web 两个 tsconfig 分别检查
 
 - assistant 消息不再有头像，正文直接铺开（文档式）；用户消息是右对齐气泡，图片在气泡上方（`.message.user` 为 column + align-items flex-end）。
 - 工具调用按“活动行”聚合：`Activity` 把同一轮的工具按 read/write/bash/search/other 汇总成 `读取 2 个文件 · 运行 1 条命令 ›`，点开才显示具体 `.tool-card`；运行中/失败才显示圆点。
+- 连续多轮的「只有思考 + 工具、没有正文」的 assistant 条目会在渲染时合并（`Conversation.tsx` 的 `groupRounds`）：pi 每轮一次请求，读十个文件就是十条 assistant 消息，不合并的话记录看起来像「思考→工具→思考→工具」。带正文的条目、运行中的条目、含 `start_subagent` 的条目不合并。这只是显示层合并，`items` 本身仍是逐条（流式 patch 依赖最后一条）。
 - 每轮结束的统计行（`.run-status`）来自 `App.tsx` 的 `run` 状态：`agent_start` 记开始时间、`tool_execution_start/end` 加减运行中数量、`agent_settled` 记结束时间并通过 `pi:session-stats`（RPC `get_session_stats`）取 `tokens.total`。1 秒定时器只为刷新计时，不要用它做别的。
 
 ## Session view, thinking, model allowlist
@@ -74,12 +75,14 @@ npm run typecheck    # node + web 两个 tsconfig 分别检查
 ## 斜杠命令
 
 - 输入框打 `/` 弹出命令菜单（`Composer.tsx` 的 `SLASH_COMMANDS`），↑/↓ 选择、Enter/Tab 填入、Esc 清空。**填入后 `slashPicked` 记住当前值**，否则菜单会一直打开、Enter 永远只是重复填入，命令发不出去。
-- 命令在渲染层拦截（`App.tsx` 的 `runCommand`），只有不认识的 `/xxx` 才当普通消息发给 pi：
+- 命令在渲染层拦截（`App.tsx` 的 `runCommand`），**不管是否在流式输出都会先走命令，认不出的 `/xxx` 才当普通消息**（`send()` 里先 `runCommand`，返回 true 才算消费、清空输入框）。命令本身永远不进入对话、不进队列。会开新会话/重启 pi 的命令（`/clear`、`/compact`、`/autocompact <数字>`）在流式期间只弹 toast 拒绝；`/btw` 例外——它会等本轮结束再分支（见下）。
   - `/clear`：开新会话（= 侧栏「新建」），不是清空当前 JSONL。
   - `/compact [提示词]`：RPC `compact` + `customInstructions`；会话太小时 pi 会返回 `Nothing to compact`，原样提示给用户。
   - `/autocompact <token 数 | on | off>`：写 `~/.pi/agent/settings.json` 的 `compaction.enabled` / `compaction.reserveTokens`（`reserveTokens = contextWindow - 阈值`，按当前模型的 `contextWindow` 换算），然后重启 pi；`on/off` 额外调 RPC `set_auto_compaction` 立即生效。
   - `/mcp`：用 `getMcpState()` 弹浮层列出所有服务器（名称/传输/内置/启用状态）与全部工具名。
-  - `/btw <问题>`：**RPC `clone`**（不是 `fork`——`fork` 需要具体 entry id，传 leaf 会报 `Invalid entry ID for forking`）复制当前会话到临时分支，在那里提问，取 `get_last_assistant_text`，再 `switch_session` 回原会话并删除临时分支文件。整个过程 `btwActive` 为真：`setStatus` 和 `pi:event` 都不发给窗口，否则渲染层会看到分支会话的 sessionFile 并把它加载进主记录。
+  - `/btw <问题>`：在当前分支节点开一个**新的侧边对话**（`BtwChat` 面板，全屏浮层）。主进程 `pi:btw-start` 用 RPC `clone`（不是 `fork`——`fork` 需要具体 entry id，传 leaf 会报 `Invalid entry ID for forking`）拿到分支文件，然后在这个分支上 `prompt` + `waitForSettle` + `get_last_assistant_text`；**分支保留到面板关闭**，面板里的追问走 `pi:btw-ask`（同一个分支，可多轮），关闭走 `pi:btw-close`：切回原会话、删掉分支文件。整个过程 `btwActive` 为真：`pi:event` 不发给窗口（否则渲染层会把分支会话加载进主记录），`sessionArgs()` 也强制返回原会话，重启不会落到分支上；任何切换/重开会话的 IPC 与 `reloadPiConfig()` 都先 `closeSideChat()`。左侧栏、输入框在面板打开时不可用（输入框 `disabled`），避免消息发进分支。
+  - `/btw` 不排队：正在跑时先 `waitForIdle()` 等本轮结束再 `clone`（面板立刻打开显示「正在回答…」）；再次 `/btw` 会先 `closeSideChat()` 丢掉旧分支，从**当前**节点重新分支。`btwGeneration` 在每次 start/close 自增，用于取消还在等待的 start——否则面板关掉后它仍会把进程停在分支上。
+  - 面板打开期间 `setStatus` 不广播，但 `status.isStreaming` 仍会随分支运行更新（`pi:btw-ask` 用它判断上一轮是否结束）。
 
 ## 设置界面
 
@@ -88,10 +91,20 @@ npm run typecheck    # node + web 两个 tsconfig 分别检查
 
 ## 消息队列
 
-- 运行中（`status.isStreaming`）发消息**默认进队列**，不再直接 `steer`：队列在渲染层（`App.tsx` 的 `queued`），输入框上方显示「N 条排队消息」，每条可编辑（放回输入框）、删除、立即发送。
+- 运行中（`status.isStreaming` 或 `status.compacting`）发消息**默认进队列**，不再直接 `steer`：队列在渲染层（`App.tsx` 的 `queued`），输入框上方显示「N 条排队消息」，每条可编辑（放回输入框）、删除、立即发送。
 - 「立即发送」和 `Ctrl+Enter` 是**强制引导**：走 `prompt(text, 'steer')` 注入当前回合，不等待本轮结束。
-- 回合结束后自动按顺序发送队列里的下一条。**flush 的 effect 只能依赖 `status.isStreaming` / `status.phase`，不能依赖 `queued`**——否则加入第二条时会和第一条抢跑（`isStreaming` 还没变 true 就再发一次），实测第二条会被 pi 拒绝并丢失。
+- 回合结束后自动按顺序发送队列里的下一条。**flush 的 effect 只能依赖 `status.isStreaming` / `status.compacting` / `status.phase`，不能依赖 `queued`**——否则加入第二条时会和第一条抢跑（`isStreaming` 还没变 true 就再发一次），实测第二条会被 pi 拒绝并丢失。
 - 发送失败时把该条放回队首并提示，避免静默丢消息。
+
+## 运行状态（busy）
+
+- **`agent_end` 不是空闲**：自动重试、溢出恢复、压缩重试和队列消息都可能再开一轮，pi 在这段时间里会拒绝 `prompt`（`Agent is already processing…` / `Cannot submit a prompt while compaction is in progress`）。主进程只在 `agent_settled` 把 `busy` 置 false，`agent_start` / `compaction_start` 置 true；`get_state` 的 `isStreaming` / `isCompacting` 是权威值（`applyState` 会同步覆盖）。
+- 之前把 `agent_end` 当空闲，导致队列 flush 抢在 pi 收尾时发送、被拒绝后弹「Agent is already processing…」并把消息退回输入框——这就是「发新消息卡住」的来源。
+- `submitPrompt()`（`pi:prompt`）是唯一入口：先原样发；命中 `compaction is in progress` 就 `waitForIdle()` 后重试；命中 `already processing` 且没指定 `streamingBehavior` 就改发 `followUp` 排队并返回 `queued: true`（渲染层提示「已排队」）。**不要再在渲染层直接调 `rpc.prompt` 判断忙碌**。
+- 压缩状态进 `PiStatus.compacting`，输入框占位符显示「正在压缩上下文」。
+- 运行中改 MCP/子代理设置走 `reloadPiConfig()`：忙碌时只记 `configPending`，`agent_settled` 时用 `sessionArgs()` 重启 pi 把新配置装上（否则开关改了永远不生效）。
+- pi 非预期退出（扩展抛错、OOM）时 `rpc.on('exit')` 会在 1 秒后用同一会话重启，2 分钟内最多 3 次；`shuttingDown` 为真（`window-all-closed` / `before-quit`）时不再重启。
+- 扩展里的定时器**必须能容忍失效的 ctx**：`new_session` / `clone` / `switch_session` / `reload` 之后捕获的 `pi` 会变 stale，`pi.getAllTools()` 抛出的异常会直接杀掉整个 pi 进程（实测 `Timeout.reportTools` 崩溃导致「pi 未运行」）。`reportTools` 已包 try/catch。
 
 ## Updates & packaging
 
@@ -120,6 +133,7 @@ npm run typecheck    # node + web 两个 tsconfig 分别检查
 - 注册方式选扩展 + `--extension`，**不要**写 `~/.pi/agent/mcp.json`：这样桌面端的工具不会污染终端里的 pi，桥接端口/令牌也不用每次启动改写用户配置。`mcpArgs()` 在总开关关闭时传 `--no-mcp`，桌面工具关闭时不传 `--extension`。
 - **MCP 不能提供系统提示词**：协议只有 `initialize.instructions`（+ `prompts` 原语），pi 的 MCP 客户端只读 `instructions`，且只用于 codemode 命名空间的 `describeNamespace()` 和 `mcp_servers` 段——而 `mcp_servers` 段由 `renderServersSection()` 里的 `hasIndirectTools` 过滤，**`direct` 暴露的服务器不会出现在里面**（每服务器也只取第一行、≤250 字符、整段 ≤4096）。`prompts/list`、`prompts/get`、`sampling`、`elicitation` pi 都没实现（client 只声明 `roots`）。所以 `server.mjs` 里的 `instructions` 在 direct 下对模型不可见，只对 codemode 有意义。
 - 因此模型的使用引导由扩展注入：`desktop-mcp.js` 挂 `before_agent_start`，往 `event.systemPromptOptions.sections.desktop_tools` 写一段文案。**必须用 `pi.getActiveTools().includes('mcp__desktop__ask_user_question')` 门控**：只有 MCP 打开、桌面工具打开、服务器真正连上、工具被声明给模型时才注入；否则 `delete sections.desktop_tools`。段名要匹配 `^[a-z][a-z0-9_-]*$` 且不能叫 `preamble`；段内容由 pi 包成 `<desktop_tools>…</desktop_tools>`，不要再手写标签。每轮都会重算，`diffSystemPromptSections` 会把不存在的段 patch 成 null，所以关掉 MCP 后旧段会自动消失，不需要清理会话文件。
+- 扩展还无条件注入 `sections.batching`（`BATCH_GUIDANCE`）：pi 每轮一次模型请求，模型容易「调一个工具想一遍」，这段要求它**先定步骤、再把互不依赖的调用放在同一轮**，并沿用已有计划而不是在调用之间重复推理。它跟工具无关，所以不门控；内容改动要看模型是否真的减少轮数。
 - 路径解析：打包版从 `process.resourcesPath/extension|mcp` 取（`electron-builder.yml` 的 `extraResources` 负责拷贝 `resources/extension` 与 `packages/mcp-core` 的 `server.mjs` + `tools/**`），开发版用 `searchUp` 从 `app.getAppPath()` 向上找 `resources/extension/desktop-mcp.js` 和 `packages/mcp-core/server.mjs`。改了资源位置要同时改这两处。
 - 设置 → MCP（`McpPanel.tsx`）管理 `~/.pi/agent/mcp.json`：总开关（`config.json.mcp.enabled`）、桌面工具开关（`mcp.desktopTool`）、服务器启用/删除/新增（新增接受一段 JSON，需含 `command` 或 `url`）。任何变更都会 `reloadPiConfig()` 重启 pi。
 - 项目级 `.pi/mcp.json` 只读展示并合并到列表（同名覆盖用户级），仅在信任项目时由 pi 生效。
@@ -128,9 +142,9 @@ npm run typecheck    # node + web 两个 tsconfig 分别检查
 
 - 两个引擎定位不同：CodeGraph 是**本地 CLI**（npm 全局包 `@colbymchenry/codegraph`，入口解析到 `npm-shim.js`，用 node 跑，避免 Windows `.cmd` 需要 shell），WarpGrep 是 **Morph 托管 API**（只需要 API Key，没有二进制）。检测在 `apps/desktop/src/main/engines.ts`：CodeGraph 走「显式入口 → 已知安装路径 / PATH → `--version` 校验」，WarpGrep 的可用性就是有没有 key；检测结果缓存 60s，`invalidateDetection()` 在改入口时清掉。**显式入口不可用时不要回退到自动检测**。
 - 默认关闭（`config.json.mcp.engines.<id>.enabled`），设置页逐个开启；CodeGraph 未安装时卡片显示安装命令和「选择入口」，WarpGrep 卡片是 API Key 输入框（`config.json.mcp.morphApiKey`，UI 只显示掩码）。
-- **架构是网关，不是直连**：`apps/desktop/src/main/gateway.ts` 在主进程里持有引擎（CodeGraph 是 stdio 子进程，WarpGrep 直接在主进程里跑），对外由桥（`bridge.ts`）暴露 **一个服务、多个端点**：`POST /mcp/codegraph`、`POST /mcp/warpgrep`。pi 用 `registerMcpServer(name, { url, headers: { authorization: 'Bearer <token>' } })` 连这些端点，模型看到的是网关的工具集，不是引擎的全量工具。
+- **架构是网关，不是直连**：`apps/desktop/src/main/gateway.ts` 在主进程里持有引擎（CodeGraph 是 stdio 子进程，WarpGrep / web 直接在主进程里跑），对外由桥（`bridge.ts`）暴露 **一个服务、多个端点**：`POST /mcp/codegraph`、`POST /mcp/warpgrep`、`POST /mcp/web`。pi 用 `registerMcpServer(name, { url, headers: { authorization: 'Bearer <token>' } })` 连这些端点，模型看到的是网关的工具集，不是引擎的全量工具。
 - 端点只实现 streamable HTTP 的最小合法形态：POST 返回 `application/json`，GET 返回 405（pi 的客户端把 405 当作"没有 server→client 流"），DELETE 返回 204。**不要**加 SSE，pi 的 `McpStreamableHttpTransport` 接受 JSON 响应。
-- 工具数量由 `ALLOWED_TOOLS` 控制（`engines.ts`）：CodeGraph 8 个、WarpGrep 1 个（`codebase_search`）。新增/裁剪工具改这里。
+- 工具数量由 `ALLOWED_TOOLS` 控制（`engines.ts`）：CodeGraph 8 个、WarpGrep 1 个（`codebase_search`）、web 2 个（`web_search` / `web_fetch`，都是 direct，所以不激活 `tool_search`）。新增/裁剪工具改这里。
 - **CodeGraph 默认不返回源码**（对齐 codegraph-desktop）：网关把 `codegraph_explore` 的 schema 加上 `includeSource`（默认 false），调用时若没显式要求源码，就改写成 `codegraph_search` + `limit:10` 转发；`codegraph_node` 强制 `includeCode:false`。模型只拿到符号名、签名和 `file:line`，需要源码时自己 read。不要在网关里放开源码默认值——那会让一次 explore 返回上万字符。
 - 暴露策略：服务器级 `exposure: 'deferred'`，`toolExposure` 把核心工具标 `direct`（CodeGraph: `explore/search/callers/impact`；WarpGrep: `codebase_search`），其余走 `tool_search`。pi 会因此激活 `tool_search` 工具，并在系统提示词里生成 `mcp_servers` 段。
 - 网关只把**真实失败**（spawn 失败、进程退出、initialize 失败、Morph API 错误）当作错误上报；引擎自己往 stderr 打的 INFO 日志不算错误。
@@ -139,6 +153,18 @@ npm run typecheck    # node + web 两个 tsconfig 分别检查
 - CodeGraph 索引：只在**没有** `.codegraph` 时自动 `codegraph init`；**不要自动 `sync`**——运行中的 MCP 服务器持有 CodeGraph 写锁，自动 sync 会报 "database is locked"。重新索引是设置页的手动动作（`codegraph unlock` 提示也在这里给出）。
 - **不要设置 `CODEGRAPH_NO_DAEMON=1`**：那会让服务器独占写锁，用户同时用 IDE/终端的 CodeGraph 时，后启动的一方要么拒绝启动，要么只暴露 3 个工具（`search/node/explore`）。让它代理到共享 daemon 才能共存。`CODEGRAPH_MCP_TOOLS` 必须设，否则默认只暴露 `codegraph_explore`。
 - 引擎会往项目里写 `.codegraph/`（已加进 `.gitignore`）。
+
+### 网络搜索（web engine）
+
+- `web` 是网关里的**第三个引擎**（`/mcp/web`，`kind: 'web'`），提供 `web_search` + `web_fetch`，两个都是 `direct`。实现在 `apps/desktop/src/main/web.ts`，网关侧只是 `WebGateway` 转发（`gateway.ts`）。不需要二进制、不需要额外进程。
+- **pi 自己没有 provider 原生 web 工具**：`RequestOptions` 只支持客户端 function tool，`convertTools` 永远生成 `{name, description, input_schema}`，没有任何 server tool 通道。想用原生搜索只能在主进程自己发 HTTP，所以 `web.ts` 直接调各家 API，凭据走 `ModelRuntime.getAuth(providerId)`（OAuth 由 pi 自己刷新，桌面端不读 auth.json）。
+- `web_search` 的后端解析顺序（`describeRoute`）：`mode: 'native'` → 只允许服务商原生；`'brave'` → 只用 Brave；`'auto'`（默认）→ 当前模型的服务商在 `mcp.web.native[provider] === true` 且实现存在时用原生，否则 Brave。原生失败**回退 Brave** 并在结果顶部加一行说明；只有「既没 Brave Key 又原生失败」才报错。
+- 原生实现：`anthropic`（`/v1/messages` + `web_search_20250305`，OAuth 用 `authorization: Bearer` + `anthropic-beta: oauth-2025-04-20`）、`openai`（`/responses` + `web_search_preview`，取 `annotations[].url`）、`google`（`generateContent` + `google_search` grounding，取 `groundingChunks[].web`）。想加新服务商改 `NATIVE_PROVIDERS` + `nativeSearch()`。
+- `web_fetch` **永远本地抓取**：`fetch` → charset 嗅探（含 `<meta charset>`/GBK）→ HTML 转 Markdown（去 script/style/nav，保留标题/列表/链接/代码块），`maxChars` 截断。拒绝 localhost / 内网 / 169.254 / ULA 地址（SSRF），需要本地内容时让模型用 `read`/`bash`。
+- 配置在 `config.json` 的 `mcp.web`：`mode` / `braveApiKey` / `native`（provider → true）/ `count` / `maxChars`。`mcp.web.native` 就是**服务商列表里那个「联网」开关**（`SettingsModal` 的 provider 行，只对 `McpWebState.nativeSupported` 里的服务商显示）。路由（Brave / 原生）是**按调用实时解析**的，所以改开关本身不重启 pi；只有「有没有任何后端」发生变化时才 `reloadPiConfig()`——那决定了 `/mcp/web` 端点是否注册。改 Brave Key 或 web 引擎开关一律重启。
+- 可用性：没有任何后端（无 Brave Key、无原生服务商）时 `buildEngineTargets` 不产出 web target，端点不注册，开关按钮为灰。
+- 扩展里的 `web_tools` 段：`before_agent_start` 里用 `pi.getActiveTools()` 门控（同 `desktop_tools`），文案强调「搜索结果不是来源，要 `web_fetch` 打开页面并给 URL」，关掉 MCP 后该段自动消失。
+- **不要**把 WarpGrep 当网页搜索：Morph 只有项目内代码检索（`warp_grep`），没有通用 web search API。
 
 ### 子代理（subagents）
 

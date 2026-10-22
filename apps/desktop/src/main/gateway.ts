@@ -12,12 +12,13 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import type { McpEngineId } from '../shared/types'
 import { killTree } from './proc'
+import { callWebTool, WEB_TOOLS, WebError } from './web'
 import { WARPGREP_TOOL, WarpGrep, WarpGrepError } from './warpgrep'
 
 export interface EngineTarget {
   id: McpEngineId
-  /** `upstream` spawns a stdio MCP server; `warpgrep` runs the hosted search in-process. */
-  kind: 'upstream' | 'warpgrep'
+  /** `upstream` spawns a stdio MCP server; `warpgrep` and `web` run in-process. */
+  kind: 'upstream' | 'warpgrep' | 'web'
   command?: string
   args?: string[]
   env?: Record<string, string>
@@ -416,6 +417,79 @@ class WarpGrepGateway {
   }
 }
 
+/**
+ * Web search + fetch run in-process: the gateway owns the providers, so no child process and no
+ * upstream tool list. Which search backend answers is decided per call (see `web.ts`).
+ */
+class WebGateway {
+  private failure: string | undefined
+
+  constructor(readonly target: EngineTarget) {}
+
+  get error(): string | undefined {
+    return this.failure
+  }
+
+  async handle(message: Record<string, unknown>): Promise<unknown> {
+    const method = typeof message.method === 'string' ? message.method : ''
+    const params = (message.params ?? {}) as Record<string, unknown>
+    switch (method) {
+      case 'initialize':
+        return {
+          protocolVersion: PROTOCOL_VERSION,
+          capabilities: { tools: { listChanged: false } },
+          serverInfo: { name: 'agent-desktop-web', version: '0.3.0' },
+          instructions:
+            'Web gateway: web_search returns titles, URLs and snippets; web_fetch downloads one page ' +
+            'and converts it to Markdown. Local and private addresses are refused.'
+        }
+      case 'ping':
+        return {}
+      case 'tools/list':
+        return { tools: WEB_TOOLS }
+      case 'tools/call': {
+        const name = typeof params.name === 'string' ? params.name : ''
+        if (!this.target.allowlist.includes(name)) {
+          throw Object.assign(new Error(`unknown tool: ${name}`), { code: -32602 })
+        }
+        try {
+          const result = await callWebTool(name, (params.arguments ?? {}) as Record<string, unknown>)
+          this.failure = undefined
+          return {
+            content: [{ type: 'text', text: result.text }],
+            ...(result.structured ? { structuredContent: result.structured } : {})
+          }
+        } catch (error) {
+          const text =
+            error instanceof WebError
+              ? `${error.code}: ${error.message}`
+              : error instanceof Error
+                ? error.message
+                : String(error)
+          this.failure = text.slice(0, 300)
+          throw Object.assign(new Error(text), { code: -32603 })
+        }
+      }
+      case 'resources/list':
+        return { resources: [] }
+      case 'resources/templates/list':
+        return { resourceTemplates: [] }
+      case 'prompts/list':
+        return { prompts: [] }
+      default:
+        throw Object.assign(new Error(`method not supported: ${method}`), { code: -32603 })
+    }
+  }
+
+  cancel(): void {
+    // Requests are short-lived HTTP calls; there is nothing to cancel upstream.
+  }
+
+  stop(): void {
+    this.failure = undefined
+  }
+}
+
 interface Gateway {
   readonly target: EngineTarget
   readonly error: string | undefined
@@ -427,7 +501,9 @@ interface Gateway {
 const gateways = new Map<McpEngineId, Gateway>()
 
 function createGateway(target: EngineTarget): Gateway {
-  return target.kind === 'warpgrep' ? new WarpGrepGateway(target) : new EngineGateway(target)
+  if (target.kind === 'warpgrep') return new WarpGrepGateway(target)
+  if (target.kind === 'web') return new WebGateway(target)
+  return new EngineGateway(target)
 }
 
 /** Point the endpoints at the engines for the current session directory. */

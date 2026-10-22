@@ -17,7 +17,8 @@ import type { McpEngineId, McpEngineState, McpToolInfo } from '../shared/types'
 /** Tools declared to the model directly; every other tool of the server is loaded via tool_search. */
 export const DIRECT_TOOLS: Record<McpEngineId, string[]> = {
   codegraph: ['codegraph_explore', 'codegraph_search', 'codegraph_callers', 'codegraph_impact'],
-  warpgrep: ['codebase_search']
+  warpgrep: ['codebase_search'],
+  web: ['web_search', 'web_fetch']
 }
 
 /**
@@ -35,7 +36,8 @@ export const ALLOWED_TOOLS: Record<McpEngineId, string[]> = {
     'codegraph_status',
     'codegraph_files'
   ],
-  warpgrep: ['codebase_search']
+  warpgrep: ['codebase_search'],
+  web: ['web_search', 'web_fetch']
 }
 
 /** CodeGraph only exposes the tools named here (its own default is `explore` alone). */
@@ -43,7 +45,8 @@ const CODEGRAPH_TOOLS = 'explore,search,callers,callees,impact,node,status,files
 
 const TIMEOUT_MS: Record<McpEngineId, number> = {
   codegraph: 120_000,
-  warpgrep: 120_000
+  warpgrep: 120_000,
+  web: 120_000
 }
 
 const DETECT_TIMEOUT_MS = 20_000
@@ -161,8 +164,8 @@ async function resolveCodegraph(explicit?: string): Promise<EngineEntry | undefi
 async function detect(id: McpEngineId, explicit?: string): Promise<CachedDetection> {
   const cached = detectionCache.get(id)
   if (cached && Date.now() - cached.at < CACHE_MS && cached.explicit === explicit) return cached
-  if (id === 'warpgrep') {
-    // WarpGrep is a hosted API: availability is the API key, checked in `engineStates`.
+  if (id !== 'codegraph') {
+    // WarpGrep is a hosted API and the web engine runs in-process: neither has an entry to detect.
     const result: CachedDetection = { explicit, at: Date.now() }
     detectionCache.set(id, result)
     return result
@@ -208,7 +211,7 @@ export async function engineEntry(id: McpEngineId, explicit?: string): Promise<s
 /** What the gateway needs to serve one engine. */
 export interface EngineTargetSpec {
   id: McpEngineId
-  kind: 'upstream' | 'warpgrep'
+  kind: 'upstream' | 'warpgrep' | 'web'
   command?: string
   args?: string[]
   env?: Record<string, string>
@@ -248,11 +251,25 @@ export async function buildEngineTargets(options: {
   cwd: string
   config: Record<string, { enabled?: boolean; entry?: string } | undefined>
   morphApiKey?: string
+  /** Web engine: whether any backend (Brave key or native provider) is configured. */
+  webAvailable?: boolean
 }): Promise<EngineTargetSpec[]> {
   const targets: EngineTargetSpec[] = []
-  for (const id of ['codegraph', 'warpgrep'] as McpEngineId[]) {
+  for (const id of ['codegraph', 'warpgrep', 'web'] as McpEngineId[]) {
     const engine = options.config[id]
     if (!engine?.enabled) continue
+    if (id === 'web') {
+      // The gateway resolves Brave / provider native per call, so nothing else is needed here.
+      if (options.webAvailable === false) continue
+      targets.push({
+        id,
+        kind: 'web',
+        cwd: options.cwd,
+        allowlist: ALLOWED_TOOLS[id],
+        timeoutMs: TIMEOUT_MS[id]
+      })
+      continue
+    }
     if (id === 'warpgrep') {
       targets.push({
         id,
@@ -303,7 +320,9 @@ export function buildEngineRegistrations(options: {
     description:
       target.id === 'codegraph'
         ? `CodeGraph 网关：符号搜索、调用关系、影响面分析（${ALLOWED_TOOLS.codegraph.length} 个工具，默认只返回位置不返回源码）`
-        : 'WarpGrep 网关：Morph 的自然语言代码搜索（codebase_search，默认只返回文件与行号）'
+        : target.id === 'web'
+          ? '网络网关：web_search（服务商原生搜索或 Brave）与 web_fetch（本地抓取并转 Markdown）'
+          : 'WarpGrep 网关：Morph 的自然语言代码搜索（codebase_search，默认只返回文件与行号）'
   }))
 }
 
@@ -314,24 +333,45 @@ export async function engineStates(options: {
   tools: Record<string, McpToolInfo[] | undefined>
   indexStatus: Record<string, { state: McpEngineState['index']; message?: string } | undefined>
   gatewayErrors?: Record<string, string | undefined>
+  web?: { braveKey?: string; nativeProviders?: string[] }
 }): Promise<McpEngineState[]> {
   const states: McpEngineState[] = []
   const hasKey = Boolean(options.morphApiKey?.trim())
-  for (const id of ['codegraph', 'warpgrep'] as McpEngineId[]) {
+  const webNatives = options.web?.nativeProviders ?? []
+  const webHasBrave = Boolean(options.web?.braveKey?.trim())
+  const webAvailable = webHasBrave || webNatives.length > 0
+  const webEntry =
+    [webHasBrave ? 'Brave Search API' : '', ...webNatives].filter(Boolean).join(' · ') ||
+    '未配置后端'
+  for (const id of ['codegraph', 'warpgrep', 'web'] as McpEngineId[]) {
     const engine = options.config[id] ?? {}
     const detection = await detect(id, engine.entry?.trim() || undefined)
     const known = options.tools[id] ?? []
-    const available = id === 'warpgrep' ? hasKey : Boolean(detection.entry) && !detection.error
+    const available =
+      id === 'web'
+        ? webAvailable
+        : id === 'warpgrep'
+          ? hasKey
+          : Boolean(detection.entry) && !detection.error
     const error =
       options.gatewayErrors?.[id] ??
       detection.error ??
-      (id === 'warpgrep' && !hasKey ? '未配置 Morph API Key' : undefined)
+      (id === 'warpgrep' && !hasKey ? '未配置 Morph API Key' : undefined) ??
+      (id === 'web' && !webAvailable
+        ? '未配置 Brave Search Key，也没有启用任何服务商的原生搜索'
+        : undefined)
     states.push({
       id,
-      name: id === 'codegraph' ? 'CodeGraph' : 'WarpGrep',
+      name:
+        id === 'codegraph' ? 'CodeGraph' : id === 'warpgrep' ? 'WarpGrep' : '网络搜索',
       enabled: Boolean(engine.enabled),
       available,
-      entry: id === 'warpgrep' ? 'api.morphllm.com/v1' : engine.entry?.trim() || detection.entry?.path,
+      entry:
+        id === 'warpgrep'
+          ? 'api.morphllm.com/v1'
+          : id === 'web'
+            ? webEntry
+            : engine.entry?.trim() || detection.entry?.path,
       version: detection.version,
       error,
       index: id === 'codegraph' ? (options.indexStatus[id]?.state ?? 'unknown') : undefined,

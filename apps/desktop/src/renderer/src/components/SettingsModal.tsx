@@ -5,6 +5,7 @@ import type {
   DesktopConfig,
   LoginEvent,
   LoginPrompt,
+  McpWebState,
   ModelChoice,
   PiStatus,
   ProviderAuthType,
@@ -15,6 +16,7 @@ import type {
 import {
   CheckIcon,
   CloseIcon,
+  GlobeIcon,
   SparkIcon,
   CopyIcon,
   ExternalIcon,
@@ -344,6 +346,8 @@ export function SettingsModal({
   const [error, setError] = useState<string>()
   const [confirmLogout, setConfirmLogout] = useState<string>()
   const [modelConfig, setModelConfig] = useState<ModelConfigState>()
+  const [webSearch, setWebSearch] = useState<McpWebState>()
+  const [webBusy, setWebBusy] = useState(false)
 
   const loginRef = useRef<LoginState | undefined>(undefined)
   loginRef.current = login
@@ -394,7 +398,37 @@ export function SettingsModal({
     setError(undefined)
     void loadProviders()
     void loadSettings()
+    // The per-provider "联网" switch lives on the MCP engine's config, so read it here.
+    void window.pi
+      .getMcpState()
+      .then((state) => setWebSearch(state.web))
+      .catch(() => undefined)
   }, [open, initialTab, loadProviders, loadSettings])
+
+  useEffect(() => {
+    if (!open) return
+    return window.pi.onMcpState((state) => setWebSearch(state.web))
+  }, [open])
+
+  const toggleProviderWebSearch = useCallback(
+    async (provider: ProviderInfo, enabled: boolean) => {
+      setWebBusy(true)
+      try {
+        const next = await window.pi.setProviderWebSearch(provider.id, enabled)
+        setWebSearch(next.web)
+        setNotice(
+          enabled
+            ? `${provider.name} 的原生搜索已开启（web_search 会优先用它）`
+            : `${provider.name} 的原生搜索已关闭（web_search 回退 Brave）`
+        )
+      } catch (cause) {
+        setError(cause instanceof Error ? cause.message : String(cause))
+      } finally {
+        setWebBusy(false)
+      }
+    },
+    []
+  )
 
   useEffect(() => {
     if (open && tab === 'custom') void loadModelsJson()
@@ -790,6 +824,29 @@ export function SettingsModal({
                       )}
                     </div>
                     <div className="provider-actions">
+                      {webSearch !== undefined &&
+                        webSearch.nativeSupported.includes(provider.id) && (
+                        <button
+                          className={`prov-btn ghost web ${
+                            webSearch.nativeProviders.includes(provider.id) ? 'on' : ''
+                          }`}
+                          disabled={webBusy}
+                          onClick={() =>
+                            void toggleProviderWebSearch(
+                              provider,
+                              !webSearch.nativeProviders.includes(provider.id)
+                            )
+                          }
+                          title={
+                            webSearch.nativeProviders.includes(provider.id)
+                              ? 'web_search 优先用该服务商的原生搜索；点击改为回退 Brave'
+                              : '让 web_search 用该服务商自己的原生搜索（需要已登录 / 有 Key）'
+                          }
+                        >
+                          <GlobeIcon size={12} />
+                          {webSearch.nativeProviders.includes(provider.id) ? '联网 开' : '联网'}
+                        </button>
+                      )}
                       {provider.options.map((option) => (
                         <button
                           key={option.type}

@@ -85,9 +85,9 @@ const bridge: PiBridge = {
   setMcpEnabled: (enabled: boolean) => ipcRenderer.invoke('mcp:set-enabled', enabled) as Promise<McpState>,
   setDesktopToolEnabled: (enabled: boolean) =>
     ipcRenderer.invoke('mcp:set-desktop-tool', enabled) as Promise<McpState>,
-  setMcpEngineEnabled: (id: 'codegraph' | 'warpgrep', enabled: boolean) =>
+  setMcpEngineEnabled: (id: 'codegraph' | 'warpgrep' | 'web', enabled: boolean) =>
     ipcRenderer.invoke('mcp:set-engine-enabled', id, enabled) as Promise<McpState>,
-  setMcpEngineEntry: (id: 'codegraph' | 'warpgrep', entry: string | null) =>
+  setMcpEngineEntry: (id: 'codegraph' | 'warpgrep' | 'web', entry: string | null) =>
     ipcRenderer.invoke('mcp:set-engine-entry', id, entry) as Promise<McpState>,
   refreshMcpEngines: () => ipcRenderer.invoke('mcp:refresh-engines') as Promise<McpState>,
   buildMcpIndex: () =>
@@ -96,6 +96,12 @@ const bridge: PiBridge = {
     ipcRenderer.invoke('mcp:set-tool', server, tool, enabled) as Promise<McpState>,
   setMorphApiKey: (key: string | null) =>
     ipcRenderer.invoke('mcp:set-morph-key', key) as Promise<McpState>,
+  setBraveApiKey: (key: string | null) =>
+    ipcRenderer.invoke('mcp:set-brave-key', key) as Promise<McpState>,
+  setWebSearchMode: (mode: 'auto' | 'brave' | 'native') =>
+    ipcRenderer.invoke('mcp:set-web-mode', mode) as Promise<McpState>,
+  setProviderWebSearch: (providerId: string, enabled: boolean) =>
+    ipcRenderer.invoke('mcp:set-provider-web-search', providerId, enabled) as Promise<McpState>,
   setSubagentsEnabled: (enabled: boolean) =>
     ipcRenderer.invoke('mcp:set-subagents', enabled) as Promise<McpState>,
   setAgentExposure: (exposure: 'prompt' | 'lazy' | 'hidden') =>
@@ -104,7 +110,9 @@ const bridge: PiBridge = {
   compactSession: (instructions) => ipcRenderer.invoke('pi:compact', instructions),
   setAutoCompact: (enabled) => ipcRenderer.invoke('pi:set-auto-compact', enabled),
   setCompactThreshold: (tokens) => ipcRenderer.invoke('pi:set-compact-threshold', tokens),
-  sideQuestion: (question) => ipcRenderer.invoke('pi:btw', question),
+  startSideChat: (question) => ipcRenderer.invoke('pi:btw-start', question),
+  askSideChat: (question) => ipcRenderer.invoke('pi:btw-ask', question),
+  closeSideChat: () => ipcRenderer.invoke('pi:btw-close'),
   saveAgentPreset: (draft) => ipcRenderer.invoke('agents:save-preset', draft),
   deleteAgentPreset: (id) => ipcRenderer.invoke('agents:delete-preset', id),
   chooseMcpEngineEntry: () =>
