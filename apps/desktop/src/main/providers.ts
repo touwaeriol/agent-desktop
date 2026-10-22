@@ -71,6 +71,13 @@ export function getRuntime(): Promise<ModelRuntime> {
 
 function resetRuntime(): void {
   runtimePromise = null
+  matchersCache = null
+  choicesCache = null
+}
+
+/** Drop cached provider/model data after credentials or settings change. */
+export function invalidateCache(): void {
+  resetRuntime()
 }
 
 async function configuredProviderIds(runtime: ModelRuntime): Promise<Set<string>> {
@@ -191,6 +198,7 @@ export async function startLogin(
     })
     .then((credential) => {
       sessions.delete(loginId)
+      invalidateCache()
       emit({ kind: 'done', loginId, ok: true, credentialType: credential.type })
       onChanged()
     })
@@ -229,6 +237,7 @@ export function cancelLogin(loginId: string): void {
 export async function logoutProvider(providerId: string): Promise<void> {
   const runtime = await getRuntime()
   await runtime.logout(providerId)
+  invalidateCache()
 }
 
 export async function getModelsJson(): Promise<ModelsJsonFile> {
@@ -262,7 +271,16 @@ interface RawSettings {
   [key: string]: unknown
 }
 
-function matchesPattern(value: string, pattern: string): boolean {
+interface PatternMatchers {
+  key: string
+  exact: Set<string>
+  globs: RegExp[]
+}
+
+let matchersCache: PatternMatchers | null = null
+let choicesCache: { key: string; data: ModelChoice[] } | null = null
+
+function globToRegExp(pattern: string): RegExp | null {
   const source = pattern
     .split('')
     .map((char) => {
@@ -273,10 +291,27 @@ function matchesPattern(value: string, pattern: string): boolean {
     })
     .join('')
   try {
-    return new RegExp(`^${source}$`, 'i').test(value)
+    return new RegExp(`^${source}$`, 'i')
   } catch {
-    return value === pattern
+    return null
   }
+}
+
+function getMatchers(patterns: string[]): PatternMatchers {
+  const key = patterns.join('\u0000')
+  if (matchersCache && matchersCache.key === key) return matchersCache
+  const exact = new Set<string>()
+  const globs: RegExp[] = []
+  for (const pattern of patterns) {
+    if (/[*?[]/.test(pattern)) {
+      const compiled = globToRegExp(pattern)
+      if (compiled) globs.push(compiled)
+    } else {
+      exact.add(pattern.toLowerCase())
+    }
+  }
+  matchersCache = { key, exact, globs }
+  return matchersCache
 }
 
 function readEnabledModels(raw: RawSettings): string[] {
@@ -294,10 +329,11 @@ export function isModelEnabled(
   patterns: string[]
 ): boolean {
   if (patterns.length === 0) return true
-  return patterns.some(
-    (pattern) =>
-      matchesPattern(`${model.provider}/${model.id}`, pattern) || matchesPattern(model.id, pattern)
-  )
+  const { exact, globs } = getMatchers(patterns)
+  const reference = `${model.provider}/${model.id}`.toLowerCase()
+  if (exact.has(reference) || exact.has(model.id.toLowerCase())) return true
+  if (globs.length === 0) return false
+  return globs.some((glob) => glob.test(reference) || glob.test(model.id))
 }
 
 async function readRawSettings(): Promise<RawSettings> {
@@ -345,6 +381,7 @@ export async function saveAppSettings(
   }
   await fs.mkdir(AGENT_DIR, { recursive: true })
   await fs.writeFile(SETTINGS_PATH, `${JSON.stringify(raw, null, 2)}\n`)
+  invalidateCache()
 }
 
 export async function listProviderModels(providerId: string): Promise<ProviderModelOption[]> {
@@ -385,19 +422,47 @@ export async function setProviderModels(
   const allIds = allModels.map((model) => `${model.provider}/${model.id}`)
   const allEnabled = allIds.length > 0 && allIds.every((id) => enabled.has(id))
   if (allEnabled) delete raw.enabledModels
-  else raw.enabledModels = [...enabled].sort()
+  else {
+    // Keep the allowlist small: a fully enabled provider becomes "provider/*".
+    const byProvider = new Map<string, { total: number; on: number }>()
+    for (const id of allIds) {
+      const provider = id.slice(0, id.indexOf('/'))
+      const entry = byProvider.get(provider) ?? { total: 0, on: 0 }
+      entry.total += 1
+      if (enabled.has(id)) entry.on += 1
+      byProvider.set(provider, entry)
+    }
+    const patterns: string[] = []
+    for (const id of [...enabled].sort()) {
+      const provider = id.slice(0, id.indexOf('/'))
+      const entry = byProvider.get(provider)
+      if (entry && entry.on === entry.total) {
+        const wildcard = `${provider}/*`
+        if (!patterns.includes(wildcard)) patterns.push(wildcard)
+        continue
+      }
+      patterns.push(id)
+    }
+    raw.enabledModels = patterns
+  }
   await fs.mkdir(AGENT_DIR, { recursive: true })
   await fs.writeFile(SETTINGS_PATH, `${JSON.stringify(raw, null, 2)}\n`)
+  invalidateCache()
 }
 
-export async function listModelChoices(): Promise<ModelChoice[]> {
+export async function listModelChoices(
+  options: { includeUnconfigured?: boolean } = {}
+): Promise<ModelChoice[]> {
   const runtime = await getRuntime()
   const providers = new Map(runtime.getProviders().map((provider) => [provider.id, provider]))
   const configured = await configuredProviderIds(runtime)
   const patterns = readEnabledModels(await readRawSettings())
-  return runtime
+  const cacheKey = `${options.includeUnconfigured === true ? 'all' : 'configured'}\u0000${patterns.join('\u0000')}\u0000${[...configured].sort().join(',')}`
+  if (choicesCache && choicesCache.key === cacheKey) return choicesCache.data
+  const data = runtime
     .getModels()
     .filter((model) => isModelEnabled(model, patterns))
+    .filter((model) => options.includeUnconfigured === true || configured.has(model.provider))
     .map((model) => {
       const provider = providers.get(model.provider)
       return {
@@ -408,4 +473,6 @@ export async function listModelChoices(): Promise<ModelChoice[]> {
         configured: configured.has(model.provider)
       }
     })
+  choicesCache = { key: cacheKey, data }
+  return data
 }

@@ -288,6 +288,7 @@ export function SettingsModal({
 }) {
   const [tab, setTab] = useState<Tab>(initialTab ?? 'providers')
   const [providers, setProviders] = useState<ProviderInfo[]>([])
+  const [providersLoading, setProvidersLoading] = useState(false)
   const [query, setQuery] = useState('')
   const [loadError, setLoadError] = useState<string>()
   const [login, setLogin] = useState<LoginState>()
@@ -310,11 +311,14 @@ export function SettingsModal({
   loginRef.current = login
 
   const loadProviders = useCallback(async () => {
+    setProvidersLoading(true)
     try {
       setProviders(await window.pi.listProviders())
       setLoadError(undefined)
     } catch (cause) {
       setLoadError(cause instanceof Error ? cause.message : String(cause))
+    } finally {
+      setProvidersLoading(false)
     }
   }, [])
 
@@ -705,7 +709,7 @@ export function SettingsModal({
                   <RefreshIcon size={14} />
                 </button>
                 <span className="providers-count">
-                  {configuredCount} / {providers.length} 已配置
+                  {providersLoading ? '加载中…' : `${configuredCount} / ${providers.length} 已配置`}
                 </span>
               </div>
 
@@ -772,7 +776,13 @@ export function SettingsModal({
                   </div>
                 ))}
                 {filteredProviders.length === 0 && (
-                  <div className="provider-empty">没有匹配的服务商</div>
+                  <div className="provider-empty">
+                    {providersLoading
+                      ? '正在加载服务商…'
+                      : providers.length === 0
+                        ? '没有可用的服务商'
+                        : '没有匹配的服务商'}
+                  </div>
                 )}
               </div>
             </div>

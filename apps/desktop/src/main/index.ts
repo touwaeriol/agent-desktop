@@ -8,16 +8,22 @@ import { listSessions } from './sessions'
 import * as providers from './providers'
 import * as updates from './updates'
 import * as mcp from './mcp'
+import * as engines from './engines'
+import * as gateway from './gateway'
 import * as bridge from './bridge'
 import { applySystemProxy, getProxyInfo } from './proxy'
 import type {
   AppSettings,
   AskAnswer,
   LoginMessage,
+  McpEngineId,
+  McpEngineState,
   McpState,
+  McpToolInfo,
   PiModel,
   PiStatus,
-  PromptImage
+  PromptImage,
+  SessionStats
 } from '../shared/types'
 
 const rpc = new PiRpcClient()
@@ -51,11 +57,19 @@ async function migrateLegacyUserData(): Promise<void> {
 
 type SessionMode = 'shared' | 'isolated'
 
+interface McpEngineConfig {
+  enabled?: boolean
+  entry?: string
+}
+
 interface McpConfig {
   enabled?: boolean
   desktopTool?: boolean
   bridgePort?: number
   bridgeToken?: string
+  engines?: Partial<Record<'codegraph' | 'lsp', McpEngineConfig>>
+  /** server -> tool -> enabled. A tool set to false is registered as `hidden`. */
+  toolToggles?: Record<string, Record<string, boolean>>
 }
 
 interface DesktopConfig {
@@ -105,6 +119,14 @@ function mcpSettings(): { enabled: boolean; desktopTool: boolean } {
   return { enabled: config.enabled !== false, desktopTool: config.desktopTool !== false }
 }
 
+function engineConfig(): Partial<Record<'codegraph' | 'lsp', McpEngineConfig>> {
+  return desktopConfig.mcp?.engines ?? {}
+}
+
+function toolToggles(): Record<string, Record<string, boolean>> {
+  return desktopConfig.mcp?.toolToggles ?? {}
+}
+
 function resourceDir(): string {
   return app.isPackaged ? process.resourcesPath : path.join(app.getAppPath(), 'resources')
 }
@@ -136,8 +158,8 @@ function desktopExtensionPath(): string {
 function mcpServerScript(): string {
   if (app.isPackaged) return path.join(resourceDir(), 'mcp', 'server.mjs')
   return (
-    searchUp(app.getAppPath(), path.join('packages', 'mcp-ask-user', 'server.mjs')) ??
-    path.join(app.getAppPath(), '..', '..', 'packages', 'mcp-ask-user', 'server.mjs')
+    searchUp(app.getAppPath(), path.join('packages', 'mcp-core', 'server.mjs')) ??
+    path.join(app.getAppPath(), '..', '..', 'packages', 'mcp-core', 'server.mjs')
   )
 }
 
@@ -145,21 +167,94 @@ function desktopToolAvailable(): boolean {
   return existsSync(desktopExtensionPath()) && existsSync(mcpServerScript())
 }
 
-function mcpArgs(): string[] {
+/** Any built-in server active, which is when the extension has to be loaded. */
+async function mcpLaunch(
+  cwd: string
+): Promise<{ args: string[]; env: NodeJS.ProcessEnv }> {
   const settings = mcpSettings()
-  if (!settings.enabled) return ['--no-mcp']
-  if (!settings.desktopTool || !desktopToolAvailable()) return []
-  return ['--extension', desktopExtensionPath()]
+  if (!settings.enabled) {
+    gateway.stopAll()
+    return { args: ['--no-mcp'], env: {} }
+  }
+  if (!desktopToolAvailable()) return { args: [], env: {} }
+  const targets = await engines.buildEngineTargets({ cwd, config: engineConfig() })
+  // The endpoints must exist before pi connects to them.
+  gateway.configure(targets)
+  const core = settings.desktopTool
+  if (!core && targets.length === 0) return { args: [], env: {} }
+  const url = bridge.getBridgeUrl()
+  const env: NodeJS.ProcessEnv = { AGENT_DESKTOP_MCP_TOGGLES: JSON.stringify(toolToggles()) }
+  if (url) {
+    env.AGENT_DESKTOP_MCP_URL = url
+    env.AGENT_DESKTOP_MCP_TOKEN = bridge.getBridgeToken()
+  }
+  if (core) env.AGENT_DESKTOP_MCP_CORE_SCRIPT = mcpServerScript()
+  if (targets.length > 0 && url) {
+    env.AGENT_DESKTOP_MCP_ENGINES = JSON.stringify(
+      engines.buildEngineRegistrations({
+        baseUrl: url,
+        token: bridge.getBridgeToken(),
+        targets,
+        toggles: toolToggles()
+      })
+    )
+  }
+  return { args: ['--extension', desktopExtensionPath()], env }
 }
 
-function mcpEnv(): NodeJS.ProcessEnv {
-  const settings = mcpSettings()
-  const url = bridge.getBridgeUrl()
-  if (!settings.enabled || !settings.desktopTool || !url) return {}
-  return {
-    AGENT_DESKTOP_MCP_URL: url,
-    AGENT_DESKTOP_MCP_TOKEN: bridge.getBridgeToken(),
-    AGENT_DESKTOP_MCP_SCRIPT: mcpServerScript()
+/**
+ * Tools each built-in server last offered, reported by the extension once its servers connect
+ * (`POST /tools` on the bridge). Cached so the settings list survives restarts.
+ */
+type ToolCache = Record<string, McpToolInfo[]>
+
+function toolCachePath(): string {
+  return path.join(app.getPath('userData'), 'mcp-tools.json')
+}
+
+let toolCache: ToolCache = {}
+
+async function loadToolCache(): Promise<void> {
+  try {
+    const parsed = JSON.parse(await fs.readFile(toolCachePath(), 'utf8')) as ToolCache
+    toolCache = parsed && typeof parsed === 'object' ? parsed : {}
+  } catch {
+    toolCache = {}
+  }
+}
+
+async function saveToolCache(next: ToolCache): Promise<void> {
+  toolCache = next
+  try {
+    await fs.mkdir(app.getPath('userData'), { recursive: true })
+    await fs.writeFile(toolCachePath(), JSON.stringify(next, null, 2))
+  } catch {
+    // cache only
+  }
+}
+
+const engineIndexStatus: Record<string, { state: McpEngineState['index']; message?: string }> = {}
+
+function startCodegraphIndex(cwd: string): void {
+  const config = engineConfig().codegraph
+  if (!config?.enabled) return
+  void engines
+    .engineEntry('codegraph', config.entry?.trim() || undefined)
+    .then((entry) => {
+      if (!entry) return
+      engines.ensureCodegraphIndex(cwd, entry, (indexState) => {
+        engineIndexStatus.codegraph = indexState
+        void broadcastMcpState()
+      })
+    })
+    .catch(() => undefined)
+}
+
+async function broadcastMcpState(): Promise<void> {
+  try {
+    mainWindow?.webContents.send('mcp:state', await buildMcpState())
+  } catch {
+    // window gone
   }
 }
 
@@ -188,10 +283,30 @@ async function buildMcpState(): Promise<McpState> {
       builtin: true
     })
   }
+  const indexState = engineIndexStatus.codegraph
+  const codegraphIndexed = engines.findCodegraphIndex(status.cwd)
+  const engineStates = await engines.engineStates({
+    config: engineConfig(),
+    toggles: toolToggles(),
+    tools: toolCache,
+    indexStatus: {
+      codegraph:
+        indexState ?? { state: codegraphIndexed ? 'indexed' : 'missing' }
+    },
+    gatewayErrors: {
+      codegraph: gateway.gatewayError('codegraph'),
+      lsp: gateway.gatewayError('lsp')
+    }
+  })
   return {
     enabled: settings.enabled,
     desktopTool: settings.desktopTool,
     desktopToolAvailable: available,
+    desktopTools: (toolCache.desktop ?? []).map((tool) => ({
+      ...tool,
+      enabled: toolToggles().desktop?.[tool.name] !== false
+    })),
+    engines: engineStates,
     servers,
     userConfigPath: mcp.USER_MCP_PATH,
     projectConfigPath: mcp.projectMcpPath(status.cwd),
@@ -293,10 +408,12 @@ async function startPi(cwd?: string, extraArgs: string[] = []): Promise<PiStatus
   rpc.stop()
   setStatus({ phase: 'starting', cwd: workspace, error: undefined, stderrTail: undefined })
   try {
-    rpc.start(workspace, [...extraArgs, ...sessionDirArgs(), ...mcpArgs()], mcpEnv())
+    const launch = await mcpLaunch(workspace)
+    rpc.start(workspace, [...extraArgs, ...sessionDirArgs(), ...launch.args], launch.env)
     const data = await waitForReady()
     status = { phase: 'ready', cwd: workspace }
     applyState(data)
+    startCodegraphIndex(workspace)
     return status
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
@@ -472,6 +589,21 @@ function registerIpc(): void {
 
   ipcMain.handle('pi:list-sessions', () => listSessions(currentSessionDir()))
 
+  ipcMain.handle('pi:session-stats', async () => {
+    if (!rpc.running) return {}
+    try {
+      const response = await rpc.request<{ data?: Record<string, unknown> }>('get_session_stats')
+      const data = response.data ?? {}
+      return {
+        tokens: data.tokens as SessionStats['tokens'],
+        cost: typeof data.cost === 'number' ? data.cost : undefined,
+        contextUsage: data.contextUsage as SessionStats['contextUsage']
+      }
+    } catch {
+      return {}
+    }
+  })
+
   ipcMain.handle('pi:open-agent-dir', async () => {
     const dir = path.join(os.homedir(), '.pi', 'agent')
     await fs.mkdir(dir, { recursive: true })
@@ -512,6 +644,76 @@ function registerIpc(): void {
     await saveConfig({ mcp: { ...desktopConfig.mcp, desktopTool: Boolean(enabled) } })
     await reloadPiConfig()
     return buildMcpState()
+  })
+
+  ipcMain.handle('mcp:set-engine-enabled', async (_event, id: McpEngineId, enabled: boolean) => {
+    const current = engineConfig()
+    await saveConfig({
+      mcp: {
+        ...desktopConfig.mcp,
+        engines: { ...current, [id]: { ...current[id], enabled: Boolean(enabled) } }
+      }
+    })
+    await reloadPiConfig()
+    return buildMcpState()
+  })
+
+  ipcMain.handle('mcp:set-engine-entry', async (_event, id: McpEngineId, entry: string | null) => {
+    const current = engineConfig()
+    const next = { ...current[id] }
+    if (entry && entry.trim()) next.entry = entry.trim()
+    else delete next.entry
+    engines.invalidateDetection(id)
+    await saveConfig({ mcp: { ...desktopConfig.mcp, engines: { ...current, [id]: next } } })
+    await reloadPiConfig()
+    return buildMcpState()
+  })
+
+  ipcMain.handle('mcp:refresh-engines', async () => {
+    engines.invalidateDetection()
+    return buildMcpState()
+  })
+
+  ipcMain.handle('mcp:build-index', async () => {
+    const cwd = status.cwd
+    const config = engineConfig().codegraph
+    engineIndexStatus.codegraph = { state: 'indexing', message: cwd }
+    void broadcastMcpState()
+    const result = await engines.runCodegraphIndex(cwd, config)
+    engineIndexStatus.codegraph = {
+      state: result.ok ? 'indexed' : 'failed',
+      message: result.message
+    }
+    void broadcastMcpState()
+    return result
+  })
+
+  ipcMain.handle(
+    'mcp:set-tool',
+    async (_event, server: string, tool: string, enabled: boolean) => {
+      const toggles = { ...toolToggles() }
+      const next = { ...(toggles[server] ?? {}) }
+      if (enabled) delete next[tool]
+      else next[tool] = false
+      if (Object.keys(next).length === 0) delete toggles[server]
+      else toggles[server] = next
+      await saveConfig({ mcp: { ...desktopConfig.mcp, toolToggles: toggles } })
+      await reloadPiConfig()
+      return buildMcpState()
+    }
+  )
+
+  ipcMain.handle('mcp:choose-engine-entry', async (_event, id: McpEngineId) => {
+    const filters =
+      process.platform === 'win32'
+        ? [{ name: id === 'codegraph' ? 'CodeGraph' : 'Serena', extensions: ['exe', 'cmd', 'js'] }]
+        : [{ name: 'Executable', extensions: [''] }]
+    const result = await dialog.showOpenDialog({
+      title: id === 'codegraph' ? '选择 CodeGraph 入口' : '选择 Serena 入口',
+      properties: ['openFile'],
+      filters
+    })
+    return result.canceled ? null : (result.filePaths[0] ?? null)
   })
 
   ipcMain.handle('mcp:set-server-enabled', async (_event, name: string, enabled: boolean) => {
@@ -762,12 +964,26 @@ app.whenReady().then(async () => {
   await migrateLegacyUserData()
   await applySystemProxy()
   desktopConfig = await loadConfig()
+  await loadToolCache()
   const cwd = desktopConfig.cwd || process.env.PI_DESKTOP_CWD || process.cwd()
   status = { phase: 'stopped', cwd }
   await startBridge()
   bridge.setAskListener((request) => {
     if (mainWindow) mainWindow.webContents.send('ask:request', request)
     else bridge.cancelAsk(request.id, '桌面窗口未就绪')
+  })
+  bridge.setToolsListener((servers) => {
+    const next: ToolCache = { ...toolCache }
+    for (const [server, tools] of Object.entries(servers)) {
+      next[server] = tools
+    }
+    void saveToolCache(next).then(() => broadcastMcpState())
+  })
+  bridge.setMcpHandler((engine, message) => {
+    if (engine !== 'codegraph' && engine !== 'lsp') {
+      return Promise.reject(new Error(`未知网关端点：${engine}`))
+    }
+    return gateway.handleMessage(engine, message)
   })
   createWindow()
   updates.setupUpdates((next) => mainWindow?.webContents.send('app-update', next))
@@ -781,6 +997,9 @@ app.whenReady().then(async () => {
     'script=',
     mcpServerScript()
   )
+  // Warm the model runtime in the background so the first Settings open is instant.
+  void providers.listProviders().catch(() => undefined)
+  void providers.listModelChoices().catch(() => undefined)
   void startPi(cwd)
 
   app.on('activate', () => {
@@ -804,12 +1023,14 @@ async function startBridge(): Promise<void> {
 app.on('window-all-closed', () => {
   cancelPendingAsks('桌面窗口已关闭')
   rpc.stop()
+  gateway.stopAll()
   status = { ...status, phase: 'stopped' }
   if (process.platform !== 'darwin') app.quit()
 })
 
 app.on('before-quit', () => {
   bridge.cancelAllAsks('桌面端已退出')
+  gateway.stopAll()
   bridge.stopBridge()
   rpc.stop()
 })

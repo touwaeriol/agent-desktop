@@ -2,12 +2,86 @@ import { useState } from 'react'
 import type { ChatItem, ToolCallView } from '../lib/messages'
 import { Markdown } from './Markdown'
 import { MessageImages } from './ImageLightbox'
-import { BranchIcon, ChevronIcon, SparkIcon, ToolIcon } from './Icons'
+import { ChevronIcon, SparkIcon, ToolIcon } from './Icons'
 
 function formatDuration(ms?: number): string {
   if (ms === undefined) return ''
   if (ms < 1000) return `${Math.round(ms)}ms`
   return `${(ms / 1000).toFixed(1)}s`
+}
+
+function formatElapsed(ms: number): string {
+  const total = Math.max(0, Math.round(ms / 1000))
+  if (total < 60) return `${total}s`
+  const minutes = Math.floor(total / 60)
+  const seconds = total % 60
+  if (minutes < 60) return `${minutes}m ${seconds}s`
+  return `${Math.floor(minutes / 60)}h ${minutes % 60}m`
+}
+
+function formatTokens(value?: number): string | undefined {
+  if (!value) return undefined
+  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`
+  if (value >= 1000) return `${(value / 1000).toFixed(1)}k`
+  return String(value)
+}
+
+type ToolKind = 'read' | 'write' | 'bash' | 'search' | 'other'
+
+function kindOf(name: string): ToolKind {
+  const tool = name.replace(/^mcp__/, '').toLowerCase()
+  if (tool === 'read' || tool === 'read_file' || tool === 'view') return 'read'
+  if (tool === 'write' || tool === 'edit' || tool === 'patch' || tool === 'multiedit') return 'write'
+  if (tool === 'bash' || tool === 'shell' || tool === 'exec') return 'bash'
+  if (tool === 'grep' || tool === 'glob' || tool === 'ls' || tool === 'search') return 'search'
+  return 'other'
+}
+
+const KIND_LABELS: Record<ToolKind, (count: number) => string> = {
+  read: (count) => `读取 ${count} 个文件`,
+  write: (count) => `编辑 ${count} 个文件`,
+  bash: (count) => `运行 ${count} 条命令`,
+  search: (count) => `搜索 ${count} 次`,
+  other: (count) => `调用 ${count} 个工具`
+}
+
+function describeCalls(calls: ToolCallView[]): string {
+  const order: ToolKind[] = []
+  const counts = new Map<ToolKind, number>()
+  for (const call of calls) {
+    const kind = kindOf(call.name)
+    if (!counts.has(kind)) order.push(kind)
+    counts.set(kind, (counts.get(kind) ?? 0) + 1)
+  }
+  return order.map((kind) => KIND_LABELS[kind](counts.get(kind)!)).join(' · ')
+}
+
+function Activity({ calls }: { calls: ToolCallView[] }) {
+  const [open, setOpen] = useState(false)
+  const running = calls.some((call) => call.status === 'running')
+  const failed = calls.some((call) => call.status === 'error')
+  return (
+    <div className="activity">
+      <button
+        className={`activity-row ${running ? 'running' : ''}`}
+        onClick={() => setOpen((value) => !value)}
+        title="展开工具调用"
+      >
+        {(running || failed) && (
+          <span className={`activity-dot ${running ? 'running' : 'error'}`} />
+        )}
+        <span className="activity-text">{describeCalls(calls)}</span>
+        <ChevronIcon size={11} className={`activity-chevron ${open ? 'open' : ''}`} />
+      </button>
+      {open && (
+        <div className="activity-body">
+          {calls.map((call) => (
+            <ToolCard key={call.id} call={call} />
+          ))}
+        </div>
+      )}
+    </div>
+  )
 }
 
 function ToolCard({ call }: { call: ToolCallView }) {
@@ -76,15 +150,10 @@ function Message({ item }: { item: ChatItem }) {
   }
   return (
     <article className="message assistant" data-message-id={item.id}>
-      <div className="assistant-avatar">
-        <BranchIcon size={13} />
-      </div>
       <div className="assistant-body">
         {item.thinking && <Thinking text={item.thinking} />}
         {item.text && <Markdown>{item.text}</Markdown>}
-        {item.toolCalls.map((call) => (
-          <ToolCard key={call.id} call={call} />
-        ))}
+        {item.toolCalls.length > 0 && <Activity calls={item.toolCalls} />}
         {item.error && <div className="message-error">{item.error}</div>}
         {item.streaming && !item.text && item.toolCalls.length === 0 && (
           <div className="typing">
@@ -110,12 +179,14 @@ export function Conversation({
   workspace,
   connected,
   loggedIn,
+  runStatus,
   onSuggestion
 }: {
   items: ChatItem[]
   workspace: string
   connected: boolean
   loggedIn: boolean
+  runStatus?: { active: boolean; elapsedMs: number; runningTools: number; tokens?: number }
   onSuggestion: (text: string) => void
 }) {
   if (items.length === 0) {
@@ -146,6 +217,30 @@ export function Conversation({
       {items.map((item) => (
         <Message key={item.id} item={item} />
       ))}
+      {runStatus && (runStatus.active || runStatus.elapsedMs > 0) && (
+        <div className="run-status">
+          <span className={`run-dot ${runStatus.active ? 'active' : ''}`} />
+          <span>{formatElapsed(runStatus.elapsedMs)}</span>
+          {formatTokens(runStatus.tokens) && (
+            <>
+              <span className="run-sep">·</span>
+              <span>{formatTokens(runStatus.tokens)} tokens</span>
+            </>
+          )}
+          {runStatus.runningTools > 0 && (
+            <>
+              <span className="run-sep">·</span>
+              <span>{runStatus.runningTools} 个任务运行中</span>
+            </>
+          )}
+          {runStatus.active && (
+            <>
+              <span className="run-sep">·</span>
+              <span>运行中</span>
+            </>
+          )}
+        </div>
+      )}
     </div>
   )
 }

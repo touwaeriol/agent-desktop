@@ -44,6 +44,7 @@ const bridge: PiBridge = {
   newSession: () => ipcRenderer.invoke('pi:new-session'),
   switchSession: (sessionPath: string) => ipcRenderer.invoke('pi:switch-session', sessionPath),
   getMessages: () => ipcRenderer.invoke('pi:get-messages') as Promise<AgentMessage[]>,
+  getSessionStats: () => ipcRenderer.invoke('pi:session-stats'),
   listSessions: () => ipcRenderer.invoke('pi:list-sessions') as Promise<SessionSummary[]>,
   openAgentDir: () => ipcRenderer.invoke('pi:open-agent-dir') as Promise<void>,
   openExternal: (url: string) => ipcRenderer.invoke('app:open-external', url) as Promise<void>,
@@ -82,6 +83,22 @@ const bridge: PiBridge = {
   setMcpEnabled: (enabled: boolean) => ipcRenderer.invoke('mcp:set-enabled', enabled) as Promise<McpState>,
   setDesktopToolEnabled: (enabled: boolean) =>
     ipcRenderer.invoke('mcp:set-desktop-tool', enabled) as Promise<McpState>,
+  setMcpEngineEnabled: (id: 'codegraph' | 'lsp', enabled: boolean) =>
+    ipcRenderer.invoke('mcp:set-engine-enabled', id, enabled) as Promise<McpState>,
+  setMcpEngineEntry: (id: 'codegraph' | 'lsp', entry: string | null) =>
+    ipcRenderer.invoke('mcp:set-engine-entry', id, entry) as Promise<McpState>,
+  refreshMcpEngines: () => ipcRenderer.invoke('mcp:refresh-engines') as Promise<McpState>,
+  buildMcpIndex: () =>
+    ipcRenderer.invoke('mcp:build-index') as Promise<{ ok: boolean; message: string }>,
+  setMcpToolEnabled: (server: string, tool: string, enabled: boolean) =>
+    ipcRenderer.invoke('mcp:set-tool', server, tool, enabled) as Promise<McpState>,
+  chooseMcpEngineEntry: (id: 'codegraph' | 'lsp') =>
+    ipcRenderer.invoke('mcp:choose-engine-entry', id) as Promise<string | null>,
+  onMcpState: (listener) => {
+    const handler = (_event: Electron.IpcRendererEvent, state: McpState): void => listener(state)
+    ipcRenderer.on('mcp:state', handler)
+    return () => ipcRenderer.removeListener('mcp:state', handler)
+  },
   setMcpServerEnabled: (name: string, enabled: boolean) =>
     ipcRenderer.invoke('mcp:set-server-enabled', name, enabled),
   removeMcpServer: (name: string) => ipcRenderer.invoke('mcp:remove-server', name),

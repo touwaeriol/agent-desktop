@@ -1,0 +1,344 @@
+/**
+ * MCP gateway: the desktop app speaks MCP to pi itself and forwards to the real engines.
+ *
+ * One service (the loopback bridge) exposes one endpoint per engine — `/mcp/codegraph`, `/mcp/lsp` —
+ * and each endpoint is a gateway that spawns the upstream engine as a stdio MCP server. Only the
+ * tools in the target's allowlist are listed, so the model sees a curated set instead of everything
+ * the engine happens to offer (Serena alone exposes 29 tools).
+ *
+ * The endpoints speak streamable HTTP in its simplest legal form: a POST answers with
+ * `application/json`, GET answers 405 (no server-to-client stream), DELETE ends the session.
+ */
+import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
+import type { McpEngineId } from '../shared/types'
+
+export interface EngineTarget {
+  id: McpEngineId
+  command: string
+  args: string[]
+  env: Record<string, string>
+  cwd: string
+  /** Upstream tool names to expose; everything else is dropped. */
+  allowlist: string[]
+  timeoutMs: number
+}
+
+interface PendingRequest {
+  resolve: (value: unknown) => void
+  reject: (error: Error) => void
+  timer: NodeJS.Timeout
+}
+
+const PROTOCOL_VERSION = '2025-06-18'
+const STDERR_TAIL = 20
+
+/** A stdio MCP client for one engine process (JSONL framing, same as pi uses). */
+class Upstream {
+  private child: ChildProcessWithoutNullStreams | null = null
+  private buffer = ''
+  private seq = 0
+  private pending = new Map<number, PendingRequest>()
+  private stderrTail: string[] = []
+  private starting: Promise<void> | null = null
+  private failure: string | undefined
+
+  constructor(private readonly target: EngineTarget) {}
+
+  /** Only real failures, never the engine's own log output (Serena logs every request to stderr). */
+  get error(): string | undefined {
+    return this.failure
+  }
+
+  private handleLine(line: string): void {
+    if (!line.trim()) return
+    let message: Record<string, unknown>
+    try {
+      message = JSON.parse(line) as Record<string, unknown>
+    } catch {
+      return
+    }
+    if (typeof message.id !== 'number') return
+    const entry = this.pending.get(message.id)
+    if (!entry) return
+    this.pending.delete(message.id)
+    clearTimeout(entry.timer)
+    if (message.error) {
+      const error = message.error as { message?: string }
+      entry.reject(new Error(error.message ?? 'upstream error'))
+    } else {
+      entry.resolve(message.result)
+    }
+  }
+
+  private failAll(reason: string): void {
+    for (const [, entry] of this.pending) {
+      clearTimeout(entry.timer)
+      entry.reject(new Error(reason))
+    }
+    this.pending.clear()
+  }
+
+  async start(): Promise<void> {
+    if (this.child) return
+    if (this.starting) return this.starting
+    this.starting = new Promise<void>((resolve, reject) => {
+      const child = spawn(this.target.command, this.target.args, {
+        cwd: this.target.cwd,
+        env: { ...process.env, ...this.target.env },
+        windowsHide: true,
+        stdio: ['pipe', 'pipe', 'pipe']
+      })
+      this.child = child
+      child.stdout.setEncoding('utf8')
+      child.stdout.on('data', (chunk: string) => {
+        this.buffer += chunk
+        let index = this.buffer.indexOf('\n')
+        while (index >= 0) {
+          this.handleLine(this.buffer.slice(0, index).replace(/\r$/, ''))
+          this.buffer = this.buffer.slice(index + 1)
+          index = this.buffer.indexOf('\n')
+        }
+      })
+      child.stderr.setEncoding('utf8')
+      child.stderr.on('data', (chunk: string) => {
+        for (const line of chunk.split('\n')) {
+          const text = line.trim()
+          if (!text) continue
+          this.stderrTail.push(text)
+          if (this.stderrTail.length > STDERR_TAIL) this.stderrTail.shift()
+        }
+      })
+      child.on('error', (error) => {
+        this.child = null
+        this.failure = `上游启动失败：${error.message}`
+        this.failAll(this.failure)
+        reject(error)
+      })
+      child.on('exit', (code) => {
+        this.child = null
+        this.failure =
+          `上游已退出（code ${code ?? 'null'}）` +
+          (this.stderrTail.length > 0 ? `：${this.stderrTail.slice(-2).join(' ').slice(0, 300)}` : '')
+        this.failAll(this.failure)
+      })
+      this.request('initialize', {
+        protocolVersion: PROTOCOL_VERSION,
+        capabilities: {},
+        clientInfo: { name: 'agent-desktop-gateway', version: '0.2.0' }
+      })
+        .then(() => {
+          this.failure = undefined
+          this.notify('notifications/initialized')
+          resolve()
+        })
+        .catch((error: unknown) => {
+          this.failure =
+            `上游初始化失败：${error instanceof Error ? error.message : String(error)}` +
+            (this.stderrTail.length > 0 ? `：${this.stderrTail.slice(-2).join(' ').slice(0, 300)}` : '')
+          this.stop()
+          reject(error instanceof Error ? error : new Error(String(error)))
+        })
+    }).finally(() => {
+      this.starting = null
+    })
+    return this.starting
+  }
+
+  request(method: string, params: unknown, timeoutMs = this.target.timeoutMs): Promise<unknown> {
+    const child = this.child
+    if (!child || child.killed) return Promise.reject(new Error('上游未运行'))
+    const id = ++this.seq
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pending.delete(id)
+        reject(new Error(`${this.target.id} 在 ${Math.round(timeoutMs / 1000)}s 内没有响应`))
+      }, timeoutMs)
+      this.pending.set(id, { resolve, reject, timer })
+      child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id, method, params })}\n`)
+    })
+  }
+
+  notify(method: string, params?: unknown): void {
+    const child = this.child
+    if (!child || child.killed) return
+    const message = params === undefined
+      ? { jsonrpc: '2.0', method }
+      : { jsonrpc: '2.0', method, params }
+    child.stdin.write(`${JSON.stringify(message)}\n`)
+  }
+
+  cancel(id: number): void {
+    this.notify('notifications/cancelled', { requestId: id, reason: 'client cancelled' })
+  }
+
+  stop(): void {
+    this.failAll('网关已停止')
+    this.child?.kill()
+    this.child = null
+  }
+}
+
+/** One endpoint: curated tool list plus forwarding to its upstream. */
+class EngineGateway {
+  private upstream: Upstream
+  private tools: Array<Record<string, unknown>> | null = null
+  private inflight = new Map<string, number>()
+
+  constructor(readonly target: EngineTarget) {
+    this.upstream = new Upstream(target)
+  }
+
+  get error(): string | undefined {
+    return this.upstream.error
+  }
+
+  private async loadTools(): Promise<Array<Record<string, unknown>>> {
+    if (this.tools) return this.tools
+    await this.upstream.start()
+    const result = (await this.upstream.request('tools/list', {})) as {
+      tools?: Array<Record<string, unknown>>
+    }
+    const allowed = new Set(this.target.allowlist)
+    this.tools = (result.tools ?? []).filter(
+      (tool) => typeof tool.name === 'string' && allowed.has(tool.name)
+    )
+    return this.tools
+  }
+
+  async handle(message: Record<string, unknown>): Promise<unknown> {
+    const method = typeof message.method === 'string' ? message.method : ''
+    const params = (message.params ?? {}) as Record<string, unknown>
+    switch (method) {
+      case 'initialize':
+        return {
+          protocolVersion: PROTOCOL_VERSION,
+          capabilities: { tools: { listChanged: false } },
+          serverInfo: { name: `agent-desktop-${this.target.id}`, version: '0.2.0' },
+          instructions:
+            `${this.target.id === 'codegraph' ? 'CodeGraph' : 'Serena (LSP)'} gateway. ` +
+            `Only ${this.target.allowlist.length} curated tools are exposed; calls are forwarded to the engine.`
+        }
+      case 'ping':
+        return {}
+      case 'tools/list':
+        return { tools: await this.loadTools() }
+      case 'tools/call': {
+        const name = typeof params.name === 'string' ? params.name : ''
+        if (!this.target.allowlist.includes(name)) {
+          throw Object.assign(new Error(`unknown tool: ${name}`), { code: -32602 })
+        }
+        const tools = await this.loadTools()
+        if (!tools.some((tool) => tool.name === name)) {
+          throw Object.assign(new Error(`工具 ${name} 当前不可用（引擎未提供）`), { code: -32603 })
+        }
+        const requestId = typeof message.id === 'number' ? message.id : undefined
+        const promise = this.upstream.request('tools/call', {
+          name,
+          arguments: params.arguments ?? {}
+        })
+        if (requestId !== undefined) this.inflight.set(String(requestId), requestId)
+        try {
+          return await promise
+        } finally {
+          if (requestId !== undefined) this.inflight.delete(String(requestId))
+        }
+      }
+      case 'resources/list':
+        return { resources: [] }
+      case 'resources/templates/list':
+        return { resourceTemplates: [] }
+      case 'prompts/list':
+        return { prompts: [] }
+      default:
+        throw Object.assign(new Error(`method not supported: ${method}`), { code: -32601 })
+    }
+  }
+
+  cancel(requestId: string): void {
+    const id = this.inflight.get(requestId)
+    if (id !== undefined) this.upstream.cancel(id)
+  }
+
+  stop(): void {
+    this.upstream.stop()
+    this.tools = null
+    this.inflight.clear()
+  }
+}
+
+const gateways = new Map<McpEngineId, EngineGateway>()
+
+/** Point the endpoints at the engines for the current session directory. */
+export function configure(targets: EngineTarget[]): void {
+  const wanted = new Set(targets.map((target) => target.id))
+  for (const [id, gateway] of gateways) {
+    if (!wanted.has(id)) {
+      gateway.stop()
+      gateways.delete(id)
+    }
+  }
+  for (const target of targets) {
+    const existing = gateways.get(target.id)
+    const same =
+      existing &&
+      existing.target.command === target.command &&
+      existing.target.cwd === target.cwd &&
+      existing.target.args.join('\u0000') === target.args.join('\u0000')
+    if (same) continue
+    existing?.stop()
+    gateways.set(target.id, new EngineGateway(target))
+  }
+}
+
+export function isConfigured(id: McpEngineId): boolean {
+  return gateways.has(id)
+}
+
+export function gatewayError(id: McpEngineId): string | undefined {
+  return gateways.get(id)?.error
+}
+
+/**
+ * Handle one JSON-RPC message for an endpoint. Returns the response object, or undefined for
+ * notifications (which the bridge answers with 202).
+ */
+export async function handleMessage(
+  id: McpEngineId,
+  message: Record<string, unknown>
+): Promise<unknown | undefined> {
+  const gateway = gateways.get(id)
+  const method = typeof message.method === 'string' ? message.method : ''
+  if (message.id === undefined || message.id === null) {
+    if (method === 'notifications/cancelled' && gateway) {
+      const requestId = (message.params as { requestId?: unknown } | undefined)?.requestId
+      if (requestId !== undefined) gateway.cancel(String(requestId))
+    }
+    return undefined
+  }
+  if (!gateway) {
+    return {
+      jsonrpc: '2.0',
+      id: message.id,
+      error: { code: -32603, message: `${id} 网关未启用` }
+    }
+  }
+  try {
+    const result = await gateway.handle(message)
+    return { jsonrpc: '2.0', id: message.id, result }
+  } catch (error) {
+    const code = (error as { code?: number }).code ?? -32603
+    return {
+      jsonrpc: '2.0',
+      id: message.id,
+      error: {
+        code,
+        message: error instanceof Error ? error.message : String(error)
+      }
+    }
+  }
+}
+
+export function stopAll(): void {
+  for (const gateway of gateways.values()) gateway.stop()
+  gateways.clear()
+}

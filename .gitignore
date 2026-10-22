@@ -6,3 +6,6 @@ release/
 .DS_Store
 .vscode/
 .idea/
+# CodeGraph index and Serena project config, created by the built-in MCP engines
+.codegraph/
+.serena/

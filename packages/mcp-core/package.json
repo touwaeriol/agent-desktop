@@ -1,0 +1,14 @@
+{
+  "name": "@agent-desktop/mcp-core",
+  "version": "0.3.0",
+  "private": true,
+  "description": "Agent Desktop core interaction MCP server (desktop tools such as ask_user_question)",
+  "type": "module",
+  "bin": {
+    "agent-desktop-core": "./server.mjs"
+  },
+  "files": [
+    "server.mjs",
+    "tools"
+  ]
+}

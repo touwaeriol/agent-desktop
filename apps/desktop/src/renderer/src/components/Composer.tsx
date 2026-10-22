@@ -4,9 +4,9 @@ import {
   CheckIcon,
   ChevronIcon,
   FolderIcon,
+  PlusIcon,
   SearchIcon,
   SendIcon,
-  SparkIcon,
   StopIcon
 } from './Icons'
 import { DraftImageStrip, ImageLightbox } from './ImageLightbox'
@@ -63,8 +63,8 @@ export function Composer({
   onChooseWorkspace: () => void
 }) {
   const ref = useRef<HTMLTextAreaElement>(null)
+  const fileRef = useRef<HTMLInputElement>(null)
   const pickerRef = useRef<HTMLDivElement>(null)
-  const thinkingRef = useRef<HTMLDivElement>(null)
   const searchRef = useRef<HTMLInputElement>(null)
   const [modelOpen, setModelOpen] = useState(false)
   const [models, setModels] = useState<ModelOption[]>([])
@@ -157,7 +157,7 @@ export function Composer({
   useEffect(() => {
     if (!thinkingOpen) return
     const onMouseDown = (event: MouseEvent): void => {
-      if (!thinkingRef.current?.contains(event.target as Node)) setThinkingOpen(false)
+      if (!pickerRef.current?.contains(event.target as Node)) setThinkingOpen(false)
     }
     const onKeyDown = (event: KeyboardEvent): void => {
       if (event.key === 'Escape') setThinkingOpen(false)
@@ -325,6 +325,29 @@ export function Composer({
         <div className="composer-foot">
           <div className="composer-left">
             <button
+              className="attach-btn"
+              title="添加图片（也可直接粘贴或拖入）"
+              onClick={() => fileRef.current?.click()}
+            >
+              <PlusIcon size={13} />
+              <span>添加图片</span>
+            </button>
+            <input
+              ref={fileRef}
+              type="file"
+              accept="image/*"
+              multiple
+              hidden
+              onChange={(event) => {
+                const files = Array.from(event.target.files ?? []).filter((file) =>
+                  file.type.startsWith('image/')
+                )
+                event.target.value = ''
+                if (files.length === 0) return
+                handleFiles(files, value.trim() ? value.length : 0)
+              }}
+            />
+            <button
               className="chip"
               onClick={onChooseWorkspace}
               title={`${status.cwd}（切换目录并新建会话）`}
@@ -332,21 +355,24 @@ export function Composer({
               <FolderIcon size={12} />
               <span>{workspace}</span>
             </button>
-            {status.sessionName && (
-              <span className="chip static" title="会话名称">
-                {status.sessionName}
-              </span>
-            )}
           </div>
           <div className="composer-right">
-            <div className="model-picker-wrap" ref={pickerRef}>
+            <div className="model-pill" ref={pickerRef}>
               <button
-                className={`chip model-chip ${status.model ? '' : 'warn'} ${modelOpen ? 'open' : ''}`}
+                className={`pill-seg model ${status.model ? '' : 'warn'} ${modelOpen ? 'open' : ''}`}
                 onClick={() => void openModelPicker()}
                 title="选择模型"
               >
                 <span>{activeLabel}</span>
-                <ChevronIcon size={11} className="model-chevron" />
+              </button>
+              <span className="pill-sep" />
+              <button
+                className={`pill-seg thinking ${thinkingOpen ? 'open' : ''}`}
+                onClick={() => void openThinkingPicker()}
+                title="选择思考等级"
+              >
+                <span>{THINKING_LABELS[status.thinkingLevel ?? ''] ?? status.thinkingLevel ?? 'off'}</span>
+                <ChevronIcon size={11} />
               </button>
 
               {modelOpen && (
@@ -405,18 +431,6 @@ export function Composer({
                   </div>
                 </div>
               )}
-            </div>
-
-            <div className="thinking-picker-wrap" ref={thinkingRef}>
-              <button
-                className={`chip ${thinkingOpen ? 'open' : ''}`}
-                onClick={() => void openThinkingPicker()}
-                title="选择思考等级"
-              >
-                <SparkIcon size={12} />
-                <span>{status.thinkingLevel ?? 'off'}</span>
-                <ChevronIcon size={11} className="model-chevron" />
-              </button>
 
               {thinkingOpen && (
                 <div className="thinking-picker">

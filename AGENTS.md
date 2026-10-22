@@ -3,7 +3,7 @@
 ## Layout
 
 - `apps/desktop` — Electron + React 桌面端。主进程 (`src/main`) 以 RPC 子进程方式启动 pi，渲染层 (`src/renderer`) 只通过 preload 暴露的 `window.pi` 通信。
-- `packages/` — 给 pi 使用的 MCP 服务器。目前有 `mcp-ask-user`（桌面提问工具，零依赖 stdio MCP）。
+- `packages/` — 给 pi 使用的 MCP 服务器。目前有 `mcp-core`：桌面端核心交互 MCP（零依赖 stdio），当前提供 `ask_user_question`，新工具加到 `packages/mcp-core/tools/` 并在 `tools/index.mjs` 注册即可。
 - `scripts/electron-vite.mjs` — electron-vite 启动器。
 
 ## Commands
@@ -37,8 +37,17 @@ npm run typecheck    # node + web 两个 tsconfig 分别检查
 ## Theme & sidebar
 
 - 主题：`document.documentElement.dataset.theme` 为 `dark` / `light`，持久化在 localStorage `pi-desktop-theme`。样式全部走 `styles.css` 顶部的 CSS 变量；新增样式不要写死颜色，否则亮色主题会破。切换主题时同时调用 `app:set-theme` 同步 Electron 标题栏 overlay 颜色。
+- 侧栏顶部按参考产品（Claude 桌面端）排：`.sidebar-toolbar`（☰ 收起侧栏 / ▭ 视图选项 / ← → 会话前进后退）、`.mode-switch`（Cowork 禁用 + Code 选中）、`.sidebar-nav`（新建 / 自定义 / 更多，更多展开 `.nav-menu`）、`.pinned-block`（置顶会话，编号徽标）。`Cowork` 没有实现，保持 disabled，不要伪造功能。
+- 会话前进后退由 `App.tsx` 的 `historyRef`（stack + index，上限 50）驱动：`selectSession(session, { remember: false })` 用于历史跳转，避免再次入栈。
+- 置顶存在 localStorage `pi-pinned-sessions`（路径数组），会话悬停时的第一个 `.session-archive` 按钮是置顶、第二个是归档。
 - 侧栏：按 `session.cwd` 分项目，默认每个项目显示 10 条，超出显示“显示其余 N 个”；折叠/展开状态在 `Sidebar` 内部。项目标题右侧 `+` 通过 `pi:new-project-session` 切换 cwd 并开新会话。
 - `PiRpcClient` 的 `exit` / `error` 回调必须确认 `this.child === child` 再处理，否则重启时旧进程的退出事件会把新进程引用置空并误报“pi 进程已退出”。
+
+## Conversation layout
+
+- assistant 消息不再有头像，正文直接铺开（文档式）；用户消息是右对齐气泡，图片在气泡上方（`.message.user` 为 column + align-items flex-end）。
+- 工具调用按“活动行”聚合：`Activity` 把同一轮的工具按 read/write/bash/search/other 汇总成 `读取 2 个文件 · 运行 1 条命令 ›`，点开才显示具体 `.tool-card`；运行中/失败才显示圆点。
+- 每轮结束的统计行（`.run-status`）来自 `App.tsx` 的 `run` 状态：`agent_start` 记开始时间、`tool_execution_start/end` 加减运行中数量、`agent_settled` 记结束时间并通过 `pi:session-stats`（RPC `get_session_stats`）取 `tokens.total`。1 秒定时器只为刷新计时，不要用它做别的。
 
 ## Session view, thinking, model allowlist
 
@@ -47,6 +56,10 @@ npm run typecheck    # node + web 两个 tsconfig 分别检查
 - 侧栏视图偏好存在 localStorage `pi-sidebar-prefs`（environment/group/sort/showEmptyGroups），归档会话存在 `pi-archived-sessions`。搜索和状态筛选是**项目级**的（项目头部的 `+ / 搜索 / 筛选`，状态存在组件内 `projectStatus`，搜索存在 `projectQueries`）；顶部的漏斗是全局“视图选项”（环境/分组/排序/显示空分组）。分组支持文件夹 / 日期 / 不分组，排序支持最近活动 / 创建时间 / 名称；归档通过会话悬停按钮切换。`showEmptyGroups` 会在文件夹分组下保留当前工作目录以及所有出现过会话的项目（即使筛选后为 0 条）。SSH 环境和 PR 状态 pi 没有数据来源，菜单里显示为禁用项。
 - 思考等级必须用 RPC `get_available_thinking_levels` 获取（随模型变化），选择后调用 `set_thinking_level`；不要用 `cycle_thinking_level` 盲切。
 - 模型隐藏走 pi 的 `settings.json.enabledModels` 允许列表：`setProviderModels` 会把“除隐藏项外的全部模型 ID”写进去，全部启用时删除该字段（空 = 全部）。`pi:list-models` 和 `listModelChoices` 都按该列表过滤。未勾选的模型不会出现在模型选择器/默认模型下拉中。
+- 允许列表必须**压缩**写入：某个服务商的所有模型都启用时写 `provider/*`（pi 用 minimatch 匹配 `provider/id`），只有部分启用才写具体 ID。历史上写成 1560 条精确 ID 会让 `isModelEnabled` 变成 O(模型×模式) 的 2 秒级卡顿（打开设置卡住的原因）。
+- `isModelEnabled` 用 `getMatchers`：精确模式进 Set、通配模式预编译成 RegExp，按模式串缓存，禁止再在循环里 `new RegExp`。`listModelChoices` 结果也按「模式 + 已配置服务商」缓存，凭据/`models.json`/`settings.json` 变化时调用 `invalidateCache()`（登录、登出、保存设置、保存模型列表都会调用）。
+- `listModelChoices` 默认只返回**已配置凭据**的服务商模型（1560 → 5），否则 contextBridge 跨隔离世界复制上千个对象会让设置页卡 2 秒。需要全部模型时传 `{ includeUnconfigured: true }`。
+- 主进程启动时在后台 `listProviders()` / `listModelChoices()` 预热（`whenReady` 里），让第一次打开设置不用等 `ModelRuntime` 冷启动（约 500ms）。
 - 自定义服务商界面在 `CustomProvidersPanel.tsx`：表单模式维护 `models.json` 的 providers，保留未知字段（headers/compat/cost 等）并支持表单/JSON 切换；新建模型默认补零 cost。内置服务商判断用 `ProviderInfo.builtin`（单独创建 `modelsPath: null` 的 ModelRuntime 取基线 ID），不要用当前 runtime 的 provider 列表，否则自定义服务商会被误标为“覆盖内置”。
 - OpenAI ChatGPT 订阅登录必须在 `runtime.login` 的 options 里传 `getDeviceId`（稳定的 UUID，保存在 Electron userData 的 `device-id` 文件），否则报 “Sign in with ChatGPT requires a device ID (UUID) for this installation”。
 - 两个 OpenAI 服务商是 pi 内置的：`openai`（ChatGPT 订阅 / API Key，标准模型）和 `openai-codex`（旧版 Codex 渠道，仅 ChatGPT Plus/Pro，模型较少）。设置页对两者有说明文案。
@@ -78,13 +91,29 @@ npm run typecheck    # node + web 两个 tsconfig 分别检查
 ## MCP & desktop tools
 
 - 桌面提问工具 `ask_user_question` 是一条自建链路，四段：
-  1. `packages/mcp-ask-user/server.mjs` — 零依赖 stdio MCP 服务器（手写 JSON-RPC：`initialize` / `tools/list` / `tools/call`，按 `\n` 分帧，日志只走 stderr）。
-  2. `apps/desktop/resources/extension/desktop-mcp.js` — pi 扩展，读 `AGENT_DESKTOP_MCP_URL/TOKEN/SCRIPT` 后 `pi.registerMcpServer('desktop', {...})`。**必须 `exposure: 'direct'`**（默认 `codemode` 不会把工具声明给模型）。**`timeout` 必须传 `Number.POSITIVE_INFINITY`**：pi 把 `config.timeout`（秒）乘 1000 传给 MCP client，`armTimeout` 在 `!Number.isFinite(timeoutMs)` 时不 arm 定时器，所以只有非有限值才真正不超时；填大数字会踩 `setTimeout` 的 2^31-1 ms 上限而立刻超时（默认值是 60 秒）。
-  3. `apps/desktop/src/main/bridge.ts` — 只监听 `127.0.0.1` 的 HTTP 桥，`POST /ask`（`x-agent-desktop-token` 校验）→ 渲染层弹窗 → 回答后返回 JSON。**不要加等待超时**（`server.requestTimeout`/`server.timeout` 都设 0）；取消只来自 `cancelAllAsks`：pi 重启、关窗、退出、以及 `pi:abort`（同时给渲染层发 `ask:cleared` 关掉面板）。
+  1. `packages/mcp-core/server.mjs` — 零依赖 stdio MCP 服务器（手写 JSON-RPC：`initialize` / `tools/list` / `tools/call`，按 `\n` 分帧，日志只走 stderr），工具在 `tools/index.mjs` 注册、实现在 `tools/ask-user.mjs`（每个工具导出 `name` / `title` / `description` / `inputSchema` / `call(args, context)`，`context` 提供 `post(path, payload, signal)`、`signal`、`log`）。注册名仍是 `desktop`（核心交互 MCP），新桌面工具加在这个包里，不要另起服务器。
+  2. `apps/desktop/resources/extension/desktop-mcp.js` — pi 扩展，读 `AGENT_DESKTOP_MCP_URL/TOKEN/CORE_SCRIPT/ENGINES/TOGGLES` 后 `pi.registerMcpServer(...)`。核心服务器**必须 `exposure: 'direct'`**（默认 `codemode` 不会把工具声明给模型）。**`timeout` 必须传 `Number.POSITIVE_INFINITY`**：pi 把 `config.timeout`（秒）乘 1000 传给 MCP client，`armTimeout` 在 `!Number.isFinite(timeoutMs)` 时不 arm 定时器，所以只有非有限值才真正不超时；填大数字会踩 `setTimeout` 的 2^31-1 ms 上限而立刻超时（默认值是 60 秒）。
+  3. `apps/desktop/src/main/bridge.ts` — 只监听 `127.0.0.1` 的 HTTP 桥，`POST /ask`（`x-agent-desktop-token` 校验）→ 渲染层弹窗 → 回答后返回 JSON。**不要加等待超时**（`server.requestTimeout`/`server.timeout` 都设 0）；取消只来自 `cancelAllAsks`：pi 重启、关窗、退出、以及 `pi:abort`（同时给渲染层发 `ask:cleared` 关掉面板）。同一个桥还有 `POST /tools`：扩展把各内置服务器实际注册的工具回报给主进程，写进 `%APPDATA%\agent-desktop\mcp-tools.json`，设置页的工具开关就靠这份清单。
   4. 渲染层 `AskQuestionPanel.tsx` — **内联面板，固定在输入框上方**（不要做全屏弹窗），高度控制在 ~130-160px：标题行、问题行（tag 内联）、**选项一行一个（不要并排）**、底栏同一行放输入框和按钮。单选 / 多选 / 手动输入；手动输入框常驻，直接打字即可，不用先选“其他”；单选时选项与手动输入互斥，多选时两者可叠加。顶部步骤条（仅多问题时显示）可点击跳回任意问题重新回答，`上一步` / `下一步` / `跳过` / `提交` 支持前后修改。`App.tsx` 用队列保存请求（`askQueue`），一次只显示一个，回答后从队列移除。
 - 工具命名是 pi 生成的 `mcp__desktop__ask_user_question`。验证链路最快的方式：向桥 `POST /ask`（端口和令牌在 `%APPDATA%\agent-desktop\config.json` 的 `mcp.bridgePort/bridgeToken`），不需要真实模型调用。
 - 注册方式选扩展 + `--extension`，**不要**写 `~/.pi/agent/mcp.json`：这样桌面端的工具不会污染终端里的 pi，桥接端口/令牌也不用每次启动改写用户配置。`mcpArgs()` 在总开关关闭时传 `--no-mcp`，桌面工具关闭时不传 `--extension`。
-- 路径解析：打包版从 `process.resourcesPath/extension|mcp` 取（`electron-builder.yml` 的 `extraResources` 负责拷贝），开发版用 `searchUp` 从 `app.getAppPath()` 向上找 `resources/extension/desktop-mcp.js` 和 `packages/mcp-ask-user/server.mjs`。改了资源位置要同时改这两处。
+- **MCP 不能提供系统提示词**：协议只有 `initialize.instructions`（+ `prompts` 原语），pi 的 MCP 客户端只读 `instructions`，且只用于 codemode 命名空间的 `describeNamespace()` 和 `mcp_servers` 段——而 `mcp_servers` 段由 `renderServersSection()` 里的 `hasIndirectTools` 过滤，**`direct` 暴露的服务器不会出现在里面**（每服务器也只取第一行、≤250 字符、整段 ≤4096）。`prompts/list`、`prompts/get`、`sampling`、`elicitation` pi 都没实现（client 只声明 `roots`）。所以 `server.mjs` 里的 `instructions` 在 direct 下对模型不可见，只对 codemode 有意义。
+- 因此模型的使用引导由扩展注入：`desktop-mcp.js` 挂 `before_agent_start`，往 `event.systemPromptOptions.sections.desktop_tools` 写一段文案。**必须用 `pi.getActiveTools().includes('mcp__desktop__ask_user_question')` 门控**：只有 MCP 打开、桌面工具打开、服务器真正连上、工具被声明给模型时才注入；否则 `delete sections.desktop_tools`。段名要匹配 `^[a-z][a-z0-9_-]*$` 且不能叫 `preamble`；段内容由 pi 包成 `<desktop_tools>…</desktop_tools>`，不要再手写标签。每轮都会重算，`diffSystemPromptSections` 会把不存在的段 patch 成 null，所以关掉 MCP 后旧段会自动消失，不需要清理会话文件。
+- 路径解析：打包版从 `process.resourcesPath/extension|mcp` 取（`electron-builder.yml` 的 `extraResources` 负责拷贝 `resources/extension` 与 `packages/mcp-core` 的 `server.mjs` + `tools/**`），开发版用 `searchUp` 从 `app.getAppPath()` 向上找 `resources/extension/desktop-mcp.js` 和 `packages/mcp-core/server.mjs`。改了资源位置要同时改这两处。
 - 设置 → MCP（`McpPanel.tsx`）管理 `~/.pi/agent/mcp.json`：总开关（`config.json.mcp.enabled`）、桌面工具开关（`mcp.desktopTool`）、服务器启用/删除/新增（新增接受一段 JSON，需含 `command` 或 `url`）。任何变更都会 `reloadPiConfig()` 重启 pi。
 - 项目级 `.pi/mcp.json` 只读展示并合并到列表（同名覆盖用户级），仅在信任项目时由 pi 生效。
+
+### 内置引擎（CodeGraph / LSP）
+
+- 两个引擎都是**外部 CLI，不打包、不自动安装**：CodeGraph 是 npm 全局包 `@colbymchenry/codegraph`（入口解析到 `npm-shim.js`，用 node 跑，避免 Windows `.cmd` 需要 shell）；Serena 是 uv tool `serena-agent`（`~/.local/bin/serena.exe`，直接 spawn）。检测在 `apps/desktop/src/main/engines.ts`：显式入口 → 已知安装路径 / `PATH` → `--version` 校验，结果缓存 60s，`invalidateDetection()` 在改入口时清掉。**显式入口不可用时不要回退到自动检测**，否则设置看起来生效了其实是别的二进制。
+- 默认关闭（`config.json.mcp.engines.<id>.enabled`），设置页逐个开启；未安装时卡片显示安装命令（`npm i -g @colbymchenry/codegraph` / `uv tool install serena-agent`）和「选择入口」。
+- **架构是网关，不是直连**：`apps/desktop/src/main/gateway.ts` 在主进程里持有上游引擎（stdio 子进程），对外由桥（`bridge.ts`）暴露 **一个服务、多个端点**：`POST /mcp/codegraph`、`POST /mcp/lsp`。pi 用 `registerMcpServer(name, { url, headers: { authorization: 'Bearer <token>' } })` 连这些端点，所以模型看到的是网关的工具集，不是引擎的全量工具。
+- 端点只实现 streamable HTTP 的最小合法形态：POST 返回 `application/json`，GET 返回 405（pi 的客户端把 405 当作"没有 server→client 流"），DELETE 返回 204。**不要**加 SSE，pi 的 `McpStreamableHttpTransport` 接受 JSON 响应。
+- 工具数量由 `ALLOWED_TOOLS` 控制（`engines.ts`）：CodeGraph 8 个、Serena 7 个（其余 22 个 Serena 工具直接被丢弃，`tool_search` 也搜不到）。新增/裁剪工具改这里。
+- 暴露策略：服务器级 `exposure: 'deferred'`，`toolExposure` 把核心工具标 `direct`（CodeGraph: `explore/search/callers/impact`；Serena: `find_symbol/find_referencing_symbols/get_symbols_overview/get_diagnostics_for_file`），其余走 `tool_search` 按需加载。pi 会因此激活 `tool_search` 工具，并在系统提示词里生成 `mcp_servers` 段（`deferred` 才会列，`direct` 不会）。
+- 网关只把**真实失败**（spawn 失败、进程退出、initialize 失败）当作错误上报；引擎自己往 stderr 打的 INFO 日志不算错误（Serena 每次请求都会打）。
+- 用户关掉的工具写成 `toolExposure[tool] = 'hidden'`（`config.json.mcp.toolToggles`），工具仍在 `getAllTools()` 里但 `exposure: 'hidden'`，所以设置页能继续显示并重新打开。
+- CodeGraph 索引：只在**没有** `.codegraph` 时自动 `codegraph init`；**不要自动 `sync`**——运行中的 MCP 服务器持有 CodeGraph 写锁，自动 sync 会报 "database is locked"。重新索引是设置页的手动动作（`codegraph unlock` 提示也在这里给出）。
+- **不要设置 `CODEGRAPH_NO_DAEMON=1`**：那会让服务器独占写锁，用户同时用 IDE/终端的 CodeGraph 时，后启动的一方要么拒绝启动，要么只暴露 3 个工具（`search/node/explore`）。让它代理到共享 daemon 才能共存。`CODEGRAPH_MCP_TOOLS` 必须设，否则默认只暴露 `codegraph_explore`。
+- 引擎会往项目里写 `.codegraph/`、`.serena/`（已加进 `.gitignore`），Serena 还会在 `~/.serena/serena_config.yml` 登记项目。
 

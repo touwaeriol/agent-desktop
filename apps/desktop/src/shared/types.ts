@@ -53,6 +53,12 @@ export interface AgentMessage {
   stopReason?: string
 }
 
+export interface SessionStats {
+  tokens?: { input?: number; output?: number; total?: number }
+  cost?: number
+  contextUsage?: { tokens?: number | null; contextWindow?: number; percent?: number | null }
+}
+
 export interface PromptImage {
   type: 'image'
   data: string
@@ -249,10 +255,35 @@ export interface McpServerInfo {
   builtin?: boolean
 }
 
+export type McpEngineId = 'codegraph' | 'lsp'
+
+export interface McpToolInfo {
+  name: string
+  enabled: boolean
+  exposure?: string
+  /** Declared to the model directly instead of loaded through tool_search. */
+  direct?: boolean
+}
+
+export interface McpEngineState {
+  id: McpEngineId
+  name: string
+  enabled: boolean
+  available: boolean
+  entry?: string
+  version?: string
+  error?: string
+  index?: 'unknown' | 'indexed' | 'missing' | 'indexing' | 'syncing' | 'failed'
+  indexMessage?: string
+  tools: McpToolInfo[]
+}
+
 export interface McpState {
   enabled: boolean
   desktopTool: boolean
   desktopToolAvailable: boolean
+  desktopTools: McpToolInfo[]
+  engines: McpEngineState[]
   servers: McpServerInfo[]
   userConfigPath: string
   projectConfigPath: string
@@ -283,6 +314,7 @@ export interface PiBridge {
   newSession(): Promise<SwitchResult>
   switchSession(sessionPath: string): Promise<SwitchResult>
   getMessages(): Promise<AgentMessage[]>
+  getSessionStats(): Promise<SessionStats>
   listSessions(): Promise<SessionSummary[]>
   openAgentDir(): Promise<void>
   openExternal(url: string): Promise<void>
@@ -314,6 +346,13 @@ export interface PiBridge {
   getMcpState(): Promise<McpState>
   setMcpEnabled(enabled: boolean): Promise<McpState>
   setDesktopToolEnabled(enabled: boolean): Promise<McpState>
+  setMcpEngineEnabled(id: McpEngineId, enabled: boolean): Promise<McpState>
+  setMcpEngineEntry(id: McpEngineId, entry: string | null): Promise<McpState>
+  refreshMcpEngines(): Promise<McpState>
+  buildMcpIndex(): Promise<{ ok: boolean; message: string }>
+  setMcpToolEnabled(server: string, tool: string, enabled: boolean): Promise<McpState>
+  chooseMcpEngineEntry(id: McpEngineId): Promise<string | null>
+  onMcpState(listener: (state: McpState) => void): () => void
   setMcpServerEnabled(name: string, enabled: boolean): Promise<{ ok: boolean; error?: string }>
   removeMcpServer(name: string): Promise<{ ok: boolean; error?: string }>
   addMcpServer(name: string, config: string): Promise<{ ok: boolean; error?: string }>

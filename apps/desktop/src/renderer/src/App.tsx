@@ -100,6 +100,13 @@ export default function App(): React.JSX.Element {
   const [items, setItems] = useState<ChatItem[]>([])
   const [draft, setDraft] = useState('')
   const [draftImages, setDraftImages] = useState<DraftImage[]>([])
+  const [run, setRun] = useState<{
+    startedAt?: number
+    endedAt?: number
+    runningTools: number
+    tokens?: number
+  }>({ runningTools: 0 })
+  const [, setTick] = useState(0)
   const [sidebarOpen, setSidebarOpen] = useState(true)
   const [toast, setToast] = useState<string | null>(null)
   const [stick, setStick] = useState(true)
@@ -129,6 +136,10 @@ export default function App(): React.JSX.Element {
 
   const statusRef = useRef(status)
   statusRef.current = status
+  const sessionsRef = useRef<SessionSummary[]>([])
+  sessionsRef.current = sessions
+  const historyRef = useRef<{ stack: string[]; index: number }>({ stack: [], index: -1 })
+  const [historyNav, setHistoryNav] = useState({ canBack: false, canForward: false })
   const askQueueRef = useRef<AskRequest[]>([])
   askQueueRef.current = askQueue
   const ask = askQueue[0]
@@ -137,6 +148,23 @@ export default function App(): React.JSX.Element {
   stickRef.current = stick
 
   const userItems = useMemo(() => items.filter((item) => item.role === 'user'), [items])
+
+  const syncHistoryNav = useCallback(() => {
+    const { stack, index } = historyRef.current
+    setHistoryNav({ canBack: index > 0, canForward: index < stack.length - 1 })
+  }, [])
+
+  const rememberSession = useCallback(
+    (path: string) => {
+      const state = historyRef.current
+      if (state.stack[state.index] === path) return
+      state.stack = [...state.stack.slice(0, state.index + 1), path]
+      if (state.stack.length > 50) state.stack = state.stack.slice(-50)
+      state.index = state.stack.length - 1
+      syncHistoryNav()
+    },
+    [syncHistoryNav]
+  )
 
   const updateActiveUser = useCallback(() => {
     const container = scrollRef.current
@@ -191,6 +219,8 @@ export default function App(): React.JSX.Element {
       const messages = await window.pi.getMessages()
       setItems(toChatItems(messages))
       setStick(true)
+      const stats = await window.pi.getSessionStats().catch(() => undefined)
+      setRun({ runningTools: 0, tokens: stats?.tokens?.total })
     } catch {
       // ignore
     }
@@ -199,6 +229,9 @@ export default function App(): React.JSX.Element {
   const handleEvent = useCallback((record: Record<string, unknown>) => {
     const type = String(record.type ?? '')
     switch (type) {
+      case 'agent_start':
+        setRun({ startedAt: Date.now(), runningTools: 0 })
+        break
       case 'message_start': {
         const message = record.message as { role?: string } | undefined
         if (message?.role === 'user') {
@@ -278,6 +311,7 @@ export default function App(): React.JSX.Element {
         break
       }
       case 'tool_execution_start': {
+        setRun((prev) => ({ ...prev, runningTools: prev.runningTools + 1 }))
         const call = partialToolCall(record as ToolCallPayload, { status: 'running' })
         setItems((prev) => upsertTool(prev, call))
         break
@@ -292,6 +326,7 @@ export default function App(): React.JSX.Element {
         break
       }
       case 'tool_execution_end': {
+        setRun((prev) => ({ ...prev, runningTools: Math.max(0, prev.runningTools - 1) }))
         const payload = record as ToolCallPayload & { result?: unknown; isError?: boolean; durationMs?: number }
         const call = partialToolCall(payload, {
           status: payload.isError ? 'error' : 'done',
@@ -303,6 +338,11 @@ export default function App(): React.JSX.Element {
       }
       case 'agent_settled':
         setItems((prev) => prev.map((item) => ({ ...item, streaming: false })))
+        setRun((prev) => ({ ...prev, endedAt: Date.now(), runningTools: 0 }))
+        void window.pi
+          .getSessionStats()
+          .then((stats) => setRun((prev) => ({ ...prev, tokens: stats.tokens?.total })))
+          .catch(() => undefined)
         void loadSessions()
         break
       case 'auto_retry_start':
@@ -386,6 +426,21 @@ export default function App(): React.JSX.Element {
     if (element) element.scrollTop = element.scrollHeight
   }, [items])
 
+  useEffect(() => {
+    if (!run.startedAt || run.endedAt) return
+    const timer = setInterval(() => setTick((value) => value + 1), 1000)
+    return () => clearInterval(timer)
+  }, [run.startedAt, run.endedAt])
+
+  const runStatus = run.startedAt
+    ? {
+        active: !run.endedAt,
+        elapsedMs: Math.max(0, (run.endedAt ?? Date.now()) - run.startedAt),
+        runningTools: run.runningTools,
+        tokens: run.tokens
+      }
+    : undefined
+
   const send = useCallback(
     async (mode: 'send' | 'queue') => {
       const text = draft.trim()
@@ -440,7 +495,7 @@ export default function App(): React.JSX.Element {
   }, [loadSessions])
 
   const selectSession = useCallback(
-    async (session: SessionSummary) => {
+    async (session: SessionSummary, options: { remember?: boolean } = {}) => {
       if (session.path === activePath) return
       if (session.cwd && session.cwd !== statusRef.current.cwd) {
         const next = await window.pi.openSession(session.path, session.cwd)
@@ -456,11 +511,26 @@ export default function App(): React.JSX.Element {
         }
       }
       setActivePath(session.path)
+      if (options.remember !== false) rememberSession(session.path)
       setStick(true)
       await loadMessages()
       void loadSessions()
     },
-    [activePath, loadMessages, loadSessions]
+    [activePath, loadMessages, loadSessions, rememberSession]
+  )
+
+  const goHistory = useCallback(
+    (delta: number) => {
+      const state = historyRef.current
+      const index = state.index + delta
+      if (index < 0 || index >= state.stack.length) return
+      state.index = index
+      syncHistoryNav()
+      const path = state.stack[index]
+      const session = sessionsRef.current.find((entry) => entry.path === path)
+      if (session) void selectSession(session, { remember: false })
+    },
+    [selectSession]
   )
 
   const chooseWorkspace = useCallback(async () => {
@@ -540,10 +610,20 @@ export default function App(): React.JSX.Element {
           sessions={sessions}
           activePath={activePath}
           status={status}
+          canGoBack={historyNav.canBack}
+          canGoForward={historyNav.canForward}
+          onBack={() => goHistory(-1)}
+          onForward={() => goHistory(1)}
           onNew={() => void newSession()}
           onSelect={(session) => void selectSession(session)}
           onNewInProject={(cwd) => void newSessionInProject(cwd)}
           onChooseWorkspace={() => void chooseWorkspace()}
+          onOpenSettings={() => {
+            setSettingsTab('providers')
+            setSettingsOpen(true)
+          }}
+          onOpenAgentDir={() => void window.pi.openAgentDir()}
+          onRestart={() => void restart()}
           onCollapse={() => setSidebarOpen(false)}
         />
       )}
@@ -634,6 +714,7 @@ export default function App(): React.JSX.Element {
               workspace={status.cwd}
               connected={status.phase === 'ready'}
               loggedIn={Boolean(status.model)}
+            runStatus={runStatus}
               onSuggestion={(text) => {
                 setDraft(text)
                 requestAnimationFrame(() => {

@@ -2,12 +2,17 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import type { PiStatus, SessionSummary } from '@shared/types'
 import {
   ArchiveIcon,
+  ArrowLeftIcon,
+  ArrowRightIcon,
+  BriefcaseIcon,
   CheckIcon,
   ChevronIcon,
   CloseIcon,
   FilterIcon,
   FolderIcon,
+  MenuIcon,
   PanelIcon,
+  PinIcon,
   PlusIcon,
   SearchIcon
 } from './Icons'
@@ -15,6 +20,7 @@ import {
 const PAGE_SIZE = 10
 const PREFS_KEY = 'pi-sidebar-prefs'
 const ARCHIVE_KEY = 'pi-archived-sessions'
+const PINNED_KEY = 'pi-pinned-sessions'
 
 type StatusFilter = 'active' | 'archived' | 'all'
 type EnvironmentFilter = 'all' | 'local'
@@ -94,6 +100,15 @@ function loadArchived(): Set<string> {
   }
 }
 
+function loadPinned(): string[] {
+  try {
+    const raw = JSON.parse(localStorage.getItem(PINNED_KEY) ?? '[]') as unknown
+    return Array.isArray(raw) ? raw.filter((value): value is string => typeof value === 'string') : []
+  } catch {
+    return []
+  }
+}
+
 function startOfDay(value: number): number {
   const date = new Date(value)
   date.setHours(0, 0, 0, 0)
@@ -146,32 +161,49 @@ export function Sidebar({
   sessions,
   activePath,
   status,
+  canGoBack,
+  canGoForward,
+  onBack,
+  onForward,
   onNew,
   onSelect,
   onNewInProject,
   onChooseWorkspace,
+  onOpenSettings,
+  onOpenAgentDir,
+  onRestart,
   onCollapse
 }: {
   sessions: SessionSummary[]
   activePath?: string
   status: PiStatus
+  canGoBack: boolean
+  canGoForward: boolean
+  onBack: () => void
+  onForward: () => void
   onNew: () => void
   onSelect: (session: SessionSummary) => void
   onNewInProject: (cwd: string) => void
   onChooseWorkspace: () => void
+  onOpenSettings: () => void
+  onOpenAgentDir: () => void
+  onRestart: () => void
   onCollapse: () => void
 }) {
   const [prefs, setPrefs] = useState<Prefs>(loadPrefs)
   const [archived, setArchived] = useState<Set<string>>(loadArchived)
+  const [pinned, setPinned] = useState<string[]>(loadPinned)
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set())
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
   const [menuOpen, setMenuOpen] = useState(false)
+  const [moreOpen, setMoreOpen] = useState(false)
   const [section, setSection] = useState<'environment' | 'group' | 'sort' | null>(null)
   const [searchKey, setSearchKey] = useState<string>()
   const [filterKey, setFilterKey] = useState<string>()
   const [projectQueries, setProjectQueries] = useState<Record<string, string>>({})
   const [projectStatus, setProjectStatus] = useState<Record<string, StatusFilter>>({})
   const menuRef = useRef<HTMLDivElement>(null)
+  const moreRef = useRef<HTMLDivElement>(null)
   const projectFilterRef = useRef<HTMLDivElement>(null)
 
   const updatePrefs = (patch: Partial<Prefs>): void => {
@@ -191,6 +223,22 @@ export function Sidebar({
       return next
     })
   }
+
+  const togglePin = (path: string): void => {
+    setPinned((prev) => {
+      const next = prev.includes(path) ? prev.filter((value) => value !== path) : [...prev, path]
+      localStorage.setItem(PINNED_KEY, JSON.stringify(next))
+      return next
+    })
+  }
+
+  const pinnedSessions = useMemo(
+    () =>
+      pinned
+        .map((path) => sessions.find((session) => session.path === path))
+        .filter((session): session is SessionSummary => Boolean(session)),
+    [pinned, sessions]
+  )
 
   useEffect(() => {
     if (!menuOpen) return
@@ -236,6 +284,16 @@ export function Sidebar({
       document.removeEventListener('keydown', onKeyDown)
     }
   }, [filterKey])
+
+  useEffect(() => {
+    if (!moreOpen) return
+    const onMouseDown = (event: MouseEvent): void => {
+      if (moreRef.current?.contains(event.target as Node)) return
+      setMoreOpen(false)
+    }
+    document.addEventListener('mousedown', onMouseDown)
+    return () => document.removeEventListener('mousedown', onMouseDown)
+  }, [moreOpen])
 
   const groups = useMemo<SessionGroup[]>(() => {
     const sortSessions = (list: SessionSummary[]): SessionSummary[] =>
@@ -438,28 +496,48 @@ export function Sidebar({
 
   return (
     <aside className="sidebar">
-      <div className="sidebar-head">
-        <div className="wordmark">
-          <span className="wordmark-mark">π</span>
-          <span className="wordmark-text">pi</span>
-        </div>
-        <div className="sidebar-head-actions">
-          <button
-            className={`icon-btn view-trigger ${menuOpen ? 'on' : ''} ${
-              filtersActive ? 'has-filter' : ''
-            }`}
-            title="视图选项（分组 / 排序 / 环境）"
-            onClick={() => {
-              setMenuOpen((value) => !value)
-              setSection(null)
-            }}
-          >
-            <FilterIcon size={14} />
-          </button>
-          <button className="icon-btn" title="收起侧栏" onClick={onCollapse}>
-            <PanelIcon size={14} />
-          </button>
-        </div>
+      <div className="sidebar-toolbar">
+        <button className="icon-btn" title="收起侧栏" onClick={onCollapse}>
+          <MenuIcon size={15} />
+        </button>
+        <button
+          className={`icon-btn view-trigger ${menuOpen ? 'on' : ''} ${
+            filtersActive ? 'has-filter' : ''
+          }`}
+          title="视图选项（分组 / 排序 / 环境）"
+          onClick={() => {
+            setMenuOpen((value) => !value)
+            setSection(null)
+          }}
+        >
+          <PanelIcon size={14} />
+        </button>
+        <div className="toolbar-spacer" />
+        <button
+          className="icon-btn"
+          title="上一个会话"
+          disabled={!canGoBack}
+          onClick={onBack}
+        >
+          <ArrowLeftIcon size={14} />
+        </button>
+        <button
+          className="icon-btn"
+          title="下一个会话"
+          disabled={!canGoForward}
+          onClick={onForward}
+        >
+          <ArrowRightIcon size={14} />
+        </button>
+      </div>
+
+      <div className="mode-switch" role="tablist">
+        <button className="mode" disabled title="Cowork 模式暂未接入">
+          Cowork
+        </button>
+        <button className="mode active" role="tab" aria-selected="true">
+          Code
+        </button>
       </div>
 
       {menuOpen && (
@@ -517,13 +595,105 @@ export function Sidebar({
         </div>
       )}
 
-      <div className="sidebar-actions">
-        <button className="new-session" onClick={onNew}>
-          <PlusIcon size={14} />
-          <span>新建会话</span>
+      <div className="sidebar-nav">
+        <button className="nav-row" onClick={onNew}>
+          <span className="nav-glyph">
+            <PlusIcon size={13} />
+          </span>
+          <span className="nav-label">新建</span>
           <kbd>Ctrl N</kbd>
         </button>
+        <button className="nav-row" onClick={onOpenSettings}>
+          <span className="nav-glyph">
+            <BriefcaseIcon size={13} />
+          </span>
+          <span className="nav-label">自定义</span>
+        </button>
+        <div className="nav-more" ref={moreRef}>
+          <button className={`nav-row ${moreOpen ? 'open' : ''}`} onClick={() => setMoreOpen((v) => !v)}>
+            <span className="nav-glyph">
+              <ChevronIcon size={12} className={moreOpen ? 'open' : ''} />
+            </span>
+            <span className="nav-label">更多</span>
+          </button>
+          {moreOpen && (
+            <div className="nav-menu">
+              <button
+                className="nav-menu-row"
+                onClick={() => {
+                  setMoreOpen(false)
+                  setMenuOpen(true)
+                  setSection(null)
+                }}
+              >
+                视图选项
+              </button>
+              <button
+                className="nav-menu-row"
+                onClick={() => {
+                  setMoreOpen(false)
+                  onChooseWorkspace()
+                }}
+              >
+                在新目录新建会话
+              </button>
+              <button
+                className="nav-menu-row"
+                onClick={() => {
+                  setMoreOpen(false)
+                  onOpenAgentDir()
+                }}
+              >
+                打开配置目录
+              </button>
+              <button
+                className="nav-menu-row"
+                onClick={() => {
+                  setMoreOpen(false)
+                  onRestart()
+                }}
+              >
+                重启 pi
+              </button>
+            </div>
+          )}
+        </div>
       </div>
+
+      {pinnedSessions.length > 0 && (
+        <div className="pinned-block">
+          <div className="section-label">置顶</div>
+          {pinnedSessions.map((session, index) => (
+            <div
+              key={session.path}
+              className={`pinned-item ${session.path === activePath ? 'active' : ''}`}
+              role="button"
+              tabIndex={0}
+              title={session.path}
+              onClick={() => onSelect(session)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter' || event.key === ' ') {
+                  event.preventDefault()
+                  onSelect(session)
+                }
+              }}
+            >
+              <span className="pinned-index">{index + 1}</span>
+              <span className="pinned-title">{session.title}</span>
+              <button
+                className="pinned-unpin"
+                title="取消置顶"
+                onClick={(event) => {
+                  event.stopPropagation()
+                  togglePin(session.path)
+                }}
+              >
+                <CloseIcon size={10} />
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
 
       <div className="session-list">
         {groups.length === 0 && (
@@ -667,6 +837,16 @@ export function Sidebar({
                             )}
                           </span>
                         </div>
+                        <button
+                          className={`session-archive ${pinned.includes(session.path) ? 'pinned' : ''}`}
+                          title={pinned.includes(session.path) ? '取消置顶' : '置顶'}
+                          onClick={(event) => {
+                            event.stopPropagation()
+                            togglePin(session.path)
+                          }}
+                        >
+                          <PinIcon size={12} />
+                        </button>
                         <button
                           className="session-archive"
                           title={isArchived ? '取消归档' : '归档'}

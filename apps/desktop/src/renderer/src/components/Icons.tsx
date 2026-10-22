@@ -268,3 +268,65 @@ export function PlugIcon(props: IconProps) {
     </svg>
   )
 }
+
+export function MenuIcon(props: IconProps) {
+  return (
+    <svg {...base(props)}>
+      <path d="M4 7h16M4 12h16M4 17h16" />
+    </svg>
+  )
+}
+
+export function ArrowLeftIcon(props: IconProps) {
+  return (
+    <svg {...base(props)}>
+      <path d="M19 12H5M11 6l-6 6 6 6" />
+    </svg>
+  )
+}
+
+export function ArrowRightIcon(props: IconProps) {
+  return (
+    <svg {...base(props)}>
+      <path d="M5 12h14M13 6l6 6-6 6" />
+    </svg>
+  )
+}
+
+export function BriefcaseIcon(props: IconProps) {
+  return (
+    <svg {...base(props)}>
+      <rect x="3" y="7.5" width="18" height="12" rx="2.5" />
+      <path d="M9 7.5V6a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v1.5M3 12.5h18" />
+    </svg>
+  )
+}
+
+export function PinIcon(props: IconProps) {
+  return (
+    <svg {...base(props)}>
+      <path d="M9 4h6l-1 5 3 3v1H7v-1l3-3z" />
+      <path d="M12 13v7" />
+    </svg>
+  )
+}
+
+export function ImageIcon(props: IconProps) {
+  return (
+    <svg {...base(props)}>
+      <rect x="3" y="4.5" width="18" height="15" rx="2.5" />
+      <circle cx="8.5" cy="9.5" r="1.6" />
+      <path d="m4 17 5-4.5 4 3.5 3-2.5 4 3.5" />
+    </svg>
+  )
+}
+
+export function EllipsisIcon(props: IconProps) {
+  return (
+    <svg {...base(props)}>
+      <circle cx="5" cy="12" r="1.2" />
+      <circle cx="12" cy="12" r="1.2" />
+      <circle cx="19" cy="12" r="1.2" />
+    </svg>
+  )
+}

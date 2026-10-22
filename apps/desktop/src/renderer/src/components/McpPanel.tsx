@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import type { McpState } from '@shared/types'
+import type { McpEngineId, McpEngineState, McpState, McpToolInfo } from '@shared/types'
 import {
   CloseIcon,
   FolderIcon,
@@ -21,6 +21,11 @@ const TEMPLATE_HTTP = `{
   "description": "远程 MCP 服务"
 }`
 
+const INSTALL_HINTS: Record<McpEngineId, string> = {
+  codegraph: 'npm i -g @colbymchenry/codegraph',
+  lsp: 'uv tool install serena-agent'
+}
+
 function Toggle({
   checked,
   disabled,
@@ -40,6 +45,149 @@ function Toggle({
     >
       <span />
     </button>
+  )
+}
+
+function ToolSwitches({
+  server,
+  tools,
+  busy,
+  onToggle
+}: {
+  server: string
+  tools: McpToolInfo[]
+  busy: boolean
+  onToggle: (server: string, tool: string, enabled: boolean) => void
+}): React.JSX.Element {
+  if (tools.length === 0) {
+    return (
+      <div className="mcp-tools-empty">
+        工具列表会在服务器首次连接后自动发现；也可以先发一条消息再回来查看。
+      </div>
+    )
+  }
+  return (
+    <div className="mcp-tools">
+      {tools.map((tool) => {
+        const direct = tool.direct === true || tool.exposure === 'direct'
+        return (
+          <label key={`${server}-${tool.name}`} className={`mcp-tool ${tool.enabled ? '' : 'off'}`}>
+            <Toggle
+              checked={tool.enabled}
+              disabled={busy}
+              onChange={(value) => onToggle(server, tool.name, value)}
+            />
+            <code>{tool.name}</code>
+            <span className={`badge ${tool.enabled && direct ? 'ok' : ''}`}>
+              {tool.enabled ? (direct ? '直接声明' : '按需加载') : '已关闭'}
+            </span>
+          </label>
+        )
+      })}
+    </div>
+  )
+}
+
+function EngineCard({
+  engine,
+  busy,
+  onToggle,
+  onPickEntry,
+  onClearEntry,
+  onBuildIndex,
+  onToggleTool
+}: {
+  engine: McpEngineState
+  busy: boolean
+  onToggle: (id: McpEngineId, enabled: boolean) => void
+  onPickEntry: (id: McpEngineId) => void
+  onClearEntry: (id: McpEngineId) => void
+  onBuildIndex: () => void
+  onToggleTool: (server: string, tool: string, enabled: boolean) => void
+}): React.JSX.Element {
+  const indexLabel: Record<string, string> = {
+    indexed: '已索引',
+    missing: '未建立索引',
+    indexing: '正在建立索引…',
+    syncing: '正在同步索引…',
+    failed: '索引失败',
+    unknown: '索引状态未知'
+  }
+  return (
+    <div className={`mcp-engine ${engine.enabled ? '' : 'disabled'}`}>
+      <div className="mcp-row">
+        <div className="mcp-row-main">
+          <span className="mcp-row-title">
+            {engine.name}
+            {engine.version && <span className="mcp-version">v{engine.version.replace(/^v/i, '')}</span>}
+            {engine.enabled && <span className="badge">网关</span>}
+          </span>
+          <span className="mcp-row-sub">
+            {engine.id === 'codegraph'
+              ? '代码索引：符号搜索、调用关系、影响面分析。核心 4 个工具直接声明，其余按需加载。'
+              : 'Serena 语言服务器：符号查找、引用、诊断。核心 4 个工具直接声明，其余按需加载。'}
+          </span>
+          {engine.error && <span className="mcp-row-warn">{engine.error}</span>}
+          {engine.enabled && !engine.error && engine.id === 'codegraph' && (
+            <span className="mcp-row-meta">
+              {indexLabel[engine.index ?? 'unknown']}
+              {engine.indexMessage ? ` · ${engine.indexMessage}` : ''}
+            </span>
+          )}
+          <span className="mcp-row-meta mcp-entry" title={engine.entry}>
+            {engine.entry ?? '未找到入口'}
+          </span>
+        </div>
+        <Toggle
+          checked={engine.enabled}
+          disabled={busy || !engine.available}
+          onChange={(value) => onToggle(engine.id, value)}
+        />
+      </div>
+      {!engine.available && (
+        <div className="mcp-install">
+          <span>
+            {engine.id === 'codegraph'
+              ? '未找到 CodeGraph。安装：'
+              : '未找到 Serena。安装：'}
+          </span>
+          <code>{INSTALL_HINTS[engine.id]}</code>
+          <button
+            className="ghost"
+            onClick={() => void navigator.clipboard?.writeText(INSTALL_HINTS[engine.id])}
+          >
+            复制
+          </button>
+          <span className="mcp-install-alt">
+            已装在别处？用「选择入口」指定可执行文件（CodeGraph 的 <code>npm-shim.js</code> 或
+            {' '}<code>serena.exe</code>）。
+          </span>
+        </div>
+      )}
+      <div className="mcp-engine-actions">
+        <button className="ghost" disabled={busy} onClick={() => onPickEntry(engine.id)}>
+          选择入口
+        </button>
+        {engine.entry && (
+          <button className="ghost" disabled={busy} onClick={() => onClearEntry(engine.id)}>
+            恢复自动检测
+          </button>
+        )}
+        {engine.id === 'codegraph' && (
+          <button className="ghost" disabled={busy || !engine.available} onClick={onBuildIndex}>
+            立即索引
+          </button>
+        )}
+      </div>
+      {engine.enabled && (
+        <ToolSwitches
+          server={engine.id}
+          tools={engine.tools}
+          busy={busy}
+          onToggle={onToggleTool}
+        />
+      )}
+    </div>
   )
 }
 
@@ -71,6 +219,7 @@ export function McpPanel({
 
   useEffect(() => {
     void load()
+    return window.pi.onMcpState((next) => setState(next))
   }, [load])
 
   const run = useCallback(
@@ -121,6 +270,24 @@ export function McpPanel({
     })
   }, [json, name, onError, run])
 
+  const toggleTool = useCallback(
+    (server: string, tool: string, enabled: boolean) => {
+      void run(() => window.pi.setMcpToolEnabled(server, tool, enabled))
+    },
+    [run]
+  )
+
+  const pickEntry = useCallback(
+    (id: McpEngineId) => {
+      void (async () => {
+        const selected = await window.pi.chooseMcpEngineEntry(id)
+        if (!selected) return
+        await run(() => window.pi.setMcpEngineEntry(id, selected), '入口已更新')
+      })()
+    },
+    [run]
+  )
+
   return (
     <div className="settings-content mcp">
       <div className="field">
@@ -143,15 +310,30 @@ export function McpPanel({
             }
           />
         </div>
+      </div>
+
+      <div className="field">
+        <div className="mcp-head">
+          <label>内置工具</label>
+          <div className="mcp-head-actions">
+            <button
+              className="icon-btn"
+              title="重新检测引擎"
+              onClick={() => void run(() => window.pi.refreshMcpEngines())}
+            >
+              <RefreshIcon size={13} />
+            </button>
+          </div>
+        </div>
+
         <div className="mcp-row">
           <div className="mcp-row-main">
             <span className="mcp-row-title">
-              桌面交互工具 <code>ask_user_question</code>
+              桌面交互 <code>desktop</code>
             </span>
             <span className="mcp-row-sub">
-              内置 MCP 服务器（<code>desktop</code>），让 agent 在桌面窗口弹窗提问：
-              单选、多选、手动输入，多问题按顺序回答。通过 <code>--extension</code> 注入，
-              不写入 mcp.json，也不影响终端里的 pi。
+              核心交互 MCP 服务器，当前提供 <code>ask_user_question</code>：单选、多选、手动输入，
+              多问题按顺序回答。通过 <code>--extension</code> 注入，不写入 mcp.json。
             </span>
             {state && !state.desktopToolAvailable && (
               <span className="mcp-row-warn">当前安装缺少扩展或服务器脚本，无法启用。</span>
@@ -169,11 +351,44 @@ export function McpPanel({
             onChange={(value) =>
               void run(
                 () => window.pi.setDesktopToolEnabled(value),
-                value ? '桌面提问工具已启用' : '桌面提问工具已关闭'
+                value ? '桌面交互工具已启用' : '桌面交互工具已关闭'
               )
             }
           />
         </div>
+        {state?.desktopTool && (
+          <ToolSwitches
+            server="desktop"
+            tools={state.desktopTools}
+            busy={busy}
+            onToggle={toggleTool}
+          />
+        )}
+
+        {state?.engines.map((engine) => (
+          <EngineCard
+            key={engine.id}
+            engine={engine}
+            busy={busy}
+            onToggle={(id, enabled) =>
+              void run(
+                () => window.pi.setMcpEngineEnabled(id, enabled),
+                enabled ? `${id === 'codegraph' ? 'CodeGraph' : 'LSP'} 已启用` : '已关闭'
+              )
+            }
+            onPickEntry={pickEntry}
+            onClearEntry={(id) => void run(() => window.pi.setMcpEngineEntry(id, null))}
+            onBuildIndex={() =>
+              void run(async () => {
+                const result = await window.pi.buildMcpIndex()
+                if (!result.ok) throw new Error(result.message)
+                onNotice(result.message)
+              })
+            }
+            onToggleTool={toggleTool}
+          />
+        ))}
+        {!state && loading && <div className="provider-empty">正在检测内置引擎…</div>}
       </div>
 
       <div className="field">

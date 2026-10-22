@@ -10,10 +10,11 @@ files:
 extraResources:
   - from: apps/desktop/resources/extension
     to: extension
-  - from: packages/mcp-ask-user
+  - from: packages/mcp-core
     to: mcp
     filter:
       - server.mjs
+      - tools/**/*
       - package.json
 asarUnpack:
   - "**/node_modules/@earendil-works/**"

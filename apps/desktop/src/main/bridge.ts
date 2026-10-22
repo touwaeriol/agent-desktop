@@ -1,6 +1,13 @@
 import { randomUUID } from 'node:crypto'
 import http from 'node:http'
-import type { AskAnswer, AskQuestion, AskRequest, AskResult, BridgeInfo } from '../shared/types'
+import type {
+  AskAnswer,
+  AskQuestion,
+  AskRequest,
+  AskResult,
+  BridgeInfo,
+  McpToolInfo
+} from '../shared/types'
 
 const MAX_BODY_BYTES = 512 * 1024
 const PORT_ATTEMPTS = 12
@@ -13,6 +20,10 @@ let server: http.Server | null = null
 let port = 0
 let token = ''
 let askListener: ((request: AskRequest) => void) | null = null
+let toolsListener: ((servers: Record<string, McpToolInfo[]>) => void) | null = null
+let mcpHandler:
+  | ((engine: string, message: Record<string, unknown>) => Promise<unknown | undefined>)
+  | null = null
 const pending = new Map<string, PendingAsk>()
 
 export function getBridgeInfo(): BridgeInfo {
@@ -34,6 +45,22 @@ export function getBridgeToken(): string {
 
 export function setAskListener(listener: ((request: AskRequest) => void) | null): void {
   askListener = listener
+}
+
+/** The extension reports the tools its servers offer once they connect. */
+export function setToolsListener(
+  listener: ((servers: Record<string, McpToolInfo[]>) => void) | null
+): void {
+  toolsListener = listener
+}
+
+/** MCP gateway endpoints (`/mcp/<engine>`), handled by the gateway module. */
+export function setMcpHandler(
+  handler:
+    | ((engine: string, message: Record<string, unknown>) => Promise<unknown | undefined>)
+    | null
+): void {
+  mcpHandler = handler
 }
 
 export function answerAsk(id: string, answers: AskAnswer[]): void {
@@ -161,11 +188,138 @@ async function handleAsk(
   else respond(response, 200, { answers: result.answers })
 }
 
+async function handleTools(
+  request: http.IncomingMessage,
+  response: http.ServerResponse
+): Promise<void> {
+  if (token && request.headers['x-agent-desktop-token'] !== token) {
+    respond(response, 401, { ok: false, error: '桥接令牌无效' })
+    return
+  }
+  let payload: Record<string, unknown>
+  try {
+    payload = JSON.parse(await readBody(request)) as Record<string, unknown>
+  } catch (error) {
+    respond(response, 400, {
+      ok: false,
+      error: `请求解析失败：${error instanceof Error ? error.message : String(error)}`
+    })
+    return
+  }
+  const servers = normalizeTools(payload.servers)
+  if (toolsListener) toolsListener(servers)
+  respond(response, 200, { ok: true })
+}
+
+function normalizeTools(raw: unknown): Record<string, McpToolInfo[]> {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {}
+  const result: Record<string, McpToolInfo[]> = {}
+  for (const [server, tools] of Object.entries(raw as Record<string, unknown>)) {
+    if (!Array.isArray(tools)) continue
+    result[server] = tools
+      .map((tool) => {
+        if (!tool || typeof tool !== 'object') return null
+        const item = tool as Record<string, unknown>
+        if (typeof item.name !== 'string' || !item.name.trim()) return null
+        return {
+          name: item.name.trim(),
+          enabled: item.enabled !== false,
+          ...(typeof item.exposure === 'string' ? { exposure: item.exposure } : {})
+        }
+      })
+      .filter((tool): tool is McpToolInfo => tool !== null)
+  }
+  return result
+}
+
+const MCP_ENDPOINT = /^\/mcp\/([a-z0-9_-]+)$/
+
+async function handleMcp(
+  engine: string,
+  request: http.IncomingMessage,
+  response: http.ServerResponse
+): Promise<void> {
+  const presented =
+    typeof request.headers.authorization === 'string'
+      ? request.headers.authorization.replace(/^Bearer\s+/i, '')
+      : String(request.headers['x-agent-desktop-token'] ?? '')
+  if (token && presented !== token) {
+    respond(response, 401, { error: '桥接令牌无效' })
+    return
+  }
+  if (!mcpHandler) {
+    respond(response, 503, { error: '网关尚未就绪' })
+    return
+  }
+  let message: Record<string, unknown>
+  try {
+    message = JSON.parse(await readBody(request)) as Record<string, unknown>
+  } catch (error) {
+    respond(response, 400, {
+      jsonrpc: '2.0',
+      id: null,
+      error: {
+        code: -32700,
+        message: `请求解析失败：${error instanceof Error ? error.message : String(error)}`
+      }
+    })
+    return
+  }
+  try {
+    const result = await mcpHandler(engine, message)
+    if (result === undefined) {
+      response.writeHead(202, { 'content-length': 0 })
+      response.end()
+      return
+    }
+    respond(response, 200, result)
+  } catch (error) {
+    respond(response, 500, {
+      jsonrpc: '2.0',
+      id: message.id ?? null,
+      error: { code: -32603, message: error instanceof Error ? error.message : String(error) }
+    })
+  }
+}
+
 function createHandler(): http.RequestListener {
   return (request, response) => {
     const url = request.url ?? '/'
+    const mcp = MCP_ENDPOINT.exec(url)
+    if (mcp) {
+      const engine = mcp[1]
+      if (request.method === 'GET') {
+        // No server-to-client stream: pi treats 405 as "this endpoint has none".
+        response.writeHead(405, { allow: 'POST, DELETE' })
+        response.end()
+        return
+      }
+      if (request.method === 'DELETE') {
+        response.writeHead(204)
+        response.end()
+        return
+      }
+      if (request.method === 'POST') {
+        void handleMcp(engine, request, response).catch((error: unknown) => {
+          respond(response, 500, { error: error instanceof Error ? error.message : String(error) })
+        })
+        return
+      }
+      response.writeHead(405, { allow: 'POST, DELETE' })
+      response.end()
+      return
+    }
     if (request.method === 'GET' && url === '/health') {
       respond(response, 200, { ok: true, pending: pending.size })
+      return
+    }
+    if (request.method === 'POST' && url === '/tools') {
+      void handleTools(request, response).catch((error: unknown) => {
+        respond(response, 500, {
+          ok: false,
+          error: error instanceof Error ? error.message : String(error)
+        })
+      })
       return
     }
     if (request.method === 'POST' && url === '/ask') {
