@@ -4,19 +4,12 @@ import {
   CheckIcon,
   ChevronIcon,
   FolderIcon,
-  PlusIcon,
   SearchIcon,
   SendIcon,
   StopIcon
 } from './Icons'
 import { DraftImageStrip, ImageLightbox } from './ImageLightbox'
-import {
-  blobToDraftImage,
-  clipboardImages,
-  imageSrc,
-  renumberInlineMarkers,
-  type DraftImage
-} from '../lib/images'
+import { blobToDraftImage, clipboardImages, imageSrc, type DraftImage } from '../lib/images'
 
 function contextLabel(value?: number): string {
   if (!value) return ''
@@ -63,7 +56,7 @@ export function Composer({
   onChooseWorkspace: () => void
 }) {
   const ref = useRef<HTMLTextAreaElement>(null)
-  const fileRef = useRef<HTMLInputElement>(null)
+  const contextRef = useRef<HTMLDivElement>(null)
   const pickerRef = useRef<HTMLDivElement>(null)
   const searchRef = useRef<HTMLInputElement>(null)
   const [modelOpen, setModelOpen] = useState(false)
@@ -77,15 +70,17 @@ export function Composer({
   const [thinkingError, setThinkingError] = useState<string>()
   const [preview, setPreview] = useState<DraftImage>()
   const [dragging, setDragging] = useState(false)
+  const [contextOpen, setContextOpen] = useState(false)
+  const [contextQuery, setContextQuery] = useState('')
+  const [contextFiles, setContextFiles] = useState<string[]>([])
+  const [contextLoading, setContextLoading] = useState(false)
+  const [contextError, setContextError] = useState<string>()
 
-  const addImages = async (files: File[], leading: boolean): Promise<void> => {
+  // Images are plain attachments: no filename captions, no [图片N] markers in the text.
+  const addImages = async (files: File[]): Promise<void> => {
     const added: DraftImage[] = []
     for (const file of files) {
-      const image = await blobToDraftImage(
-        file,
-        leading ? 'leading' : 'inline',
-        file.name || undefined
-      )
+      const image = await blobToDraftImage(file, file.name || undefined)
       if (!image) {
         onNotice?.('图片超过 8MB，已跳过')
         continue
@@ -93,39 +88,60 @@ export function Composer({
       added.push(image)
     }
     if (added.length === 0) return
+    onImagesChange([...images, ...added])
+  }
 
-    if (leading) {
-      onImagesChange([...images, ...added])
+  const removeImage = (id: string): void => {
+    onImagesChange(images.filter((image) => image.id !== id))
+  }
+
+  const handleFiles = (files: File[]): void => {
+    void addImages(files)
+  }
+
+  const openContextPicker = async (): Promise<void> => {
+    if (contextOpen) {
+      setContextOpen(false)
       return
     }
+    setContextOpen(true)
+    setContextQuery('')
+    setContextError(undefined)
+    setContextLoading(true)
+    try {
+      setContextFiles(await window.pi.listWorkspaceFiles())
+    } catch (error) {
+      setContextError(error instanceof Error ? error.message : String(error))
+    } finally {
+      setContextLoading(false)
+    }
+  }
 
+  const insertContext = (file: string): void => {
     const node = ref.current
     const caret = node?.selectionStart ?? value.length
-    const next = [...images, ...added]
-    const markers = added.map((image) => `[图片${next.indexOf(image) + 1}]`).join('')
-    onImagesChange(next)
-    onChange(`${value.slice(0, caret)}${markers}${value.slice(caret)}`)
+    const before = value.slice(0, caret).replace(/@[^s@]*$/, '')
+    const after = value.slice(caret)
+    const mention = `@${file} `
+    const next = `${before}${mention}${after}`
+    onChange(next)
+    setContextOpen(false)
     requestAnimationFrame(() => {
       const element = ref.current
       if (!element) return
-      const position = caret + markers.length
+      const position = before.length + mention.length
       element.focus()
       element.setSelectionRange(position, position)
     })
   }
 
-  const removeImage = (id: string): void => {
-    const next = images.filter((image) => image.id !== id)
-    const inline = next.filter((image) => image.placement === 'inline')
-    onImagesChange(next)
-    if (inline.length !== images.filter((image) => image.placement === 'inline').length) {
-      onChange(renumberInlineMarkers(value, inline, next))
-    }
-  }
-
-  const handleFiles = (files: File[], caret: number): void => {
-    void addImages(files, caret === 0)
-  }
+  const filteredFiles = useMemo(() => {
+    const needle = contextQuery.trim().toLowerCase()
+    const list = needle
+      ? contextFiles.filter((file) => file.toLowerCase().includes(needle))
+      : contextFiles
+    return list.slice(0, 80)
+  }, [contextFiles, contextQuery])
 
   useEffect(() => {
     const element = ref.current
@@ -153,6 +169,22 @@ export function Composer({
       document.removeEventListener('keydown', onKeyDown)
     }
   }, [modelOpen])
+
+  useEffect(() => {
+    if (!contextOpen) return
+    const onMouseDown = (event: MouseEvent): void => {
+      if (!contextRef.current?.contains(event.target as Node)) setContextOpen(false)
+    }
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape') setContextOpen(false)
+    }
+    document.addEventListener('mousedown', onMouseDown)
+    document.addEventListener('keydown', onKeyDown)
+    return () => {
+      document.removeEventListener('mousedown', onMouseDown)
+      document.removeEventListener('keydown', onKeyDown)
+    }
+  }, [contextOpen])
 
   useEffect(() => {
     if (!thinkingOpen) return
@@ -282,27 +314,22 @@ export function Composer({
           if (files.length === 0) return
           event.preventDefault()
           setDragging(false)
-          handleFiles(files, value.trim() ? value.length : 0)
+          handleFiles(files)
         }}
       >
-        <DraftImageStrip
-          images={images}
-          placement="leading"
-          onRemove={removeImage}
-          onPreview={setPreview}
-        />
+        <DraftImageStrip images={images} onRemove={removeImage} onPreview={setPreview} />
         <textarea
           ref={ref}
           value={value}
           rows={1}
           spellCheck={false}
           placeholder={streaming ? '继续输入，Enter 插入当前回合，Ctrl+Enter 排到结束后' : '给 pi 发消息…（可直接粘贴图片）'}
-          onChange={(event) => onChange(event.target.value)}
-          onPaste={(event) => {
-            const files = clipboardImages(event.clipboardData)
-            if (files.length === 0) return
-            event.preventDefault()
-            handleFiles(files, ref.current?.selectionStart ?? value.length)
+          onChange={(event) => {
+            const next = event.target.value
+            onChange(next)
+            if (next.endsWith('@') && (next.length === 1 || /\s/.test(next[next.length - 2]))) {
+              void openContextPicker()
+            }
           }}
           onKeyDown={(event) => {
             if (event.key !== 'Enter') return
@@ -316,37 +343,52 @@ export function Composer({
             }
           }}
         />
-        <DraftImageStrip
-          images={images}
-          placement="inline"
-          onRemove={removeImage}
-          onPreview={setPreview}
-        />
         <div className="composer-foot">
-          <div className="composer-left">
+          <div className="composer-left" ref={contextRef}>
             <button
-              className="attach-btn"
-              title="添加图片（也可直接粘贴或拖入）"
-              onClick={() => fileRef.current?.click()}
+              className={`attach-btn ${contextOpen ? 'open' : ''}`}
+              title="引用上下文（@ 文件或目录）"
+              onClick={() => void openContextPicker()}
             >
-              <PlusIcon size={13} />
-              <span>添加图片</span>
+              <span className="at-mark">@</span>
+              <span>引用上下文</span>
             </button>
-            <input
-              ref={fileRef}
-              type="file"
-              accept="image/*"
-              multiple
-              hidden
-              onChange={(event) => {
-                const files = Array.from(event.target.files ?? []).filter((file) =>
-                  file.type.startsWith('image/')
-                )
-                event.target.value = ''
-                if (files.length === 0) return
-                handleFiles(files, value.trim() ? value.length : 0)
-              }}
-            />
+            {contextOpen && (
+              <div className="context-picker">
+                <div className="context-picker-search">
+                  <SearchIcon size={13} />
+                  <input
+                    autoFocus
+                    value={contextQuery}
+                    onChange={(event) => setContextQuery(event.target.value)}
+                    placeholder="搜索文件或目录"
+                    spellCheck={false}
+                  />
+                </div>
+                <div className="context-picker-list">
+                  {contextLoading && <div className="context-picker-empty">读取工作目录…</div>}
+                  {!contextLoading && contextError && (
+                    <div className="context-picker-empty">{contextError}</div>
+                  )}
+                  {!contextLoading && !contextError && filteredFiles.length === 0 && (
+                    <div className="context-picker-empty">没有匹配的文件</div>
+                  )}
+                  {filteredFiles.map((file) => (
+                    <button
+                      key={file}
+                      className="context-picker-item"
+                      onClick={() => insertContext(file)}
+                      title={file}
+                    >
+                      {file}
+                    </button>
+                  ))}
+                </div>
+                <div className="context-picker-foot">
+                  选中后插入 <code>@路径</code>，pi 会自己读取
+                </div>
+              </div>
+            )}
             <button
               className="chip"
               onClick={onChooseWorkspace}

@@ -14,6 +14,7 @@ import type {
 } from '../shared/types'
 const bridge: PiBridge = {
   getStatus: () => ipcRenderer.invoke('pi:get-status') as Promise<PiStatus>,
+  listWorkspaceFiles: () => ipcRenderer.invoke('workspace:files') as Promise<string[]>,
   restart: (cwd?: string) => ipcRenderer.invoke('pi:restart', cwd) as Promise<PiStatus>,
   newProjectSession: (cwd: string) =>
     ipcRenderer.invoke('pi:new-project-session', cwd) as Promise<PiStatus>,

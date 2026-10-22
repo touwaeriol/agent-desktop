@@ -4179,22 +4179,13 @@ button:disabled {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
-}
-
-.draft-images.leading {
   margin-bottom: 7px;
-}
-
-.draft-images.inline {
-  margin-top: 6px;
 }
 
 .draft-image {
   position: relative;
   display: flex;
-  align-items: center;
-  gap: 5px;
-  padding: 3px 4px 3px 3px;
+  padding: 3px;
   border-radius: 8px;
   border: 1px solid var(--border);
   background: var(--bg-input);
@@ -4202,17 +4193,12 @@ button:disabled {
 
 .draft-image-thumb {
   display: block;
-  width: 40px;
-  height: 40px;
+  width: 56px;
+  height: 56px;
   padding: 0;
   border-radius: 5px;
   overflow: hidden;
   background: var(--bg-elev-2);
-}
-
-.draft-images.leading .draft-image-thumb {
-  width: 56px;
-  height: 56px;
 }
 
 .draft-image-thumb img {
@@ -4220,15 +4206,6 @@ button:disabled {
   height: 100%;
   object-fit: cover;
   display: block;
-}
-
-.draft-image-label {
-  max-width: 96px;
-  overflow: hidden;
-  color: var(--faint);
-  font-size: 10px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .draft-image-remove {
@@ -4627,10 +4604,111 @@ button:disabled {
   font-size: 11.4px;
 }
 
-.attach-btn:hover {
+.attach-btn:hover,
+.attach-btn.open {
   background: var(--bg-hover);
   border-color: var(--border);
   color: var(--text);
+}
+
+.at-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 15px;
+  height: 15px;
+  border-radius: 4px;
+  border: 1px solid var(--border-strong);
+  color: var(--text);
+  font-family: 'Cascadia Code', 'Consolas', monospace;
+  font-size: 10px;
+  line-height: 1;
+}
+
+.context-picker {
+  position: absolute;
+  bottom: 34px;
+  left: 0;
+  z-index: 40;
+  display: flex;
+  flex-direction: column;
+  width: 320px;
+  max-height: 320px;
+  padding: 6px;
+  border-radius: 10px;
+  border: 1px solid var(--border-strong);
+  background: var(--bg-elev);
+  box-shadow: 0 18px 40px rgba(0, 0, 0, 0.35);
+}
+
+.context-picker-search {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 6px;
+  border-radius: 7px;
+  border: 1px solid var(--border);
+  background: var(--bg-input);
+  color: var(--faint);
+}
+
+.context-picker-search input {
+  flex: 1;
+  min-width: 0;
+  height: 22px;
+  border: 0;
+  background: none;
+  color: var(--text);
+  font-size: 11.5px;
+  outline: none;
+}
+
+.context-picker-list {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  margin-top: 5px;
+  overflow-y: auto;
+}
+
+.context-picker-item {
+  flex: none;
+  min-height: 22px;
+  padding: 3px 7px;
+  border-radius: 6px;
+  background: none;
+  border: 0;
+  color: var(--text-dim);
+  font-family: 'Cascadia Code', 'Consolas', monospace;
+  font-size: 10.8px;
+  line-height: 1.5;
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.context-picker-item:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+.context-picker-empty {
+  padding: 8px;
+  color: var(--faint);
+  font-size: 10.8px;
+}
+
+.context-picker-foot {
+  padding: 5px 4px 1px;
+  border-top: 1px dashed var(--border);
+  margin-top: 5px;
+  color: var(--faint);
+  font-size: 10.2px;
+}
+
+.composer-left {
+  position: relative;
 }
 
 .model-pill {

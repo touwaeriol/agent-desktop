@@ -294,6 +294,7 @@ export interface McpState {
 
 export interface PiBridge {
   getStatus(): Promise<PiStatus>
+  listWorkspaceFiles(): Promise<string[]>
   restart(cwd?: string): Promise<PiStatus>
   newProjectSession(cwd: string): Promise<PiStatus>
   openSession(sessionPath: string, cwd: string): Promise<PiStatus>

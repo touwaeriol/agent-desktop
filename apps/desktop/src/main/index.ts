@@ -257,6 +257,55 @@ function startCodegraphIndex(cwd: string): void {
     .catch(() => undefined)
 }
 
+/** Files under the session directory, for the composer's `@` context picker. */
+const WORKSPACE_SKIP = new Set([
+  'node_modules',
+  '.git',
+  '.svn',
+  '.hg',
+  'dist',
+  'out',
+  'release',
+  'build',
+  'target',
+  '.next',
+  '.nuxt',
+  '.cache',
+  '.turbo',
+  '.codegraph',
+  '.serena',
+  'coverage',
+  '.venv',
+  'venv',
+  '__pycache__'
+])
+const WORKSPACE_MAX_FILES = 4000
+
+async function listWorkspaceFiles(root: string): Promise<string[]> {
+  const files: string[] = []
+  const queue = [root]
+  while (queue.length > 0 && files.length < WORKSPACE_MAX_FILES) {
+    const dir = queue.pop() as string
+    let entries
+    try {
+      entries = await fs.readdir(dir, { withFileTypes: true })
+    } catch {
+      continue
+    }
+    for (const entry of entries) {
+      if (files.length >= WORKSPACE_MAX_FILES) break
+      const full = path.join(dir, entry.name)
+      if (entry.isDirectory()) {
+        if (WORKSPACE_SKIP.has(entry.name)) continue
+        queue.push(full)
+      } else if (entry.isFile()) {
+        files.push(path.relative(root, full).split(path.sep).join('/'))
+      }
+    }
+  }
+  return files.sort((a, b) => a.localeCompare(b))
+}
+
 async function broadcastMcpState(): Promise<void> {
   try {
     mainWindow?.webContents.send('mcp:state', await buildMcpState())
@@ -667,6 +716,8 @@ function registerIpc(): void {
   })
 
   ipcMain.handle('mcp:state', () => buildMcpState())
+
+  ipcMain.handle('workspace:files', () => listWorkspaceFiles(status.cwd))
 
   ipcMain.handle('mcp:set-enabled', async (_event, enabled: boolean) => {
     await saveConfig({ mcp: { ...desktopConfig.mcp, enabled: Boolean(enabled) } })

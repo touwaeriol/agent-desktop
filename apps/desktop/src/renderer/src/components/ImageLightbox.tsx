@@ -70,43 +70,34 @@ export function MessageImages({
 
 export function DraftImageStrip({
   images,
-  placement,
   onRemove,
   onPreview
 }: {
   images: DraftImage[]
-  placement: DraftImage['placement']
   onRemove: (id: string) => void
   onPreview: (image: DraftImage) => void
 }): React.JSX.Element | null {
-  const list = images.filter((image) => image.placement === placement)
-  if (list.length === 0) return null
+  if (images.length === 0) return null
   return (
-    <div className={`draft-images ${placement}`}>
-      {list.map((image) => {
-        const index = images.indexOf(image)
-        return (
-          <div key={image.id} className="draft-image">
-            <button
-              className="draft-image-thumb"
-              onClick={() => onPreview(image)}
-              title={`${image.name ?? `图片${index + 1}`} · 点击查看`}
-            >
-              <img src={imageSrc(image)} alt={`图片${index + 1}`} />
-            </button>
-            <span className="draft-image-label">
-              {placement === 'inline' ? `图片${index + 1}` : image.name ?? '图片'}
-            </span>
-            <button
-              className="draft-image-remove"
-              onClick={() => onRemove(image.id)}
-              title="移除图片"
-            >
-              <CloseIcon size={10} />
-            </button>
-          </div>
-        )
-      })}
+    <div className="draft-images">
+      {images.map((image) => (
+        <div key={image.id} className="draft-image">
+          <button
+            className="draft-image-thumb"
+            onClick={() => onPreview(image)}
+            title="点击查看大图"
+          >
+            <img src={imageSrc(image)} alt="" />
+          </button>
+          <button
+            className="draft-image-remove"
+            onClick={() => onRemove(image.id)}
+            title="移除图片"
+          >
+            <CloseIcon size={10} />
+          </button>
+        </div>
+      ))}
     </div>
   )
 }
