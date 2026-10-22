@@ -1,6 +1,6 @@
 {
   "name": "@agent-desktop/mcp-core",
-  "version": "0.3.16",
+  "version": "0.3.17",
   "private": true,
   "description": "Agent Desktop core interaction MCP server (desktop tools such as ask_user_question)",
   "type": "module",
