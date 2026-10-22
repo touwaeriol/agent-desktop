@@ -3912,6 +3912,25 @@ button:disabled {
   max-width: 100%;
 }
 
+.mcp-key-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.mcp-key-row input {
+  flex: 1;
+  min-width: 0;
+  height: 28px;
+  padding: 0 9px;
+  border-radius: 7px;
+  border: 1px solid var(--border-strong);
+  background: var(--bg-input);
+  color: var(--text);
+  font-size: 11px;
+}
+
 .mcp-tools-block {
   margin-top: 8px;
   padding-top: 8px;

@@ -103,17 +103,19 @@ npm run typecheck    # node + web 两个 tsconfig 分别检查
 - 设置 → MCP（`McpPanel.tsx`）管理 `~/.pi/agent/mcp.json`：总开关（`config.json.mcp.enabled`）、桌面工具开关（`mcp.desktopTool`）、服务器启用/删除/新增（新增接受一段 JSON，需含 `command` 或 `url`）。任何变更都会 `reloadPiConfig()` 重启 pi。
 - 项目级 `.pi/mcp.json` 只读展示并合并到列表（同名覆盖用户级），仅在信任项目时由 pi 生效。
 
-### 内置引擎（CodeGraph / LSP）
+### 内置引擎（CodeGraph / WarpGrep）
 
-- 两个引擎都是**外部 CLI，不打包、不自动安装**：CodeGraph 是 npm 全局包 `@colbymchenry/codegraph`（入口解析到 `npm-shim.js`，用 node 跑，避免 Windows `.cmd` 需要 shell）；Serena 是 uv tool `serena-agent`（`~/.local/bin/serena.exe`，直接 spawn）。检测在 `apps/desktop/src/main/engines.ts`：显式入口 → 已知安装路径 / `PATH` → `--version` 校验，结果缓存 60s，`invalidateDetection()` 在改入口时清掉。**显式入口不可用时不要回退到自动检测**，否则设置看起来生效了其实是别的二进制。
-- 默认关闭（`config.json.mcp.engines.<id>.enabled`），设置页逐个开启；未安装时卡片显示安装命令（`npm i -g @colbymchenry/codegraph` / `uv tool install serena-agent`）和「选择入口」。
-- **架构是网关，不是直连**：`apps/desktop/src/main/gateway.ts` 在主进程里持有上游引擎（stdio 子进程），对外由桥（`bridge.ts`）暴露 **一个服务、多个端点**：`POST /mcp/codegraph`、`POST /mcp/lsp`。pi 用 `registerMcpServer(name, { url, headers: { authorization: 'Bearer <token>' } })` 连这些端点，所以模型看到的是网关的工具集，不是引擎的全量工具。
+- 两个引擎定位不同：CodeGraph 是**本地 CLI**（npm 全局包 `@colbymchenry/codegraph`，入口解析到 `npm-shim.js`，用 node 跑，避免 Windows `.cmd` 需要 shell），WarpGrep 是 **Morph 托管 API**（只需要 API Key，没有二进制）。检测在 `apps/desktop/src/main/engines.ts`：CodeGraph 走「显式入口 → 已知安装路径 / PATH → `--version` 校验」，WarpGrep 的可用性就是有没有 key；检测结果缓存 60s，`invalidateDetection()` 在改入口时清掉。**显式入口不可用时不要回退到自动检测**。
+- 默认关闭（`config.json.mcp.engines.<id>.enabled`），设置页逐个开启；CodeGraph 未安装时卡片显示安装命令和「选择入口」，WarpGrep 卡片是 API Key 输入框（`config.json.mcp.morphApiKey`，UI 只显示掩码）。
+- **架构是网关，不是直连**：`apps/desktop/src/main/gateway.ts` 在主进程里持有引擎（CodeGraph 是 stdio 子进程，WarpGrep 直接在主进程里跑），对外由桥（`bridge.ts`）暴露 **一个服务、多个端点**：`POST /mcp/codegraph`、`POST /mcp/warpgrep`。pi 用 `registerMcpServer(name, { url, headers: { authorization: 'Bearer <token>' } })` 连这些端点，模型看到的是网关的工具集，不是引擎的全量工具。
 - 端点只实现 streamable HTTP 的最小合法形态：POST 返回 `application/json`，GET 返回 405（pi 的客户端把 405 当作"没有 server→client 流"），DELETE 返回 204。**不要**加 SSE，pi 的 `McpStreamableHttpTransport` 接受 JSON 响应。
-- 工具数量由 `ALLOWED_TOOLS` 控制（`engines.ts`）：CodeGraph 8 个、Serena 7 个（其余 22 个 Serena 工具直接被丢弃，`tool_search` 也搜不到）。新增/裁剪工具改这里。
-- 暴露策略：服务器级 `exposure: 'deferred'`，`toolExposure` 把核心工具标 `direct`（CodeGraph: `explore/search/callers/impact`；Serena: `find_symbol/find_referencing_symbols/get_symbols_overview/get_diagnostics_for_file`），其余走 `tool_search` 按需加载。pi 会因此激活 `tool_search` 工具，并在系统提示词里生成 `mcp_servers` 段（`deferred` 才会列，`direct` 不会）。
-- 网关只把**真实失败**（spawn 失败、进程退出、initialize 失败）当作错误上报；引擎自己往 stderr 打的 INFO 日志不算错误（Serena 每次请求都会打）。
+- 工具数量由 `ALLOWED_TOOLS` 控制（`engines.ts`）：CodeGraph 8 个、WarpGrep 1 个（`codebase_search`）。新增/裁剪工具改这里。
+- **CodeGraph 默认不返回源码**（对齐 codegraph-desktop）：网关把 `codegraph_explore` 的 schema 加上 `includeSource`（默认 false），调用时若没显式要求源码，就改写成 `codegraph_search` + `limit:10` 转发；`codegraph_node` 强制 `includeCode:false`。模型只拿到符号名、签名和 `file:line`，需要源码时自己 read。不要在网关里放开源码默认值——那会让一次 explore 返回上万字符。
+- 暴露策略：服务器级 `exposure: 'deferred'`，`toolExposure` 把核心工具标 `direct`（CodeGraph: `explore/search/callers/impact`；WarpGrep: `codebase_search`），其余走 `tool_search`。pi 会因此激活 `tool_search` 工具，并在系统提示词里生成 `mcp_servers` 段。
+- 网关只把**真实失败**（spawn 失败、进程退出、initialize 失败、Morph API 错误）当作错误上报；引擎自己往 stderr 打的 INFO 日志不算错误。
+- WarpGrep 的搜索循环在 `apps/desktop/src/main/warpgrep.ts`：模型（`morph-warp-grep-v2.1`）规划 `list_directory` / `grep_search` / `glob` / `read` / `finish`，本模块在会话目录内执行（路径越界直接拒绝），最多 6 轮。**读取的文件片段会发给 Morph API**，UI 里要保留这句提示。没有 key 时调用返回 `MORPH_NO_KEY`。
 - 用户关掉的工具写成 `toolExposure[tool] = 'hidden'`（`config.json.mcp.toolToggles`），工具仍在 `getAllTools()` 里但 `exposure: 'hidden'`，所以设置页能继续显示并重新打开。
 - CodeGraph 索引：只在**没有** `.codegraph` 时自动 `codegraph init`；**不要自动 `sync`**——运行中的 MCP 服务器持有 CodeGraph 写锁，自动 sync 会报 "database is locked"。重新索引是设置页的手动动作（`codegraph unlock` 提示也在这里给出）。
 - **不要设置 `CODEGRAPH_NO_DAEMON=1`**：那会让服务器独占写锁，用户同时用 IDE/终端的 CodeGraph 时，后启动的一方要么拒绝启动，要么只暴露 3 个工具（`search/node/explore`）。让它代理到共享 daemon 才能共存。`CODEGRAPH_MCP_TOOLS` 必须设，否则默认只暴露 `codegraph_explore`。
-- 引擎会往项目里写 `.codegraph/`、`.serena/`（已加进 `.gitignore`），Serena 还会在 `~/.serena/serena_config.yml` 登记项目。
+- 引擎会往项目里写 `.codegraph/`（已加进 `.gitignore`）。
 

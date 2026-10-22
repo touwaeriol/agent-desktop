@@ -255,7 +255,7 @@ export interface McpServerInfo {
   builtin?: boolean
 }
 
-export type McpEngineId = 'codegraph' | 'lsp'
+export type McpEngineId = 'codegraph' | 'warpgrep'
 
 export interface McpToolInfo {
   name: string
@@ -284,6 +284,8 @@ export interface McpState {
   desktopToolAvailable: boolean
   desktopTools: McpToolInfo[]
   engines: McpEngineState[]
+  /** Masked Morph API key (`sk-w_…abcd`), never the key itself. */
+  morphKeyHint?: string
   servers: McpServerInfo[]
   userConfigPath: string
   projectConfigPath: string
@@ -348,10 +350,11 @@ export interface PiBridge {
   setDesktopToolEnabled(enabled: boolean): Promise<McpState>
   setMcpEngineEnabled(id: McpEngineId, enabled: boolean): Promise<McpState>
   setMcpEngineEntry(id: McpEngineId, entry: string | null): Promise<McpState>
+  setMorphApiKey(key: string | null): Promise<McpState>
   refreshMcpEngines(): Promise<McpState>
   buildMcpIndex(): Promise<{ ok: boolean; message: string }>
   setMcpToolEnabled(server: string, tool: string, enabled: boolean): Promise<McpState>
-  chooseMcpEngineEntry(id: McpEngineId): Promise<string | null>
+  chooseMcpEngineEntry(): Promise<string | null>
   onMcpState(listener: (state: McpState) => void): () => void
   setMcpServerEnabled(name: string, enabled: boolean): Promise<{ ok: boolean; error?: string }>
   removeMcpServer(name: string): Promise<{ ok: boolean; error?: string }>

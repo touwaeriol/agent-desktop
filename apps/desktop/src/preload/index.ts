@@ -83,17 +83,19 @@ const bridge: PiBridge = {
   setMcpEnabled: (enabled: boolean) => ipcRenderer.invoke('mcp:set-enabled', enabled) as Promise<McpState>,
   setDesktopToolEnabled: (enabled: boolean) =>
     ipcRenderer.invoke('mcp:set-desktop-tool', enabled) as Promise<McpState>,
-  setMcpEngineEnabled: (id: 'codegraph' | 'lsp', enabled: boolean) =>
+  setMcpEngineEnabled: (id: 'codegraph' | 'warpgrep', enabled: boolean) =>
     ipcRenderer.invoke('mcp:set-engine-enabled', id, enabled) as Promise<McpState>,
-  setMcpEngineEntry: (id: 'codegraph' | 'lsp', entry: string | null) =>
+  setMcpEngineEntry: (id: 'codegraph' | 'warpgrep', entry: string | null) =>
     ipcRenderer.invoke('mcp:set-engine-entry', id, entry) as Promise<McpState>,
   refreshMcpEngines: () => ipcRenderer.invoke('mcp:refresh-engines') as Promise<McpState>,
   buildMcpIndex: () =>
     ipcRenderer.invoke('mcp:build-index') as Promise<{ ok: boolean; message: string }>,
   setMcpToolEnabled: (server: string, tool: string, enabled: boolean) =>
     ipcRenderer.invoke('mcp:set-tool', server, tool, enabled) as Promise<McpState>,
-  chooseMcpEngineEntry: (id: 'codegraph' | 'lsp') =>
-    ipcRenderer.invoke('mcp:choose-engine-entry', id) as Promise<string | null>,
+  setMorphApiKey: (key: string | null) =>
+    ipcRenderer.invoke('mcp:set-morph-key', key) as Promise<McpState>,
+  chooseMcpEngineEntry: () =>
+    ipcRenderer.invoke('mcp:choose-engine-entry') as Promise<string | null>,
   onMcpState: (listener) => {
     const handler = (_event: Electron.IpcRendererEvent, state: McpState): void => listener(state)
     ipcRenderer.on('mcp:state', handler)

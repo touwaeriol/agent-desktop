@@ -62,18 +62,20 @@ The built-in tool is `mcp__desktop__ask_user_question`. It is registered by a pi
 
 The pieces live in `packages/mcp-core` (stdio MCP server — the core interaction server; new desktop tools go in `packages/mcp-core/tools`), `apps/desktop/resources/extension` (pi extension that registers it), and `apps/desktop/src/main/bridge.ts` (loopback bridge between the MCP server and the window).
 
-### Built-in engines: CodeGraph and LSP
+### Built-in engines: CodeGraph and WarpGrep
 
 Two optional engines can be enabled per app, both used through the same extension:
 
-| Engine | Install | What it adds |
+| Engine | Setup | What it adds |
 | --- | --- | --- |
 | CodeGraph | `npm i -g @colbymchenry/codegraph` | Symbol search, call relationships, impact analysis over a project index |
-| Serena (LSP) | `uv tool install serena-agent` | Language-server symbol lookup, references, and diagnostics |
+| WarpGrep | Morph API key | Natural-language code search: several rounds of grep/read, then the relevant files |
 
-They are external CLIs: the app never installs them and never writes to `mcp.json`. The app runs a small MCP gateway in its main process — one loopback service with one endpoint per engine (`/mcp/codegraph`, `/mcp/lsp`) — and pi connects to those endpoints. The gateway spawns the real engine as a stdio MCP server and only lists the tools in its allowlist, so the model sees 8 CodeGraph tools and 7 Serena tools instead of everything the engines offer (Serena alone ships 29).
+The app runs a small MCP gateway in its main process — one loopback service with one endpoint per engine (`/mcp/codegraph`, `/mcp/warpgrep`) — and pi connects to those endpoints. The gateway holds the real engine (a stdio MCP server for CodeGraph, an in-process search for WarpGrep) and only lists the tools in its allowlist, so the model sees 8 CodeGraph tools and 1 WarpGrep tool instead of everything the engines offer.
 
-Of those, the core ones (`codegraph_explore/search/callers/impact`, `find_symbol/find_referencing_symbols/get_symbols_overview/get_diagnostics_for_file`) are declared directly; the rest load on demand through `tool_search`.
+CodeGraph results list symbols, signatures and `file:line` locations; source bodies are only returned when a call sets `includeSource: true`. WarpGrep returns file paths and line ranges the same way, and file excerpts read during a search are sent to the Morph API.
+
+Of those, the core ones (`codegraph_explore/search/callers/impact`, `codebase_search`) are declared directly; the rest load on demand through `tool_search`.
 
 Every built-in tool can be switched off individually in Settings → MCP; a disabled tool is registered as `hidden`, so the model never sees it. The CodeGraph index (`.codegraph/`) is built automatically when a project has none — re-indexing stays a manual action, because the running server holds the index lock.
 

@@ -1,8 +1,9 @@
 /**
- * Built-in MCP engines: CodeGraph (code intelligence) and Serena (LSP).
+ * Built-in MCP engines: CodeGraph (local code index) and WarpGrep (Morph code search).
  *
- * Both are external CLIs. The desktop app resolves their entry points, builds the stdio server spec
- * the pi extension registers, and keeps the CodeGraph index in sync with the session directory.
+ * CodeGraph is an external CLI: the app resolves its entry point, spawns it as a stdio MCP server
+ * behind the gateway, and keeps its index in sync with the session directory. WarpGrep is a hosted
+ * API, so it needs an API key instead of a binary and runs inside the gateway itself.
  *
  * Nothing here writes to `~/.pi/agent/mcp.json`: engines are registered by the extension the app
  * passes with `--extension`, so terminal pi sessions stay untouched.
@@ -16,12 +17,12 @@ import type { McpEngineId, McpEngineState, McpToolInfo } from '../shared/types'
 /** Tools declared to the model directly; every other tool of the server is loaded via tool_search. */
 export const DIRECT_TOOLS: Record<McpEngineId, string[]> = {
   codegraph: ['codegraph_explore', 'codegraph_search', 'codegraph_callers', 'codegraph_impact'],
-  lsp: ['find_symbol', 'find_referencing_symbols', 'get_symbols_overview', 'get_diagnostics_for_file']
+  warpgrep: ['codebase_search']
 }
 
 /**
  * Tools the gateway exposes at all. Everything else the engine offers is dropped before pi sees it,
- * which is how the tool count stays bounded (Serena alone ships 29 tools).
+ * which is how the tool count stays bounded.
  */
 export const ALLOWED_TOOLS: Record<McpEngineId, string[]> = {
   codegraph: [
@@ -34,15 +35,7 @@ export const ALLOWED_TOOLS: Record<McpEngineId, string[]> = {
     'codegraph_status',
     'codegraph_files'
   ],
-  lsp: [
-    'find_symbol',
-    'find_referencing_symbols',
-    'get_symbols_overview',
-    'get_diagnostics_for_file',
-    'find_declaration',
-    'find_implementations',
-    'rename_symbol'
-  ]
+  warpgrep: ['codebase_search']
 }
 
 /** CodeGraph only exposes the tools named here (its own default is `explore` alone). */
@@ -50,7 +43,7 @@ const CODEGRAPH_TOOLS = 'explore,search,callers,callees,impact,node,status,files
 
 const TIMEOUT_MS: Record<McpEngineId, number> = {
   codegraph: 120_000,
-  lsp: 180_000
+  warpgrep: 120_000
 }
 
 const DETECT_TIMEOUT_MS = 20_000
@@ -165,36 +158,23 @@ async function resolveCodegraph(explicit?: string): Promise<EngineEntry | undefi
   return undefined
 }
 
-async function resolveSerena(explicit?: string): Promise<EngineEntry | undefined> {
-  // An explicit entry never falls back to auto-detection: silently using another binary would make
-  // the setting look applied when it is not.
-  if (explicit) return existsSync(explicit) ? { path: explicit, kind: 'binary' } : undefined
-  const candidates = [
-    path.join(os.homedir(), '.local', 'bin', process.platform === 'win32' ? 'serena.exe' : 'serena'),
-    ...(process.env.APPDATA
-      ? [path.join(process.env.APPDATA, 'uv', 'tools', 'serena-agent', 'Scripts', 'serena.exe')]
-      : []),
-    ...pathCandidates('serena')
-  ]
-  for (const candidate of candidates) {
-    if (existsSync(candidate)) return { path: candidate, kind: 'binary' }
-  }
-  return undefined
-}
-
 async function detect(id: McpEngineId, explicit?: string): Promise<CachedDetection> {
   const cached = detectionCache.get(id)
   if (cached && Date.now() - cached.at < CACHE_MS && cached.explicit === explicit) return cached
-  const entry = id === 'codegraph' ? await resolveCodegraph(explicit) : await resolveSerena(explicit)
+  if (id === 'warpgrep') {
+    // WarpGrep is a hosted API: availability is the API key, checked in `engineStates`.
+    const result: CachedDetection = { explicit, at: Date.now() }
+    detectionCache.set(id, result)
+    return result
+  }
+  const entry = await resolveCodegraph(explicit)
   if (!entry) {
     const result: CachedDetection = {
       explicit,
       at: Date.now(),
       error: explicit
         ? `指定的入口不可用：${explicit}`
-        : id === 'codegraph'
-          ? '未找到 CodeGraph（npm 全局安装 codegraph，或手动指定入口）'
-          : '未找到 Serena（安装 serena 后重试，或手动指定入口）'
+        : '未找到 CodeGraph（npm 全局安装 codegraph，或手动指定入口）'
     }
     detectionCache.set(id, result)
     return result
@@ -205,11 +185,7 @@ async function detect(id: McpEngineId, explicit?: string): Promise<CachedDetecti
       : await run(entry.path, ['--version'])
   const output = `${probe.stdout}\n${probe.stderr}`.trim()
   const version = output.split('\n').map((line) => line.trim()).find(Boolean)
-  const valid =
-    probe.code === 0 &&
-    (id === 'codegraph'
-      ? /\d+\.\d+\.\d+/.test(output)
-      : /serena/i.test(output))
+  const valid = probe.code === 0 && /\d+\.\d+\.\d+/.test(output)
   const result: CachedDetection = valid
     ? { explicit, at: Date.now(), entry, version }
     : {
@@ -229,15 +205,19 @@ export async function engineEntry(id: McpEngineId, explicit?: string): Promise<s
   return (await detect(id, explicit)).entry?.path
 }
 
-/** What the gateway needs to spawn one engine. */
+/** What the gateway needs to serve one engine. */
 export interface EngineTargetSpec {
   id: McpEngineId
-  command: string
-  args: string[]
-  env: Record<string, string>
+  kind: 'upstream' | 'warpgrep'
+  command?: string
+  args?: string[]
+  env?: Record<string, string>
   cwd: string
+  /** Upstream tool names to expose; everything else is dropped. */
   allowlist: string[]
   timeoutMs: number
+  /** WarpGrep only. */
+  apiKey?: string
 }
 
 /** What the extension registers with pi: one HTTP endpoint per engine. */
@@ -263,44 +243,45 @@ function exposureFor(
   return toolExposure
 }
 
-/** Engines that are enabled and resolvable, in the shape the gateway consumes. */
+/** Engines that are enabled and usable, in the shape the gateway consumes. */
 export async function buildEngineTargets(options: {
   cwd: string
   config: Record<string, { enabled?: boolean; entry?: string } | undefined>
+  morphApiKey?: string
 }): Promise<EngineTargetSpec[]> {
   const targets: EngineTargetSpec[] = []
-  for (const id of ['codegraph', 'lsp'] as McpEngineId[]) {
+  for (const id of ['codegraph', 'warpgrep'] as McpEngineId[]) {
     const engine = options.config[id]
     if (!engine?.enabled) continue
+    if (id === 'warpgrep') {
+      targets.push({
+        id,
+        kind: 'warpgrep',
+        cwd: options.cwd,
+        allowlist: ALLOWED_TOOLS[id],
+        timeoutMs: TIMEOUT_MS[id],
+        apiKey: options.morphApiKey?.trim() || undefined
+      })
+      continue
+    }
     const detection = await detect(id, engine.entry?.trim() || undefined)
     if (!detection.entry) continue
-    if (id === 'codegraph') {
-      targets.push({
-        id,
-        command: process.execPath,
-        args: [detection.entry.path, 'serve', '--mcp', '--path', options.cwd],
-        env: {
-          ELECTRON_RUN_AS_NODE: '1',
-          // No CODEGRAPH_NO_DAEMON: that makes the server take CodeGraph's single writer lock, and a
-          // second client (the user's IDE or terminal) then either refuses to start or serves a
-          // reduced tool set. Letting it proxy to the shared daemon keeps them coexisting.
-          CODEGRAPH_MCP_TOOLS: CODEGRAPH_TOOLS
-        },
-        cwd: options.cwd,
-        allowlist: ALLOWED_TOOLS[id],
-        timeoutMs: TIMEOUT_MS[id]
-      })
-    } else {
-      targets.push({
-        id,
-        command: detection.entry.path,
-        args: ['start-mcp-server', '--project', options.cwd, '--transport', 'stdio'],
-        env: {},
-        cwd: options.cwd,
-        allowlist: ALLOWED_TOOLS[id],
-        timeoutMs: TIMEOUT_MS[id]
-      })
-    }
+    targets.push({
+      id,
+      kind: 'upstream',
+      command: process.execPath,
+      args: [detection.entry.path, 'serve', '--mcp', '--path', options.cwd],
+      env: {
+        ELECTRON_RUN_AS_NODE: '1',
+        // No CODEGRAPH_NO_DAEMON: that makes the server take CodeGraph's single writer lock, and a
+        // second client (the user's IDE or terminal) then either refuses to start or serves a
+        // reduced tool set. Letting it proxy to the shared daemon keeps them coexisting.
+        CODEGRAPH_MCP_TOOLS: CODEGRAPH_TOOLS
+      },
+      cwd: options.cwd,
+      allowlist: ALLOWED_TOOLS[id],
+      timeoutMs: TIMEOUT_MS[id]
+    })
   }
   return targets
 }
@@ -321,31 +302,38 @@ export function buildEngineRegistrations(options: {
     timeout: Math.round(target.timeoutMs / 1000),
     description:
       target.id === 'codegraph'
-        ? `CodeGraph 网关：符号搜索、调用关系、影响面分析（${ALLOWED_TOOLS.codegraph.length} 个工具，explore/search/callers/impact 直接可用）`
-        : `Serena 网关：语言服务器符号查找、引用、诊断（${ALLOWED_TOOLS.lsp.length} 个工具，核心 4 个直接可用）`
+        ? `CodeGraph 网关：符号搜索、调用关系、影响面分析（${ALLOWED_TOOLS.codegraph.length} 个工具，默认只返回位置不返回源码）`
+        : 'WarpGrep 网关：Morph 的自然语言代码搜索（codebase_search，默认只返回文件与行号）'
   }))
 }
 
 export async function engineStates(options: {
   config: Record<string, { enabled?: boolean; entry?: string } | undefined>
+  morphApiKey?: string
   toggles: Record<string, Record<string, boolean> | undefined>
   tools: Record<string, McpToolInfo[] | undefined>
   indexStatus: Record<string, { state: McpEngineState['index']; message?: string } | undefined>
   gatewayErrors?: Record<string, string | undefined>
 }): Promise<McpEngineState[]> {
   const states: McpEngineState[] = []
-  for (const id of ['codegraph', 'lsp'] as McpEngineId[]) {
+  const hasKey = Boolean(options.morphApiKey?.trim())
+  for (const id of ['codegraph', 'warpgrep'] as McpEngineId[]) {
     const engine = options.config[id] ?? {}
     const detection = await detect(id, engine.entry?.trim() || undefined)
     const known = options.tools[id] ?? []
+    const available = id === 'warpgrep' ? hasKey : Boolean(detection.entry) && !detection.error
+    const error =
+      options.gatewayErrors?.[id] ??
+      detection.error ??
+      (id === 'warpgrep' && !hasKey ? '未配置 Morph API Key' : undefined)
     states.push({
       id,
-      name: id === 'codegraph' ? 'CodeGraph' : 'LSP (Serena)',
+      name: id === 'codegraph' ? 'CodeGraph' : 'WarpGrep',
       enabled: Boolean(engine.enabled),
-      available: Boolean(detection.entry) && !detection.error,
-      entry: engine.entry?.trim() || detection.entry?.path,
+      available,
+      entry: id === 'warpgrep' ? 'api.morphllm.com/v1' : engine.entry?.trim() || detection.entry?.path,
       version: detection.version,
-      error: options.gatewayErrors?.[id] ?? detection.error,
+      error,
       index: id === 'codegraph' ? (options.indexStatus[id]?.state ?? 'unknown') : undefined,
       indexMessage: id === 'codegraph' ? options.indexStatus[id]?.message : undefined,
       tools: known.map((tool) => ({

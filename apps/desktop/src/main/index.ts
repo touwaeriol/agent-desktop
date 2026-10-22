@@ -68,7 +68,9 @@ interface McpConfig {
   desktopTool?: boolean
   bridgePort?: number
   bridgeToken?: string
-  engines?: Partial<Record<'codegraph' | 'lsp', McpEngineConfig>>
+  engines?: Partial<Record<'codegraph' | 'warpgrep', McpEngineConfig>>
+  /** Morph API key for WarpGrep. */
+  morphApiKey?: string
   /** server -> tool -> enabled. A tool set to false is registered as `hidden`. */
   toolToggles?: Record<string, Record<string, boolean>>
 }
@@ -120,7 +122,7 @@ function mcpSettings(): { enabled: boolean; desktopTool: boolean } {
   return { enabled: config.enabled !== false, desktopTool: config.desktopTool !== false }
 }
 
-function engineConfig(): Partial<Record<'codegraph' | 'lsp', McpEngineConfig>> {
+function engineConfig(): Partial<Record<'codegraph' | 'warpgrep', McpEngineConfig>> {
   return desktopConfig.mcp?.engines ?? {}
 }
 
@@ -178,7 +180,11 @@ async function mcpLaunch(
     return { args: ['--no-mcp'], env: {} }
   }
   if (!desktopToolAvailable()) return { args: [], env: {} }
-  const targets = await engines.buildEngineTargets({ cwd, config: engineConfig() })
+  const targets = await engines.buildEngineTargets({
+    cwd,
+    config: engineConfig(),
+    morphApiKey: desktopConfig.mcp?.morphApiKey
+  })
   // The endpoints must exist before pi connects to them.
   gateway.configure(targets)
   const core = settings.desktopTool
@@ -259,6 +265,14 @@ async function broadcastMcpState(): Promise<void> {
   }
 }
 
+/** Only ever expose a masked hint of the Morph key, never the key itself. */
+function maskKey(key: string | undefined): string | undefined {
+  const value = key?.trim()
+  if (!value) return undefined
+  if (value.length <= 10) return '••••'
+  return `${value.slice(0, 5)}…${value.slice(-4)}`
+}
+
 async function buildMcpState(): Promise<McpState> {
   const settings = mcpSettings()
   const [userServers, projectServers] = await Promise.all([
@@ -289,6 +303,7 @@ async function buildMcpState(): Promise<McpState> {
   const codegraphIndexed = engines.findCodegraphIndex(status.cwd)
   const engineStates = await engines.engineStates({
     config: engineConfig(),
+    morphApiKey: desktopConfig.mcp?.morphApiKey,
     toggles: toolToggles(),
     tools: toolCache,
     indexStatus: {
@@ -297,7 +312,7 @@ async function buildMcpState(): Promise<McpState> {
     },
     gatewayErrors: {
       codegraph: gateway.gatewayError('codegraph'),
-      lsp: gateway.gatewayError('lsp')
+      warpgrep: gateway.gatewayError('warpgrep')
     }
   })
   const baseUrl = bridge.getBridgeUrl()
@@ -325,6 +340,7 @@ async function buildMcpState(): Promise<McpState> {
       enabled: toolToggles().desktop?.[tool.name] !== false
     })),
     engines: engineStates,
+    morphKeyHint: maskKey(desktopConfig.mcp?.morphApiKey),
     servers,
     userConfigPath: mcp.USER_MCP_PATH,
     projectConfigPath: mcp.projectMcpPath(status.cwd),
@@ -721,13 +737,22 @@ function registerIpc(): void {
     }
   )
 
-  ipcMain.handle('mcp:choose-engine-entry', async (_event, id: McpEngineId) => {
+  ipcMain.handle('mcp:set-morph-key', async (_event, key: string | null) => {
+    const next = { ...desktopConfig.mcp }
+    if (key && key.trim()) next.morphApiKey = key.trim()
+    else delete next.morphApiKey
+    await saveConfig({ mcp: next })
+    await reloadPiConfig()
+    return buildMcpState()
+  })
+
+  ipcMain.handle('mcp:choose-engine-entry', async () => {
     const filters =
       process.platform === 'win32'
-        ? [{ name: id === 'codegraph' ? 'CodeGraph' : 'Serena', extensions: ['exe', 'cmd', 'js'] }]
+        ? [{ name: 'CodeGraph', extensions: ['exe', 'cmd', 'js'] }]
         : [{ name: 'Executable', extensions: [''] }]
     const result = await dialog.showOpenDialog({
-      title: id === 'codegraph' ? '选择 CodeGraph 入口' : '选择 Serena 入口',
+      title: '选择 CodeGraph 入口',
       properties: ['openFile'],
       filters
     })
@@ -998,7 +1023,7 @@ app.whenReady().then(async () => {
     void saveToolCache(next).then(() => broadcastMcpState())
   })
   bridge.setMcpHandler((engine, message) => {
-    if (engine !== 'codegraph' && engine !== 'lsp') {
+    if (engine !== 'codegraph' && engine !== 'warpgrep') {
       return Promise.reject(new Error(`未知网关端点：${engine}`))
     }
     return gateway.handleMessage(engine, message)

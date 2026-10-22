@@ -24,7 +24,7 @@ const TEMPLATE_HTTP = `{
 
 const INSTALL_HINTS: Record<McpEngineId, string> = {
   codegraph: 'npm i -g @colbymchenry/codegraph',
-  lsp: 'uv tool install serena-agent'
+  warpgrep: '在 Morph 控制台创建 API Key 后粘贴到下方'
 }
 
 function Toggle({
@@ -119,24 +119,29 @@ function ToolSection({
 function EngineCard({
   engine,
   busy,
+  morphKeyHint,
   toolsOpen,
   onToolsOpenChange,
   onToggle,
   onPickEntry,
   onClearEntry,
   onBuildIndex,
+  onSaveKey,
   onToggleTool
 }: {
   engine: McpEngineState
   busy: boolean
+  morphKeyHint?: string
   toolsOpen: boolean
   onToolsOpenChange: (open: boolean) => void
   onToggle: (id: McpEngineId, enabled: boolean) => void
   onPickEntry: (id: McpEngineId) => void
   onClearEntry: (id: McpEngineId) => void
   onBuildIndex: () => void
+  onSaveKey: (key: string | null) => void
   onToggleTool: (server: string, tool: string, enabled: boolean) => void
 }): React.JSX.Element {
+  const [keyDraft, setKeyDraft] = useState('')
   const indexLabel: Record<string, string> = {
     indexed: '已索引',
     missing: '未建立索引',
@@ -145,6 +150,7 @@ function EngineCard({
     failed: '索引失败',
     unknown: '索引状态未知'
   }
+  const isWarpGrep = engine.id === 'warpgrep'
   return (
     <div className={`mcp-engine ${engine.enabled ? '' : 'disabled'}`}>
       <div className="mcp-row">
@@ -155,19 +161,21 @@ function EngineCard({
             {engine.enabled && <span className="badge">网关</span>}
           </span>
           <span className="mcp-row-sub">
-            {engine.id === 'codegraph'
-              ? '代码索引：符号搜索、调用关系、影响面分析。核心 4 个工具直接声明，其余按需加载。'
-              : 'Serena 语言服务器：符号查找、引用、诊断。核心 4 个工具直接声明，其余按需加载。'}
+            {isWarpGrep
+              ? 'Morph WarpGrep：自然语言代码搜索，多轮 grep / 读取后在项目内定位代码。默认只返回文件与行号。'
+              : '代码索引：符号搜索、调用关系、影响面分析。默认只返回符号与位置，不返回源码。'}
           </span>
           {engine.error && <span className="mcp-row-warn">{engine.error}</span>}
-          {engine.enabled && !engine.error && engine.id === 'codegraph' && (
+          {engine.enabled && !engine.error && !isWarpGrep && (
             <span className="mcp-row-meta">
               {indexLabel[engine.index ?? 'unknown']}
               {engine.indexMessage ? ` · ${engine.indexMessage}` : ''}
             </span>
           )}
           <span className="mcp-row-meta mcp-entry" title={engine.entry}>
-            {engine.entry ?? '未找到入口'}
+            {isWarpGrep
+              ? `api.morphllm.com/v1${morphKeyHint ? ` · Key ${morphKeyHint}` : ' · 未配置 Key'}`
+              : engine.entry ?? '未找到入口'}
           </span>
         </div>
         <Toggle
@@ -178,39 +186,68 @@ function EngineCard({
       </div>
       {!engine.available && (
         <div className="mcp-install">
-          <span>
-            {engine.id === 'codegraph'
-              ? '未找到 CodeGraph。安装：'
-              : '未找到 Serena。安装：'}
-          </span>
-          <code>{INSTALL_HINTS[engine.id]}</code>
-          <button
-            className="ghost"
-            onClick={() => void navigator.clipboard?.writeText(INSTALL_HINTS[engine.id])}
-          >
-            复制
-          </button>
-          <span className="mcp-install-alt">
-            已装在别处？用「选择入口」指定可执行文件（CodeGraph 的 <code>npm-shim.js</code> 或
-            {' '}<code>serena.exe</code>）。
-          </span>
+          <span>{isWarpGrep ? '未配置 Morph API Key。' : '未找到 CodeGraph。安装：'}</span>
+          {!isWarpGrep && (
+            <>
+              <code>{INSTALL_HINTS.codegraph}</code>
+              <button
+                className="ghost"
+                onClick={() => void navigator.clipboard?.writeText(INSTALL_HINTS.codegraph)}
+              >
+                复制
+              </button>
+              <span className="mcp-install-alt">
+                已装在别处？用「选择入口」指定可执行文件（CodeGraph 的 <code>npm-shim.js</code>）。
+              </span>
+            </>
+          )}
+          {isWarpGrep && (
+            <span className="mcp-install-alt">
+              Key 只在本地保存，搜索时随请求发给 Morph；搜索过程中读取的文件片段也会发送到 Morph API。
+            </span>
+          )}
         </div>
       )}
-      <div className="mcp-engine-actions">
-        <button className="ghost" disabled={busy} onClick={() => onPickEntry(engine.id)}>
-          选择入口
-        </button>
-        {engine.entry && (
-          <button className="ghost" disabled={busy} onClick={() => onClearEntry(engine.id)}>
-            恢复自动检测
+      {isWarpGrep ? (
+        <div className="mcp-key-row">
+          <input
+            type="password"
+            value={keyDraft}
+            placeholder={morphKeyHint ? `已保存 ${morphKeyHint}，输入新 Key 覆盖` : 'sk-...'}
+            onChange={(event) => setKeyDraft(event.target.value)}
+            spellCheck={false}
+          />
+          <button
+            className="ghost"
+            disabled={busy || !keyDraft.trim()}
+            onClick={() => {
+              onSaveKey(keyDraft.trim())
+              setKeyDraft('')
+            }}
+          >
+            保存 Key
           </button>
-        )}
-        {engine.id === 'codegraph' && (
+          {morphKeyHint && (
+            <button className="ghost" disabled={busy} onClick={() => onSaveKey(null)}>
+              清除
+            </button>
+          )}
+        </div>
+      ) : (
+        <div className="mcp-engine-actions">
+          <button className="ghost" disabled={busy} onClick={() => onPickEntry(engine.id)}>
+            选择入口
+          </button>
+          {engine.entry && (
+            <button className="ghost" disabled={busy} onClick={() => onClearEntry(engine.id)}>
+              恢复自动检测
+            </button>
+          )}
           <button className="ghost" disabled={busy || !engine.available} onClick={onBuildIndex}>
             立即索引
           </button>
-        )}
-      </div>
+        </div>
+      )}
       {engine.enabled && (
         <ToolSection
           server={engine.id}
@@ -319,10 +356,17 @@ export function McpPanel({
   const pickEntry = useCallback(
     (id: McpEngineId) => {
       void (async () => {
-        const selected = await window.pi.chooseMcpEngineEntry(id)
+        const selected = await window.pi.chooseMcpEngineEntry()
         if (!selected) return
         await run(() => window.pi.setMcpEngineEntry(id, selected), '入口已更新')
       })()
+    },
+    [run]
+  )
+
+  const saveKey = useCallback(
+    (key: string | null) => {
+      void run(() => window.pi.setMorphApiKey(key), key ? 'Morph API Key 已保存' : '已清除 Morph API Key')
     },
     [run]
   )
@@ -411,12 +455,13 @@ export function McpPanel({
             key={engine.id}
             engine={engine}
             busy={busy}
+            morphKeyHint={state.morphKeyHint}
             toolsOpen={openTools[engine.id] === true}
             onToolsOpenChange={(open) => setToolsOpen(engine.id, open)}
             onToggle={(id, enabled) =>
               void run(
                 () => window.pi.setMcpEngineEnabled(id, enabled),
-                enabled ? `${id === 'codegraph' ? 'CodeGraph' : 'LSP'} 已启用` : '已关闭'
+                enabled ? `${id === 'codegraph' ? 'CodeGraph' : 'WarpGrep'} 已启用` : '已关闭'
               )
             }
             onPickEntry={pickEntry}
@@ -428,6 +473,7 @@ export function McpPanel({
                 onNotice(result.message)
               })
             }
+            onSaveKey={saveKey}
             onToggleTool={toggleTool}
           />
         ))}

@@ -11,16 +11,21 @@
  */
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import type { McpEngineId } from '../shared/types'
+import { WARPGREP_TOOL, WarpGrep, WarpGrepError } from './warpgrep'
 
 export interface EngineTarget {
   id: McpEngineId
-  command: string
-  args: string[]
-  env: Record<string, string>
+  /** `upstream` spawns a stdio MCP server; `warpgrep` runs the hosted search in-process. */
+  kind: 'upstream' | 'warpgrep'
+  command?: string
+  args?: string[]
+  env?: Record<string, string>
   cwd: string
   /** Upstream tool names to expose; everything else is dropped. */
   allowlist: string[]
   timeoutMs: number
+  /** WarpGrep only. */
+  apiKey?: string
 }
 
 interface PendingRequest {
@@ -81,10 +86,13 @@ class Upstream {
   async start(): Promise<void> {
     if (this.child) return
     if (this.starting) return this.starting
+    const command = this.target.command
+    const args = this.target.args ?? []
+    if (!command) throw new Error('上游命令未配置')
     this.starting = new Promise<void>((resolve, reject) => {
-      const child = spawn(this.target.command, this.target.args, {
+      const child = spawn(command, args, {
         cwd: this.target.cwd,
-        env: { ...process.env, ...this.target.env },
+        env: { ...process.env, ...(this.target.env ?? {}) },
         windowsHide: true,
         stdio: ['pipe', 'pipe', 'pipe']
       })
@@ -199,9 +207,10 @@ class EngineGateway {
       tools?: Array<Record<string, unknown>>
     }
     const allowed = new Set(this.target.allowlist)
-    this.tools = (result.tools ?? []).filter(
+    const tools = (result.tools ?? []).filter(
       (tool) => typeof tool.name === 'string' && allowed.has(tool.name)
     )
+    this.tools = this.target.id === 'codegraph' ? tools.map(trimCodegraphTool) : tools
     return this.tools
   }
 
@@ -213,10 +222,10 @@ class EngineGateway {
         return {
           protocolVersion: PROTOCOL_VERSION,
           capabilities: { tools: { listChanged: false } },
-          serverInfo: { name: `agent-desktop-${this.target.id}`, version: '0.2.0' },
+          serverInfo: { name: `agent-desktop-${this.target.id}`, version: '0.3.0' },
           instructions:
-            `${this.target.id === 'codegraph' ? 'CodeGraph' : 'Serena (LSP)'} gateway. ` +
-            `Only ${this.target.allowlist.length} curated tools are exposed; calls are forwarded to the engine.`
+            'CodeGraph gateway. Only curated tools are exposed; results list symbols and ' +
+            'file:line locations without source bodies unless a tool is asked for them.'
         }
       case 'ping':
         return {}
@@ -232,10 +241,11 @@ class EngineGateway {
           throw Object.assign(new Error(`工具 ${name} 当前不可用（引擎未提供）`), { code: -32603 })
         }
         const requestId = typeof message.id === 'number' ? message.id : undefined
-        const promise = this.upstream.request('tools/call', {
-          name,
-          arguments: params.arguments ?? {}
-        })
+        const forwarded =
+          this.target.id === 'codegraph'
+            ? codegraphCall(name, (params.arguments ?? {}) as Record<string, unknown>)
+            : { name, arguments: params.arguments ?? {} }
+        const promise = this.upstream.request('tools/call', forwarded)
         if (requestId !== undefined) this.inflight.set(String(requestId), requestId)
         try {
           return await promise
@@ -250,7 +260,7 @@ class EngineGateway {
       case 'prompts/list':
         return { prompts: [] }
       default:
-        throw Object.assign(new Error(`method not supported: ${method}`), { code: -32601 })
+        throw Object.assign(new Error(`method not supported: ${method}`), { code: -32603 })
     }
   }
 
@@ -266,7 +276,158 @@ class EngineGateway {
   }
 }
 
-const gateways = new Map<McpEngineId, EngineGateway>()
+/**
+ * CodeGraph returns source bodies by default. The desktop tool is for locating code, not for
+ * reading it, so `codegraph_explore` is turned into a plain search unless `includeSource` is set,
+ * and `codegraph_node` loses its code block the same way.
+ */
+function trimCodegraphTool(tool: Record<string, unknown>): Record<string, unknown> {
+  if (tool.name !== 'codegraph_explore') return tool
+  const schema = (tool.inputSchema ?? {}) as {
+    properties?: Record<string, unknown>
+    required?: string[]
+  }
+  return {
+    ...tool,
+    description:
+      'Locate relevant symbols in this project. By default returns names, signatures and ' +
+      'file:line locations, NOT source bodies. Use callers/impact for relationships and read ' +
+      'files for source. Only includeSource=true returns source excerpts.',
+    inputSchema: {
+      ...schema,
+      properties: {
+        ...(schema.properties ?? {}),
+        includeSource: {
+          type: 'boolean',
+          default: false,
+          description: 'Return source excerpts. Default false: only locations and signatures.'
+        }
+      }
+    }
+  }
+}
+
+function codegraphCall(
+  name: string,
+  args: Record<string, unknown>
+): { name: string; arguments: Record<string, unknown> } {
+  if (name === 'codegraph_explore') {
+    const includeSource = args.includeSource === true
+    const rest = { ...args }
+    delete rest.includeSource
+    if (includeSource) return { name: 'codegraph_explore', arguments: rest }
+    const search: Record<string, unknown> = { query: rest.query, limit: 10 }
+    if (typeof rest.projectPath === 'string') search.projectPath = rest.projectPath
+    return { name: 'codegraph_search', arguments: search }
+  }
+  if (name === 'codegraph_node') {
+    return {
+      name,
+      arguments: { ...args, includeCode: args.includeCode === true }
+    }
+  }
+  return { name, arguments: args }
+}
+
+/** WarpGrep runs inside the gateway: no upstream process, one tool, hosted search. */
+class WarpGrepGateway {
+  private client: WarpGrep
+  private failure: string | undefined
+
+  constructor(readonly target: EngineTarget) {
+    this.client = new WarpGrep(target.cwd, target.apiKey ?? '')
+  }
+
+  get error(): string | undefined {
+    return this.failure
+  }
+
+  async handle(message: Record<string, unknown>): Promise<unknown> {
+    const method = typeof message.method === 'string' ? message.method : ''
+    const params = (message.params ?? {}) as Record<string, unknown>
+    switch (method) {
+      case 'initialize':
+        return {
+          protocolVersion: PROTOCOL_VERSION,
+          capabilities: { tools: { listChanged: false } },
+          serverInfo: { name: 'agent-desktop-warpgrep', version: '0.3.0' },
+          instructions:
+            'WarpGrep gateway: natural-language code search over this project. File excerpts read ' +
+            'during a search are sent to the Morph API.'
+        }
+      case 'ping':
+        return {}
+      case 'tools/list':
+        return { tools: [WARPGREP_TOOL] }
+      case 'tools/call': {
+        if (params.name !== WARPGREP_TOOL.name) {
+          throw Object.assign(new Error(`unknown tool: ${String(params.name)}`), { code: -32602 })
+        }
+        const args = (params.arguments ?? {}) as Record<string, unknown>
+        const query = typeof args.search_string === 'string' ? args.search_string.trim() : ''
+        if (!query) {
+          throw Object.assign(new Error('search_string 不能为空'), { code: -32602 })
+        }
+        const budget = Math.min(Math.max(Number(args.maxChars ?? 12000) || 12000, 1000), 48000)
+        try {
+          const result = await this.client.search(query)
+          this.failure = undefined
+          const sections: string[] = []
+          if (result.files) sections.push(result.files)
+          else if (result.answer) sections.push(result.answer)
+          if (args.includeSource === true && result.files) {
+            const source = await this.client.sources(result.files, budget)
+            if (source) sections.push(source)
+          }
+          const text = sections.join('\n\n') || 'No results.'
+          return {
+            content: [{ type: 'text', text: text.slice(0, budget) }],
+            structuredContent: { files: result.files, answer: result.answer }
+          }
+        } catch (error) {
+          const messageText =
+            error instanceof WarpGrepError
+              ? `${error.code}: ${error.message}`
+              : error instanceof Error
+                ? error.message
+                : String(error)
+          this.failure = messageText.slice(0, 300)
+          throw Object.assign(new Error(messageText), { code: -32603 })
+        }
+      }
+      case 'resources/list':
+        return { resources: [] }
+      case 'resources/templates/list':
+        return { resourceTemplates: [] }
+      case 'prompts/list':
+        return { prompts: [] }
+      default:
+        throw Object.assign(new Error(`method not supported: ${method}`), { code: -32603 })
+    }
+  }
+
+  cancel(): void {
+    // Hosted search is short-lived; there is nothing to cancel upstream.
+  }
+
+  stop(): void {
+    this.failure = undefined
+  }
+}
+
+interface Gateway {
+  readonly target: EngineTarget
+  readonly error: string | undefined
+  handle(message: Record<string, unknown>): Promise<unknown>
+  cancel(requestId: string): void
+  stop(): void
+}
+
+const gateways = new Map<McpEngineId, Gateway>()
+
+function createGateway(target: EngineTarget): Gateway {
+  return target.kind === 'warpgrep' ? new WarpGrepGateway(target) : new EngineGateway(target)
+}
 
 /** Point the endpoints at the engines for the current session directory. */
 export function configure(targets: EngineTarget[]): void {
@@ -281,12 +442,14 @@ export function configure(targets: EngineTarget[]): void {
     const existing = gateways.get(target.id)
     const same =
       existing &&
+      existing.target.kind === target.kind &&
       existing.target.command === target.command &&
       existing.target.cwd === target.cwd &&
-      existing.target.args.join('\u0000') === target.args.join('\u0000')
+      existing.target.apiKey === target.apiKey &&
+      (existing.target.args ?? []).join('\u0000') === (target.args ?? []).join('\u0000')
     if (same) continue
     existing?.stop()
-    gateways.set(target.id, new EngineGateway(target))
+    gateways.set(target.id, createGateway(target))
   }
 }
 
