@@ -3,12 +3,15 @@ import type { ModelOption, PiStatus } from '@shared/types'
 import {
   CheckIcon,
   ChevronIcon,
+  CloseIcon,
   FolderIcon,
+  PencilIcon,
   SearchIcon,
   SendIcon,
   StopIcon
 } from './Icons'
 import { DraftImageStrip, ImageLightbox } from './ImageLightbox'
+import type { QueuedMessage } from '../App'
 import { blobToDraftImage, clipboardImages, imageSrc, type DraftImage } from '../lib/images'
 
 function contextLabel(value?: number): string {
@@ -35,6 +38,10 @@ export function Composer({
   onChange,
   images,
   onImagesChange,
+  queued,
+  onQueueRemove,
+  onQueueEdit,
+  onQueueSteer,
   onNotice,
   onSend,
   onStop,
@@ -47,8 +54,12 @@ export function Composer({
   onChange: (value: string) => void
   images: DraftImage[]
   onImagesChange: (images: DraftImage[]) => void
+  queued: QueuedMessage[]
+  onQueueRemove: (id: string) => void
+  onQueueEdit: (id: string) => void
+  onQueueSteer: (id: string) => void
   onNotice?: (message: string) => void
-  onSend: (mode: 'send' | 'queue') => void
+  onSend: (mode: 'send' | 'steer') => void
   onStop: () => void
   streaming: boolean
   disabled: boolean
@@ -317,13 +328,41 @@ export function Composer({
           handleFiles(files)
         }}
       >
+        {queued.length > 0 && (
+          <div className="queue-panel">
+            <div className="queue-head">
+              <span className="queue-count">{queued.length} 条排队消息</span>
+              <span className="queue-hint">当前回复结束后自动发送</span>
+            </div>
+            {queued.map((item) => (
+              <div className="queue-item" key={item.id}>
+                <span className="queue-text" title={item.text}>
+                  {item.text || `${item.images.length} 张图片`}
+                </span>
+                <button className="queue-btn" title="编辑" onClick={() => onQueueEdit(item.id)}>
+                  <PencilIcon size={11} />
+                </button>
+                <button className="queue-btn" title="删除" onClick={() => onQueueRemove(item.id)}>
+                  <CloseIcon size={11} />
+                </button>
+                <button
+                  className="queue-btn"
+                  title="立即发送（打断当前回合）"
+                  onClick={() => onQueueSteer(item.id)}
+                >
+                  <SendIcon size={11} />
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
         <DraftImageStrip images={images} onRemove={removeImage} onPreview={setPreview} />
         <textarea
           ref={ref}
           value={value}
           rows={1}
           spellCheck={false}
-          placeholder={streaming ? '继续输入，Enter 插入当前回合，Ctrl+Enter 排到结束后' : '给 pi 发消息…（可直接粘贴图片）'}
+          placeholder={streaming ? '继续输入，Enter 排队，Ctrl+Enter 强制引导' : '给 pi 发消息…（可直接粘贴图片）'}
           onChange={(event) => {
             const next = event.target.value
             onChange(next)
@@ -337,7 +376,7 @@ export function Composer({
             if (event.shiftKey) return
             event.preventDefault()
             if (event.ctrlKey || event.metaKey) {
-              onSend('queue')
+              onSend('steer')
             } else {
               onSend('send')
             }
@@ -519,7 +558,9 @@ export function Composer({
         </div>
       </div>
       <div className="composer-hint">
-        Enter 发送 · Shift+Enter 换行 · Ctrl+Enter {streaming ? '排到结束后' : '排队发送'} · 粘贴或拖入图片
+        {streaming
+          ? 'Enter 排队 · Shift+Enter 换行 · Ctrl+Enter 强制引导（打断当前回合） · 粘贴或拖入图片'
+          : 'Enter 发送 · Shift+Enter 换行 · Ctrl+Enter 发送 · 粘贴或拖入图片'}
       </div>
 
       {preview && (

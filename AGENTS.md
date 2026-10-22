@@ -67,10 +67,16 @@ npm run typecheck    # node + web 两个 tsconfig 分别检查
 ## Composer & images
 
 - 图片走 pi 原生能力：RPC `prompt` / `steer` 的 `images` 字段，元素是 `{type:'image', data: base64, mimeType}`；pi 会把它们写进会话 JSONL 的 image content block，`get_messages` 也返回同样的块。
-- 渲染层 `lib/images.ts` 负责 File → base64（`blobToDraftImage`，上限 8MB）、`clipboardImages`（读 `clipboardData.items`）、`renumberInlineMarkers`（删图后重排文本里的 `[图片N]` 标记）。
-- 粘贴/拖入规则：光标在 **0** 时图片进入「前导区」，在输入框**上方**统一展示（`DraftImageStrip placement="leading"`，无文本标记）；光标在中间时在插入点写入 `[图片N]` 标记，图片在输入框下方以 chip 展示（`placement="inline"`）。编号按附件在数组中的顺序（1 开始），发送时 `images` 按同一顺序传给 pi，所以标记和图片能对上。
+- 渲染层 `lib/images.ts` 负责 File → base64（`blobToDraftImage`，上限 8MB）和 `clipboardImages`（读 `clipboardData.items`）。**图片是纯附件**：不写文件名、不插入 `[图片N]` 标记，统一在输入框上方以 42×42 圆角方块展示（`object-fit: cover`，不同长宽比也对齐），悬停才出现删除按钮；发送时按数组顺序传给 pi。
 - 点任意缩略图打开 `ImageLightbox`（Esc / 点背景关闭）；会话里用户消息用 `MessageImages` 渲染，图片在气泡**上方**右对齐（`.message.user` 是 column + align-items flex-end）。
 - 允许只发图片不发文字：`prompt` 的 `message` 传空串，pi 接受（实测模型能收到图）。
+
+## 消息队列
+
+- 运行中（`status.isStreaming`）发消息**默认进队列**，不再直接 `steer`：队列在渲染层（`App.tsx` 的 `queued`），输入框上方显示「N 条排队消息」，每条可编辑（放回输入框）、删除、立即发送。
+- 「立即发送」和 `Ctrl+Enter` 是**强制引导**：走 `prompt(text, 'steer')` 注入当前回合，不等待本轮结束。
+- 回合结束后自动按顺序发送队列里的下一条。**flush 的 effect 只能依赖 `status.isStreaming` / `status.phase`，不能依赖 `queued`**——否则加入第二条时会和第一条抢跑（`isStreaming` 还没变 true 就再发一次），实测第二条会被 pi 拒绝并丢失。
+- 发送失败时把该条放回队首并提示，避免静默丢消息。
 
 ## Updates & packaging
 

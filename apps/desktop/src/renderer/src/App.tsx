@@ -9,6 +9,12 @@ import { SettingsModal } from './components/SettingsModal'
 import { SessionNavigator } from './components/SessionNavigator'
 import { AskQuestionPanel } from './components/AskQuestionPanel'
 import type { DraftImage } from './lib/images'
+
+export interface QueuedMessage {
+  id: string
+  text: string
+  images: DraftImage[]
+}
 import { updateStatusText } from './lib/updates'
 import {
   imagesFromBlocks,
@@ -100,6 +106,12 @@ export default function App(): React.JSX.Element {
   const [items, setItems] = useState<ChatItem[]>([])
   const [draft, setDraft] = useState('')
   const [draftImages, setDraftImages] = useState<DraftImage[]>([])
+  // Messages written while a run is streaming: they wait here and are sent when it settles.
+  const [queued, setQueued] = useState<QueuedMessage[]>([])
+  const queueRef = useRef<QueuedMessage[]>([])
+  useEffect(() => {
+    queueRef.current = queued
+  }, [queued])
   const [run, setRun] = useState<{
     startedAt?: number
     endedAt?: number
@@ -441,19 +453,8 @@ export default function App(): React.JSX.Element {
       }
     : undefined
 
-  const send = useCallback(
-    async (mode: 'send' | 'queue') => {
-      const text = draft.trim()
-      if (!text && draftImages.length === 0) return
-      const streaming = statusRef.current.isStreaming
-      const behavior = streaming ? (mode === 'queue' ? 'followUp' : 'steer') : undefined
-      const images = draftImages.map((image) => ({
-        type: 'image' as const,
-        data: image.data,
-        mimeType: image.mimeType
-      }))
-      setDraft('')
-      setDraftImages([])
+  const deliver = useCallback(
+    async (text: string, images: DraftImage[], behavior?: 'steer' | 'followUp'): Promise<boolean> => {
       setStick(true)
       const localId = `local-${Date.now()}`
       setItems((prev) => [
@@ -462,24 +463,77 @@ export default function App(): React.JSX.Element {
           id: localId,
           role: 'user',
           text,
-          images: draftImages.map((image) => ({
-            data: image.data,
-            mimeType: image.mimeType
-          })),
+          images: images.map((image) => ({ data: image.data, mimeType: image.mimeType })),
           toolCalls: [],
           pending: true
         }
       ])
-      const result = await window.pi.prompt(text, behavior, images)
+      const result = await window.pi.prompt(
+        text,
+        behavior,
+        images.map((image) => ({
+          type: 'image' as const,
+          data: image.data,
+          mimeType: image.mimeType
+        }))
+      )
       if (!result.ok) {
         setItems((prev) => prev.filter((item) => item.id !== localId))
         setDraft(text)
-        setDraftImages(draftImages)
+        setDraftImages(images)
         setToast(result.error ?? '发送失败')
+        return false
       }
+      return true
     },
-    [draft, draftImages]
+    []
   )
+
+  /**
+   * While a run is streaming, a new message queues instead of interrupting it. Ctrl+Enter, or the
+   * send button on a queued item, forces it into the current turn with `steer`.
+   */
+  const send = useCallback(
+    async (mode: 'send' | 'steer') => {
+      const text = draft.trim()
+      if (!text && draftImages.length === 0) return
+      const streaming = statusRef.current.isStreaming
+      if (streaming && mode === 'send') {
+        setQueued((prev) => [
+          ...prev,
+          {
+            id: `q-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+            text,
+            images: draftImages
+          }
+        ])
+        setDraft('')
+        setDraftImages([])
+        return
+      }
+      setDraft('')
+      setDraftImages([])
+      await deliver(text, draftImages, streaming ? 'steer' : undefined)
+    },
+    [draft, draftImages, deliver]
+  )
+
+  /**
+   * Send the next queued message when a run settles.
+   *
+   * Deliberately depends on the run status only: adding an item must not trigger a send, otherwise
+   * the second item races the first one into pi while `isStreaming` is still false.
+   */
+  useEffect(() => {
+    if (status.isStreaming || status.phase !== 'ready') return
+    const next = queueRef.current[0]
+    if (!next) return
+    setQueued((prev) => prev.filter((item) => item.id !== next.id))
+    void deliver(next.text, next.images).then((ok) => {
+      if (ok) return
+      setQueued((prev) => (prev.some((item) => item.id === next.id) ? prev : [next, ...prev]))
+    })
+  }, [status.isStreaming, status.phase, deliver])
 
   const newSession = useCallback(async () => {
     const result = await window.pi.newSession()
@@ -747,6 +801,21 @@ export default function App(): React.JSX.Element {
           onChange={setDraft}
           images={draftImages}
           onImagesChange={setDraftImages}
+          queued={queued}
+          onQueueRemove={(id) => setQueued((prev) => prev.filter((item) => item.id !== id))}
+          onQueueEdit={(id) => {
+            const target = queued.find((item) => item.id === id)
+            if (!target) return
+            setQueued((prev) => prev.filter((item) => item.id !== id))
+            setDraft(target.text)
+            setDraftImages(target.images)
+          }}
+          onQueueSteer={(id) => {
+            const target = queued.find((item) => item.id === id)
+            if (!target) return
+            setQueued((prev) => prev.filter((item) => item.id !== id))
+            void deliver(target.text, target.images, 'steer')
+          }}
           onNotice={setToast}
           onSend={(mode) => void send(mode)}
           onStop={() => void window.pi.abort()}
