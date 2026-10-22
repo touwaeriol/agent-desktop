@@ -18,6 +18,7 @@ import type {
   LoginMessage,
   McpEngineId,
   McpEngineState,
+  McpServerInfo,
   McpState,
   McpToolInfo,
   PiModel,
@@ -271,8 +272,9 @@ async function buildMcpState(): Promise<McpState> {
     else servers.push(entry)
   }
   const available = desktopToolAvailable()
+  const builtin: McpServerInfo[] = []
   if (settings.enabled && settings.desktopTool && available) {
-    servers.unshift({
+    builtin.push({
       name: 'desktop',
       transport: 'stdio',
       summary: 'Agent Desktop 内置：ask_user_question',
@@ -298,6 +300,22 @@ async function buildMcpState(): Promise<McpState> {
       lsp: gateway.gatewayError('lsp')
     }
   })
+  const baseUrl = bridge.getBridgeUrl()
+  for (const engine of engineStates) {
+    if (!settings.enabled || !engine.enabled || !engine.available) continue
+    const direct = engine.tools.filter((tool) => tool.enabled && tool.direct).length
+    builtin.push({
+      name: engine.id,
+      transport: 'http',
+      summary: `${baseUrl}/mcp/${engine.id}`,
+      enabled: true,
+      exposure: 'deferred',
+      description: `经网关转发 · ${engine.tools.length} 个工具（${direct} 个直接声明，其余按需加载）`,
+      source: 'extension',
+      builtin: true
+    })
+  }
+  servers.unshift(...builtin)
   return {
     enabled: settings.enabled,
     desktopTool: settings.desktopTool,

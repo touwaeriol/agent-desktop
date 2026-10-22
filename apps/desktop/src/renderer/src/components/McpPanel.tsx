@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import type { McpEngineId, McpEngineState, McpState, McpToolInfo } from '@shared/types'
 import {
+  ChevronIcon,
   CloseIcon,
   FolderIcon,
   PlusIcon,
@@ -48,42 +49,69 @@ function Toggle({
   )
 }
 
-function ToolSwitches({
+function ToolSection({
   server,
   tools,
   busy,
+  open,
+  onOpenChange,
   onToggle
 }: {
   server: string
   tools: McpToolInfo[]
   busy: boolean
+  open: boolean
+  onOpenChange: (open: boolean) => void
   onToggle: (server: string, tool: string, enabled: boolean) => void
 }): React.JSX.Element {
-  if (tools.length === 0) {
-    return (
-      <div className="mcp-tools-empty">
-        工具列表会在服务器首次连接后自动发现；也可以先发一条消息再回来查看。
-      </div>
-    )
-  }
+  const direct = tools.filter((tool) => tool.enabled && (tool.direct || tool.exposure === 'direct')).length
+  const off = tools.filter((tool) => !tool.enabled).length
   return (
-    <div className="mcp-tools">
-      {tools.map((tool) => {
-        const direct = tool.direct === true || tool.exposure === 'direct'
-        return (
-          <label key={`${server}-${tool.name}`} className={`mcp-tool ${tool.enabled ? '' : 'off'}`}>
-            <Toggle
-              checked={tool.enabled}
-              disabled={busy}
-              onChange={(value) => onToggle(server, tool.name, value)}
-            />
-            <code>{tool.name}</code>
-            <span className={`badge ${tool.enabled && direct ? 'ok' : ''}`}>
-              {tool.enabled ? (direct ? '直接声明' : '按需加载') : '已关闭'}
-            </span>
-          </label>
-        )
-      })}
+    <div className="mcp-tools-block">
+      <button
+        className={`mcp-tools-head ${open ? 'open' : ''}`}
+        onClick={() => onOpenChange(!open)}
+        aria-expanded={open}
+      >
+        <ChevronIcon size={11} />
+        <span>工具</span>
+        {tools.length > 0 ? (
+          <span className="mcp-tools-count">
+            {tools.length} 个 · {direct} 直接声明
+            {off > 0 ? ` · ${off} 已关闭` : ''}
+          </span>
+        ) : (
+          <span className="mcp-tools-count">连接后自动发现</span>
+        )}
+      </button>
+      {open &&
+        (tools.length === 0 ? (
+          <div className="mcp-tools-empty">
+            工具列表会在服务器首次连接后自动发现；也可以先发一条消息再回来查看。
+          </div>
+        ) : (
+          <div className="mcp-tools">
+            {tools.map((tool) => {
+              const isDirect = tool.direct === true || tool.exposure === 'direct'
+              return (
+                <label
+                  key={`${server}-${tool.name}`}
+                  className={`mcp-tool ${tool.enabled ? '' : 'off'}`}
+                >
+                  <Toggle
+                    checked={tool.enabled}
+                    disabled={busy}
+                    onChange={(value) => onToggle(server, tool.name, value)}
+                  />
+                  <code>{tool.name}</code>
+                  <span className={`badge ${tool.enabled && isDirect ? 'ok' : ''}`}>
+                    {tool.enabled ? (isDirect ? '直接声明' : '按需加载') : '已关闭'}
+                  </span>
+                </label>
+              )
+            })}
+          </div>
+        ))}
     </div>
   )
 }
@@ -91,6 +119,8 @@ function ToolSwitches({
 function EngineCard({
   engine,
   busy,
+  toolsOpen,
+  onToolsOpenChange,
   onToggle,
   onPickEntry,
   onClearEntry,
@@ -99,6 +129,8 @@ function EngineCard({
 }: {
   engine: McpEngineState
   busy: boolean
+  toolsOpen: boolean
+  onToolsOpenChange: (open: boolean) => void
   onToggle: (id: McpEngineId, enabled: boolean) => void
   onPickEntry: (id: McpEngineId) => void
   onClearEntry: (id: McpEngineId) => void
@@ -180,10 +212,12 @@ function EngineCard({
         )}
       </div>
       {engine.enabled && (
-        <ToolSwitches
+        <ToolSection
           server={engine.id}
           tools={engine.tools}
           busy={busy}
+          open={toolsOpen}
+          onOpenChange={onToolsOpenChange}
           onToggle={onToggleTool}
         />
       )}
@@ -205,6 +239,11 @@ export function McpPanel({
   const [name, setName] = useState('')
   const [json, setJson] = useState(TEMPLATE_STDIO)
   const [confirmRemove, setConfirmRemove] = useState<string>()
+  const [openTools, setOpenTools] = useState<Record<string, boolean>>({})
+
+  const setToolsOpen = useCallback((server: string, open: boolean) => {
+    setOpenTools((current) => ({ ...current, [server]: open }))
+  }, [])
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -357,10 +396,12 @@ export function McpPanel({
           />
         </div>
         {state?.desktopTool && (
-          <ToolSwitches
+          <ToolSection
             server="desktop"
             tools={state.desktopTools}
             busy={busy}
+            open={openTools.desktop === true}
+            onOpenChange={(open) => setToolsOpen('desktop', open)}
             onToggle={toggleTool}
           />
         )}
@@ -370,6 +411,8 @@ export function McpPanel({
             key={engine.id}
             engine={engine}
             busy={busy}
+            toolsOpen={openTools[engine.id] === true}
+            onToolsOpenChange={(open) => setToolsOpen(engine.id, open)}
             onToggle={(id, enabled) =>
               void run(
                 () => window.pi.setMcpEngineEnabled(id, enabled),
