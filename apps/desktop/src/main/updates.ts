@@ -1,5 +1,6 @@
 import { app } from 'electron'
 import { promises as fs } from 'node:fs'
+import { readFileSync } from 'node:fs'
 import path from 'node:path'
 import { autoUpdater, CancellationToken } from 'electron-updater'
 import type { AppUpdateSnapshot } from '../shared/types'
@@ -232,9 +233,39 @@ function schedule(): void {
   }, CHECK_INTERVAL)
 }
 
+/**
+ * The running app version.
+ *
+ * `app.getVersion()` reports Electron's own version when the app is launched as `electron <file>`
+ * (the dev flow), which made Settings claim "45.0.0 · 已是 最新版本". In dev we read the workspace
+ * package.json instead, so the update check compares the real version.
+ */
+function appVersion(): string {
+  if (app.isPackaged) return app.getVersion()
+  // Walk up from the bundle directory: `out/main` -> `apps/desktop` -> repo root.
+  let dir = app.getAppPath()
+  for (let depth = 0; depth < 6; depth += 1) {
+    try {
+      const parsed = JSON.parse(readFileSync(path.join(dir, 'package.json'), 'utf8')) as {
+        name?: string
+        version?: string
+      }
+      if (typeof parsed.version === 'string' && /desktop/i.test(parsed.name ?? '')) {
+        return parsed.version
+      }
+    } catch {
+      // keep walking
+    }
+    const parent = path.dirname(dir)
+    if (parent === dir) break
+    dir = parent
+  }
+  return app.getVersion()
+}
+
 export function setupUpdates(send: (next: AppUpdateSnapshot) => void): void {
   sender = send
-  snapshot.currentVersion = app.getVersion()
+  snapshot.currentVersion = appVersion()
   snapshot.canInstall = app.isPackaged
   autoUpdater.autoDownload = false
   autoUpdater.autoInstallOnAppQuit = true
