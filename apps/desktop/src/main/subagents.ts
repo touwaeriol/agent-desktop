@@ -341,9 +341,16 @@ export class SubagentManager {
     const started = Date.now()
     while (Date.now() - started < READY_TIMEOUT_MS) {
       try {
-        const state = await rpc.request<{ data?: { sessionFile?: string } }>('get_state', {}, 3000)
+        const state = await rpc.request<{
+          data?: { sessionFile?: string; model?: { provider?: string; id?: string } }
+        }>('get_state', {}, 3000)
         const file = state.data?.sessionFile
         if (typeof file === 'string') internal.record.sessionFile = file
+        // Record what pi actually loaded: with no explicit model this is the inherited one.
+        const actual = state.data?.model
+        if (actual && typeof actual.provider === 'string' && typeof actual.id === 'string') {
+          internal.record.model = { provider: actual.provider, id: actual.id }
+        }
         return
       } catch {
         await new Promise((resolve) => setTimeout(resolve, 250))

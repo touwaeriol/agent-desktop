@@ -25,6 +25,11 @@ export interface ApiDeps {
   desktopTools: () => boolean
   /** Session file of the main conversation, so a subagent can be traced back to it. */
   parentSession?: () => string | undefined
+  /** Check a requested provider/model against the catalog before starting a run. */
+  resolveModel?: (
+    provider: string | undefined,
+    id: string | undefined
+  ) => Promise<{ model?: { provider: string; id: string }; error?: { code: string; message: string } }>
 }
 
 const SUBAGENT_ID = /^\/subagents\/([^/]+)(?:\/([a-z]+))?$/
@@ -99,13 +104,21 @@ export function createApiHandler(deps: ApiDeps): (request: ApiRequest) => Promis
       }
       const task = typeof body.task === 'string' ? body.task.trim() : ''
       if (!task) return fail(400, 'BAD_TASK', 'task 不能为空')
+      const requestedProvider = typeof body.provider === 'string' ? body.provider : undefined
+      const requestedModel = typeof body.model === 'string' ? body.model : undefined
+      let resolvedModel: { provider: string; id: string } | undefined
+      if (requestedProvider || requestedModel) {
+        const resolution = (await deps.resolveModel?.(requestedProvider, requestedModel)) ?? {}
+        if (resolution.error) return fail(400, resolution.error.code, resolution.error.message)
+        resolvedModel = resolution.model
+      }
       try {
         const result = await manager.start({
           task,
           preset,
           mode: (body.mode as 'sync' | 'background' | undefined) ?? undefined,
-          provider: typeof body.provider === 'string' ? body.provider : undefined,
-          model: typeof body.model === 'string' ? body.model : undefined,
+          provider: resolvedModel?.provider,
+          model: resolvedModel?.id,
           thinking: typeof body.thinking === 'string' ? body.thinking : undefined,
           tools: Array.isArray(body.tools) ? body.tools.map(String) : undefined,
           cwd: typeof body.cwd === 'string' ? body.cwd : undefined,

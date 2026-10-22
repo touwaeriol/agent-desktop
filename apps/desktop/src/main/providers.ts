@@ -470,8 +470,7 @@ export async function setProviderModels(
 
 export async function listModelChoices(
   options: { includeUnconfigured?: boolean } = {}
-): Promise<ModelChoice[]> {
-  const runtime = await getRuntime()
+): Promise<ModelChoice[]> {  const runtime = await getRuntime()
   const providers = new Map(runtime.getProviders().map((provider) => [provider.id, provider]))
   const configured = await configuredProviderIds(runtime)
   const patterns = readEnabledModels(await readRawSettings())
@@ -494,4 +493,81 @@ export async function listModelChoices(
     })
   choicesCache = { key: cacheKey, data }
   return data
+}
+
+export interface ModelResolution {
+  model?: { provider: string; id: string }
+  error?: { code: string; message: string }
+}
+
+/**
+ * Resolve a `provider` / `model` pair requested by a caller (the subagent tools).
+ *
+ * pi happily accepts an unknown model id and then produces an empty answer, so a typo would look
+ * like a successful run with no output. The catalog is checked here instead: it includes custom
+ * `models.json` entries, and the allowlist does not apply — pi can run any catalog model.
+ */
+export async function resolveModelChoice(
+  provider: string | undefined,
+  id: string | undefined
+): Promise<ModelResolution> {
+  if (!id && !provider) return {}
+  const runtime = await getRuntime()
+  const configured = await configuredProviderIds(runtime)
+  const models = runtime.getModels()
+  const providerIds = runtime.getProviders().map((entry) => entry.id)
+
+  if (provider && !providerIds.includes(provider)) {
+    return {
+      error: {
+        code: 'UNKNOWN_PROVIDER',
+        message: `未知服务商 ${provider}。可用：${providerIds.slice(0, 10).join(', ')}`
+      }
+    }
+  }
+
+  if (provider) {
+    const candidates = models.filter((model) => model.provider === provider)
+    if (id && !candidates.some((model) => model.id === id)) {
+      return {
+        error: {
+          code: 'UNKNOWN_MODEL',
+          message: `${provider} 下没有模型 ${id}。可用：${candidates.slice(0, 8).map((model) => model.id).join(', ')}`
+        }
+      }
+    }
+    if (!configured.has(provider)) {
+      return {
+        error: {
+          code: 'PROVIDER_NOT_CONFIGURED',
+          message: `${provider} 还没有配置凭据，先在 设置 → 服务商 登录或填 API key`
+        }
+      }
+    }
+    return { model: { provider, id: id as string } }
+  }
+
+  const matches = models.filter((model) => model.id === id)
+  const usable = matches.filter((model) => configured.has(model.provider))
+  if (usable.length === 1) return { model: { provider: usable[0].provider, id: id as string } }
+  if (usable.length > 1) {
+    return {
+      error: {
+        code: 'AMBIGUOUS_MODEL',
+        message: `模型 ${id} 在多个服务商下存在，请同时指定 provider：${usable
+          .map((model) => model.provider)
+          .join(', ')}`
+      }
+    }
+  }
+  const near = models
+    .filter((model) => model.id.includes(id as string))
+    .slice(0, 8)
+    .map((model) => `${model.provider}/${model.id}`)
+  return {
+    error: {
+      code: 'UNKNOWN_MODEL',
+      message: `找不到模型 ${id}${near.length > 0 ? `。相近：${near.join(', ')}` : ''}。用 list_models 查看可用模型`
+    }
+  }
 }

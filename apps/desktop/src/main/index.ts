@@ -1422,7 +1422,8 @@ app.whenReady().then(async () => {
       listModels: (options) => providers.listModelChoices({ includeUnconfigured: !options.configuredOnly }),
       defaultMode: () => subagentConfig().defaultMode,
       desktopTools: () => subagentConfig().desktopTools,
-      parentSession: () => status.sessionFile
+      parentSession: () => status.sessionFile,
+      resolveModel: (provider, id) => providers.resolveModelChoice(provider, id)
     })
   )
   createWindow()

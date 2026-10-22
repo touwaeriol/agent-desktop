@@ -152,6 +152,8 @@ npm run typecheck    # node + web 两个 tsconfig 分别检查
 - `<agents>` 段由主进程渲染后经 `AGENT_DESKTOP_AGENTS_SECTION` 传给扩展，扩展在 `before_agent_start` 里注入 `sections.subagents`，**门控**：`pi.getActiveTools()` 里有 `mcp__desktop__start_subagent` 才注入，否则删除。
 - 桥内部 API（JSON，给 mcp-core 用）：`GET /agents`、`GET /models`、`POST /subagents`、`GET /subagents/:id`、`POST /subagents/:id/{prompt,stop,wait}`、`GET /subagents/:id/changes`。令牌沿用桥的 Bearer。
 - **子代理结束怎么通知父代理**：工具调用返回后无法再回调，所以走"主进程 → 桥事件 → 父进程内的扩展"这条线。`SubagentManager` 的 `onSettle` 把一条三行通知交给 `bridge.publishEvent()`；扩展（`desktop-mcp.js` 的 `pumpEvents`）长轮询 `GET /events?wait=25000`（Bearer 令牌，最长等 60s，队列上限 20 条、10 分钟过期），收到后 `pi.sendMessage({ customType: 'subagent_notice' }, { triggerTurn })`。
+- 子代理的模型：`start_subagent` 的 `provider`/`model` 先经 `providers.resolveModelChoice()` 校验（`getModels()` 全量目录，**不受 `enabledModels` 白名单影响**，包含 models.json 自定义项）。pi 对未知模型 id 不会报错，只会跑出空结论，所以必须在启动前拦：`UNKNOWN_PROVIDER` / `UNKNOWN_MODEL`（附可用 id）/ `PROVIDER_NOT_CONFIGURED` / `AMBIGUOUS_MODEL`（只给 model 且多服务商都有）。只给 `model` 且唯一时可自动定位 provider。`thinking` 走 `--model <id>:<level>`，实测 `deepseek-v4-pro:high` 生效。
+- 记录里的 `model` 以子进程 `get_state` 返回的**实际模型**为准（`waitReady` 时抓取），所以"继承主会话"也能显示真实值，不是猜的。
 - `start_subagent` 的 `notify`：`wake`（background 默认，`triggerTurn: true`：空闲时立刻开一个回合，正在流式则作为 steer 插到当前回合之后）、`queue`（只追加一条 custom 消息，**不会**让父代理动起来，等下个回合才被读到）、`none`（sync 默认，只有 `get_subagent` / `wait_subagent` 能看到）。实测过：`queue` 只产生 `custom:subagent_notice`、`assistants` 不变；`wake` 会多一个 assistant 回合。
 - 用户刚点过「停止」（`pi:abort` 30 秒内）时，`onSettle` 会把 `wake` 降级成 `queue`，否则用户刚停下的会话会被子代理通知重新拉起来。
 - 通知正文用 `<system-reminder source="agent-desktop">` 包起来：pi 把 custom 消息和用户消息**都**转成 `role: "user"` 发给模型（`core/messages.js` 的 `convertToLlm`），不标记的话模型会以为这是用户说的话。pi 自己不解析任何标签，这层纯粹是给模型的约定。

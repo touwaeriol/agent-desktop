@@ -253,8 +253,13 @@ export const startSubagent = {
       task: { type: 'string', description: 'What the subagent should do, in full.' },
       agent: { type: 'string', description: 'Preset id from `search_agents`, e.g. "explorer".' },
       mode: { type: 'string', enum: ['sync', 'background'], description: 'Defaults to the preset value.' },
-      provider: { type: 'string', description: 'Provider id, overrides the preset model.' },
-      model: { type: 'string', description: 'Model id, overrides the preset model.' },
+      provider: { type: 'string', description: 'Provider id from `list_models`, overrides the preset model.' },
+      model: {
+        type: 'string',
+        description:
+          'Model id from `list_models`, overrides the preset model. Works without `provider` when the ' +
+          'id is unique among configured providers; an unknown id is rejected instead of running empty.'
+      },
       thinking: { type: 'string', description: 'Thinking level, e.g. "high".' },
       tools: {
         type: 'array',
