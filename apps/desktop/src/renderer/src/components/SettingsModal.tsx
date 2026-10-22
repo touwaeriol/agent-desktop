@@ -453,6 +453,52 @@ export function SettingsModal({
    * Turn auto-compaction on or off. Enabling also makes the main process write the reserve that
    * puts the trigger at `AUTO_COMPACT_RATIO` of the current model's window, then restart pi.
    */
+  /**
+   * Switch the profile the window reads. Nothing is moved: the other directory simply becomes the
+   * source, and pi is restarted on it.
+   */
+  const changeProfile = useCallback(
+    async (next: 'shared' | 'desktop') => {
+      try {
+        const result = await window.pi.setProfile(next)
+        if (!result.ok) {
+          setError(result.error ?? '切换失败')
+          return
+        }
+        setNotice(
+          next === 'desktop'
+            ? `已切到独立配置：${result.profileDir ?? ''}（需要登录服务商，或从 CLI 导入）`
+            : '已切回 pi CLI 的配置'
+        )
+        await loadSettings()
+        await loadProviders()
+      } catch (cause) {
+        setError(cause instanceof Error ? cause.message : String(cause))
+      }
+    },
+    [loadProviders, loadSettings]
+  )
+
+  /** Copy the CLI's auth/models/settings/mcp into the desktop profile, filling only gaps. */
+  const importCli = useCallback(async () => {
+    try {
+      const result = await window.pi.importCliConfig()
+      if (!result.ok) {
+        setError(result.error ?? '导入失败')
+        return
+      }
+      setNotice(
+        result.copied && result.copied.length > 0
+          ? `已从 CLI 导入：${result.copied.join('、')}`
+          : '没有可导入的文件（已存在的不覆盖）'
+      )
+      await loadSettings()
+      await loadProviders()
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause))
+    }
+  }, [loadProviders, loadSettings])
+
   const toggleAutoCompact = useCallback(
     async (enabled: boolean) => {
       try {
@@ -1075,6 +1121,40 @@ export function SettingsModal({
                 <p className="field-hint">
                   每个会话按所属项目目录运行；在侧栏切换会话时会自动切换 pi 的工作目录。
                 </p>
+              </div>
+
+              <div className="field">
+                <label>配置来源</label>
+                <div className="theme-switch storage-switch">
+                  <button
+                    className={desktopConfig?.profile !== 'desktop' ? 'active' : ''}
+                    onClick={() => void changeProfile('shared')}
+                  >
+                    共用 pi
+                  </button>
+                  <button
+                    className={desktopConfig?.profile === 'desktop' ? 'active' : ''}
+                    onClick={() => void changeProfile('desktop')}
+                  >
+                    独立配置
+                  </button>
+                </div>
+                <p className="field-hint">
+                  共用：<code>{desktopConfig?.cliDir ?? '~/.pi/agent'}</code>
+                  ，与 pi CLI 读写同一份 auth.json / models.json / settings.json / mcp.json。
+                </p>
+                <p className="field-hint">
+                  独立：<code>{desktopConfig?.profileDir ?? '应用数据目录/pi'}</code>
+                  ，桌面端自己的凭据与模型；CLI 里登录、改配置都不会影响它，也不会被它影响。
+                </p>
+                {desktopConfig?.profile === 'desktop' && (
+                  <div className="field-row">
+                    <button className="ghost" onClick={() => void importCli()}>
+                      <RefreshIcon size={12} /> 从 CLI 导入配置
+                    </button>
+                    <span className="field-inline">只补缺失文件，不覆盖已有配置</span>
+                  </div>
+                )}
               </div>
 
               <div className="field">

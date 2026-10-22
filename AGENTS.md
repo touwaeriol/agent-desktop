@@ -124,6 +124,9 @@ npm run typecheck    # node + web 两个 tsconfig 分别检查
 
 ## Sessions & workspace
 
+- **配置来源（profile）**：`config.json.profile` 为 `shared`（默认，读写 pi CLI 的 `~/.pi/agent`）或 `desktop`（`%APPDATA%/agent-desktop/pi`）。`src/main/profile.ts` 是唯一知道路径的模块（`agentDir()/authPath()/modelsPath()/settingsPath()/mcpPath()/profileSessionDir()`），**不要在别处硬编码 `~/.pi/agent`**，否则切换 profile 会有一半代码还在写 CLI 的文件。隔离靠给 pi 子进程设 `PI_CODING_AGENT_DIR`（pi 用它覆盖配置目录），`startPi` 里只在隔离时设置；我们的 `ModelRuntime` 用显式 `authPath/modelsPath`，所以 `applyProfile()` 之后必须 `providers.invalidateCache()`。
+- 隔离 profile 下 session 目录也跟着走（`<profile>/sessions`），`sessionDirArgs()` 两种会话模式都显式传 `--session-dir`，避免隔离时把会话写进 CLI 的目录。
+- 「从 CLI 导入」(`providers.importFromCli`)：`auth.json` 是**合并**（pi 在新目录首次启动会自己建一个空的 `auth.json`，按「文件存在就跳过」会让用户永远没有凭据），其余文件只在目标不存在时复制。导入后 `resetRuntime()` + 重启 pi。
 - 会话默认与 pi 共用 `~/.pi/agent/sessions`；desktop `config.json` 的 `sessionMode` 为 `isolated` 时，启动 pi 会附加 `--session-dir <userData>/sessions`，`listSessions` 也读该目录。两种模式都由 pi 写 JSONL，结构不变，可随时切回共用。
 - 工作目录是**会话级**的：点击其他项目的会话必须走 `pi:open-session`（以该会话 cwd + `--session <path>` 重启 pi），不能只用 `switch_session`，否则工具会在错误目录运行。设置页只读显示当前会话目录，不提供全局工作目录编辑。
 - `config.json` 保存 `{ cwd, sessionMode, mcp }`；`cwd` 只是下次启动/新建会话的默认目录。目录不存在时 `startPi` 会回退到 home，避免 spawn ENOENT。

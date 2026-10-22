@@ -1,9 +1,9 @@
 import { promises as fs } from 'node:fs'
-import os from 'node:os'
 import path from 'node:path'
 import type { SessionSummary } from '../shared/types'
 
-const SESSION_ROOT = path.join(os.homedir(), '.pi', 'agent', 'sessions')
+import { profileSessionDir } from './profile'
+
 const MAX_FILES = 80
 const HEAD_BYTES = 96 * 1024
 async function collectFiles(dir: string, depth: number, out: string[]): Promise<void> {
@@ -92,7 +92,7 @@ async function readSummary(file: string): Promise<SessionSummary | null> {
   }
 }
 
-export async function listSessions(rootDir: string = SESSION_ROOT): Promise<SessionSummary[]> {
+export async function listSessions(rootDir: string = profileSessionDir()): Promise<SessionSummary[]> {
   const files: string[] = []
   await collectFiles(rootDir, 0, files)
   const stats = await Promise.all(

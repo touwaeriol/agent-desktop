@@ -24,6 +24,8 @@ const bridge: PiBridge = {
   getDesktopConfig: () => ipcRenderer.invoke('desktop:config'),
   setSessionMode: (mode: 'shared' | 'isolated') =>
     ipcRenderer.invoke('desktop:set-session-mode', mode) as Promise<PiStatus>,
+  setProfile: (mode: 'shared' | 'desktop') => ipcRenderer.invoke('desktop:set-profile', mode),
+  importCliConfig: () => ipcRenderer.invoke('providers:import-cli'),
   getUpdateSnapshot: () =>
     ipcRenderer.invoke('updates:snapshot') as Promise<AppUpdateSnapshot>,
   checkForUpdates: () => ipcRenderer.invoke('updates:check') as Promise<AppUpdateSnapshot>,

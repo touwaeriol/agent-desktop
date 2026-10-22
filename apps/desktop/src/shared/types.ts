@@ -193,6 +193,12 @@ export interface DesktopConfig {
   sessionDir: string
   sharedSessionDir: string
   isolatedSessionDir: string
+  /** `shared` reads the pi CLI's `~/.pi/agent`; `desktop` keeps its own copy under userData. */
+  profile: 'shared' | 'desktop'
+  /** Where the desktop profile lives (only meaningful when `profile === 'desktop'`). */
+  profileDir: string
+  /** The pi CLI's directory, i.e. the import source. */
+  cliDir: string
 }
 
 export type AppUpdateStatus =
@@ -420,6 +426,20 @@ export interface PiBridge {
   openSession(sessionPath: string, cwd: string): Promise<PiStatus>
   getDesktopConfig(): Promise<DesktopConfig>
   setSessionMode(mode: 'shared' | 'isolated'): Promise<PiStatus>
+  /** Switch between the CLI's pi profile and the desktop's own directory. */
+  setProfile(mode: 'shared' | 'desktop'): Promise<{
+    ok: boolean
+    profile?: 'shared' | 'desktop'
+    profileDir?: string
+    error?: string
+  }>
+  /** Copy the CLI's auth/models/settings/mcp into the desktop profile (never overwrites). */
+  importCliConfig(): Promise<{
+    ok: boolean
+    copied?: string[]
+    skipped?: string[]
+    error?: string
+  }>
   getUpdateSnapshot(): Promise<AppUpdateSnapshot>
   checkForUpdates(): Promise<AppUpdateSnapshot>
   installUpdate(): Promise<AppUpdateSnapshot>

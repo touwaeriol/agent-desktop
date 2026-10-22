@@ -1,6 +1,5 @@
 import { promises as fs } from 'node:fs'
 import { randomUUID } from 'node:crypto'
-import os from 'node:os'
 import path from 'node:path'
 import { shell } from 'electron'
 import type { ModelRuntime } from '@earendil-works/pi-coding-agent'
@@ -16,11 +15,15 @@ import type {
   ProviderInfo,
   ProviderModelOption
 } from '../shared/types'
-
-const AGENT_DIR = path.join(os.homedir(), '.pi', 'agent')
-export const AUTH_PATH = path.join(AGENT_DIR, 'auth.json')
-export const MODELS_PATH = path.join(AGENT_DIR, 'models.json')
-export const SETTINGS_PATH = path.join(AGENT_DIR, 'settings.json')
+import {
+  agentDir,
+  authPath,
+  CLI_AGENT_DIR,
+  isIsolatedProfile,
+  mcpPath,
+  modelsPath,
+  settingsPath
+} from './profile'
 
 const DEFAULT_MODELS_JSON = JSON.stringify(
   {
@@ -56,8 +59,8 @@ export function getRuntime(): Promise<ModelRuntime> {
     const pending = (async () => {
       const sdk = await import('@earendil-works/pi-coding-agent')
       return sdk.ModelRuntime.create({
-        authPath: AUTH_PATH,
-        modelsPath: MODELS_PATH,
+        authPath: authPath(),
+        modelsPath: modelsPath(),
         refreshOnCreate: false
       })
     })()
@@ -245,9 +248,9 @@ export async function logoutProvider(providerId: string): Promise<void> {
 
 export async function getModelsJson(): Promise<ModelsJsonFile> {
   try {
-    return { path: MODELS_PATH, content: await fs.readFile(MODELS_PATH, 'utf8') }
+    return { path: modelsPath(), content: await fs.readFile(modelsPath(), 'utf8') }
   } catch {
-    return { path: MODELS_PATH, content: DEFAULT_MODELS_JSON }
+    return { path: modelsPath(), content: DEFAULT_MODELS_JSON }
   }
 }
 
@@ -261,8 +264,8 @@ export async function saveModelsJson(content: string): Promise<void> {
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
     throw new Error('models.json 顶层必须是 JSON 对象')
   }
-  await fs.mkdir(AGENT_DIR, { recursive: true })
-  await fs.writeFile(MODELS_PATH, `${JSON.stringify(parsed, null, 2)}\n`)
+  await fs.mkdir(agentDir(), { recursive: true })
+  await fs.writeFile(modelsPath(), `${JSON.stringify(parsed, null, 2)}\n`)
   resetRuntime()
 }
 
@@ -279,7 +282,7 @@ type ModelsJsonProviders = Record<string, Record<string, unknown>>
 
 async function readModelsJsonObject(): Promise<Record<string, unknown>> {
   try {
-    const parsed = JSON.parse(await fs.readFile(MODELS_PATH, 'utf8')) as unknown
+    const parsed = JSON.parse(await fs.readFile(modelsPath(), 'utf8')) as unknown
     if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
       return parsed as Record<string, unknown>
     }
@@ -295,8 +298,78 @@ function providersOf(file: Record<string, unknown>): ModelsJsonProviders {
   return { ...(providers as ModelsJsonProviders) }
 }
 
-/** provider id -> configured base URL override (absent when the provider uses its default). */
-export async function getBaseUrlOverrides(): Promise<Record<string, string>> {
+/**
+ * Copy the CLI's config into the desktop profile.
+ *
+ * `auth.json` is **merged**: pi creates an empty one the first time it starts in a new directory,
+ * so "skip if the file exists" would silently leave the user with no credentials. Every other file
+ * is copied only when the target does not exist yet — this bootstraps an isolated profile, it does
+ * not overwrite what the window has changed since.
+ */
+export async function importFromCli(): Promise<{
+  copied: string[]
+  skipped: string[]
+  error?: string
+}> {
+  if (!isIsolatedProfile()) return { copied: [], skipped: [], error: '当前是共用 pi 配置，无需导入' }
+  await fs.mkdir(agentDir(), { recursive: true })
+  const copied: string[] = []
+  const skipped: string[] = []
+
+  // auth.json: provider id -> credential. Add what is missing, keep what the window already has.
+  const cliAuth = await readJsonObject(path.join(CLI_AGENT_DIR, 'auth.json'))
+  if (cliAuth) {
+    const target = (await readJsonObject(authPath())) ?? {}
+    const added = Object.keys(cliAuth).filter((providerId) => !(providerId in target))
+    if (added.length > 0) {
+      for (const providerId of added) target[providerId] = cliAuth[providerId]
+      await fs.writeFile(authPath(), `${JSON.stringify(target, null, 2)}\n`)
+      copied.push(`auth.json（${added.join('、')}）`)
+    } else {
+      skipped.push('auth.json')
+    }
+  } else {
+    skipped.push('auth.json')
+  }
+
+  for (const [name, target] of [
+    ['models.json', modelsPath()],
+    ['settings.json', settingsPath()],
+    ['mcp.json', mcpPath()]
+  ] as Array<[string, string]>) {
+    const exists = await fs.access(target).then(
+      () => true,
+      () => false
+    )
+    if (exists) {
+      skipped.push(name)
+      continue
+    }
+    const content = await fs.readFile(path.join(CLI_AGENT_DIR, name)).catch(() => undefined)
+    if (content === undefined) {
+      skipped.push(name)
+      continue
+    }
+    await fs.writeFile(target, content)
+    copied.push(name)
+  }
+  resetRuntime()
+  return { copied, skipped }
+}
+
+async function readJsonObject(file: string): Promise<Record<string, unknown> | undefined> {
+  try {
+    const parsed = JSON.parse(await fs.readFile(file, 'utf8')) as unknown
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      return parsed as Record<string, unknown>
+    }
+  } catch {
+    // missing or not JSON
+  }
+  return undefined
+}
+
+/** provider id -> configured base URL override (absent when the provider uses its default). */export async function getBaseUrlOverrides(): Promise<Record<string, string>> {
   const providers = providersOf(await readModelsJsonObject())
   const overrides: Record<string, string> = {}
   for (const [id, config] of Object.entries(providers)) {
@@ -320,8 +393,8 @@ export async function setProviderBaseUrl(providerId: string, baseUrl: string | n
   if (Object.keys(current).length === 0) delete providers[providerId]
   else providers[providerId] = current
   file.providers = providers
-  await fs.mkdir(AGENT_DIR, { recursive: true })
-  await fs.writeFile(MODELS_PATH, `${JSON.stringify(file, null, 2)}\n`)
+  await fs.mkdir(agentDir(), { recursive: true })
+  await fs.writeFile(modelsPath(), `${JSON.stringify(file, null, 2)}\n`)
   resetRuntime()
 }
 
@@ -400,7 +473,7 @@ export function isModelEnabled(
 
 async function readRawSettings(): Promise<RawSettings> {
   try {
-    const parsed = JSON.parse(await fs.readFile(SETTINGS_PATH, 'utf8')) as RawSettings
+    const parsed = JSON.parse(await fs.readFile(settingsPath(), 'utf8')) as RawSettings
     return parsed && typeof parsed === 'object' ? parsed : {}
   } catch {
     return {}
@@ -419,8 +492,8 @@ export async function setCompactionSettings(next: {
     compaction.reserveTokens = Math.max(0, Math.round(next.reserveTokens))
   }
   raw.compaction = compaction
-  await fs.mkdir(path.dirname(SETTINGS_PATH), { recursive: true })
-  await fs.writeFile(SETTINGS_PATH, `${JSON.stringify(raw, null, 2)}
+  await fs.mkdir(path.dirname(settingsPath()), { recursive: true })
+  await fs.writeFile(settingsPath(), `${JSON.stringify(raw, null, 2)}
 `, 'utf8')
   invalidateCache()
 }
@@ -435,9 +508,9 @@ export async function getAppSettings(): Promise<AppSettings> {
     defaultThinkingLevel:
       typeof raw.defaultThinkingLevel === 'string' ? raw.defaultThinkingLevel : undefined,
     enabledModels: readEnabledModels(raw),
-    settingsPath: SETTINGS_PATH,
-    modelsPath: MODELS_PATH,
-    authPath: AUTH_PATH,
+    settingsPath: settingsPath(),
+    modelsPath: modelsPath(),
+    authPath: authPath(),
     compaction: {
       enabled: compaction.enabled !== false,
       reserveTokens:
@@ -465,8 +538,8 @@ export async function saveAppSettings(
     if (patch.enabledModels.length === 0) delete raw.enabledModels
     else raw.enabledModels = [...new Set(patch.enabledModels)]
   }
-  await fs.mkdir(AGENT_DIR, { recursive: true })
-  await fs.writeFile(SETTINGS_PATH, `${JSON.stringify(raw, null, 2)}\n`)
+  await fs.mkdir(agentDir(), { recursive: true })
+  await fs.writeFile(settingsPath(), `${JSON.stringify(raw, null, 2)}\n`)
   invalidateCache()
 }
 
@@ -531,8 +604,8 @@ export async function setProviderModels(
     }
     raw.enabledModels = patterns
   }
-  await fs.mkdir(AGENT_DIR, { recursive: true })
-  await fs.writeFile(SETTINGS_PATH, `${JSON.stringify(raw, null, 2)}\n`)
+  await fs.mkdir(agentDir(), { recursive: true })
+  await fs.writeFile(settingsPath(), `${JSON.stringify(raw, null, 2)}\n`)
   invalidateCache()
 }
 

@@ -1,10 +1,14 @@
 import { promises as fs } from 'node:fs'
-import os from 'node:os'
 import path from 'node:path'
 import { shell } from 'electron'
 import type { McpServerInfo } from '../shared/types'
+import { mcpPath } from './profile'
 
-export const USER_MCP_PATH = path.join(os.homedir(), '.pi', 'agent', 'mcp.json')
+/** User-level MCP config of the active profile (CLI or desktop). */
+function userMcpPath(): string {
+  return mcpPath()
+}
+
 const SERVER_NAME = /^[A-Za-z0-9_-]+$/
 
 interface RawMcpConfig {
@@ -60,7 +64,7 @@ function toInfo(name: string, entry: unknown, source: McpServerInfo['source']): 
 }
 
 export async function listUserServers(): Promise<McpServerInfo[]> {
-  const config = await readConfig(USER_MCP_PATH)
+  const config = await readConfig(userMcpPath())
   const servers = config.mcpServers ?? {}
   return Object.entries(servers)
     .map(([name, entry]) => toInfo(name, entry, 'user'))
@@ -78,11 +82,11 @@ export async function listProjectServers(cwd: string): Promise<McpServerInfo[]> 
 async function updateServers(
   mutate: (servers: Record<string, unknown>) => void
 ): Promise<void> {
-  const config = await readConfig(USER_MCP_PATH)
+  const config = await readConfig(userMcpPath())
   const servers = { ...(config.mcpServers ?? {}) }
   mutate(servers)
   config.mcpServers = servers
-  await writeConfig(USER_MCP_PATH, config)
+  await writeConfig(userMcpPath(), config)
 }
 
 export async function setServerEnabled(name: string, enabled: boolean): Promise<void> {
@@ -125,7 +129,7 @@ export async function addServer(name: string, rawJson: string): Promise<void> {
 }
 
 export async function openConfig(cwd: string, which: 'user' | 'project'): Promise<void> {
-  const file = which === 'project' ? projectMcpPath(cwd) : USER_MCP_PATH
+  const file = which === 'project' ? projectMcpPath(cwd) : userMcpPath()
   await fs.mkdir(path.dirname(file), { recursive: true })
   try {
     await fs.access(file)

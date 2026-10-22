@@ -16,6 +16,7 @@ import { SubagentManager, type SubagentRecord } from './subagents'
 import { createApiHandler } from './api'
 import * as bridge from './bridge'
 import { applySystemProxy, getProxyInfo } from './proxy'
+import * as profile from './profile'
 import type {
   AppSettings,
   AskAnswer,
@@ -109,6 +110,8 @@ interface DesktopConfig {
   mcp?: McpConfig
   /** Auto-compaction policy; `ratio` is the fraction of the window that triggers it. */
   autoCompact?: { ratio?: number }
+  /** `shared` uses the pi CLI's `~/.pi/agent`; `desktop` keeps its own copy under userData. */
+  profile?: 'shared' | 'desktop'
 }
 
 let desktopConfig: DesktopConfig = {}
@@ -135,6 +138,23 @@ async function saveConfig(patch: Partial<DesktopConfig>): Promise<void> {
 
 function currentSessionMode(): SessionMode {
   return desktopConfig.sessionMode === 'isolated' ? 'isolated' : 'shared'
+}
+
+/** Where an isolated profile lives: `auth.json`, `models.json`, `settings.json`, `mcp.json`, sessions. */
+function desktopProfileDir(): string {
+  return path.join(app.getPath('userData'), 'pi')
+}
+
+function currentProfile(): 'shared' | 'desktop' {
+  return desktopConfig.profile === 'desktop' ? 'desktop' : 'shared'
+}
+
+/** Point every module at the profile the config asks for. Safe to call more than once. */
+function applyProfile(): void {
+  profile.setAgentDir(
+    currentProfile() === 'desktop' ? desktopProfileDir() : profile.CLI_AGENT_DIR
+  )
+  providers.invalidateCache()
 }
 
 /** Auto-compaction starts at this fraction of the model's context window. */
@@ -174,14 +194,25 @@ async function syncAutoCompact(options: { restart?: boolean } = {}): Promise<num
   return reserve
 }
 
-function currentSessionDir(): string {
-  return currentSessionMode() === 'isolated'
-    ? path.join(app.getPath('userData'), 'sessions')
+/**
+ * Session root for "shared" mode. With an isolated profile pi would put its sessions under the
+ * profile directory anyway, so the window has to follow it instead of pointing at the CLI's.
+ */
+function sharedSessionDir(): string {
+  return profile.isIsolatedProfile()
+    ? profile.profileSessionDir()
     : path.join(os.homedir(), '.pi', 'agent', 'sessions')
 }
 
+function currentSessionDir(): string {
+  return currentSessionMode() === 'isolated'
+    ? path.join(app.getPath('userData'), 'sessions')
+    : sharedSessionDir()
+}
+
 function sessionDirArgs(): string[] {
-  return currentSessionMode() === 'isolated' ? ['--session-dir', currentSessionDir()] : []
+  // Explicit for both modes: an isolated profile must never write into the CLI's session tree.
+  return ['--session-dir', currentSessionDir()]
 }
 
 function mcpSettings(): { enabled: boolean; desktopTool: boolean } {
@@ -642,7 +673,7 @@ async function buildMcpState(): Promise<McpState> {
     },
     morphKeyHint: maskKey(desktopConfig.mcp?.morphApiKey),
     servers,
-    userConfigPath: mcp.USER_MCP_PATH,
+    userConfigPath: profile.mcpPath(),
     projectConfigPath: mcp.projectMcpPath(status.cwd),
     bridge: bridge.getBridgeInfo()
   }
@@ -774,7 +805,11 @@ async function startPi(cwd?: string, extraArgs: string[] = []): Promise<PiStatus
   setStatus({ phase: 'starting', cwd: workspace, error: undefined, stderrTail: undefined })
   try {
     const launch = await mcpLaunch(workspace)
-    rpc.start(workspace, [...extraArgs, ...sessionDirArgs(), ...launch.args], launch.env)
+    // An isolated profile is just this variable: pi then reads auth/models/settings/mcp/sessions
+    // from the desktop directory instead of the CLI's.
+    const env = { ...launch.env }
+    if (profile.isIsolatedProfile()) env.PI_CODING_AGENT_DIR = profile.agentDir()
+    rpc.start(workspace, [...extraArgs, ...sessionDirArgs(), ...launch.args], env)
     const data = await waitForReady()
     status = { phase: 'ready', cwd: workspace }
     applyState(data)
@@ -1047,9 +1082,38 @@ function registerIpc(): void {
     cwd: status.cwd,
     sessionMode: currentSessionMode(),
     sessionDir: currentSessionDir(),
-    sharedSessionDir: path.join(os.homedir(), '.pi', 'agent', 'sessions'),
-    isolatedSessionDir: path.join(app.getPath('userData'), 'sessions')
+    sharedSessionDir: sharedSessionDir(),
+    isolatedSessionDir: path.join(app.getPath('userData'), 'sessions'),
+    profile: currentProfile(),
+    profileDir: desktopProfileDir(),
+    cliDir: profile.CLI_AGENT_DIR
   }))
+
+  /**
+   * Switch between the CLI's profile and the desktop's own.
+   *
+   * Nothing is moved: the window simply starts reading the other directory. Switching to `desktop`
+   * leaves it empty until `providers:import-cli` copies the CLI's files in.
+   */
+  ipcMain.handle('desktop:set-profile', async (_event, next: 'shared' | 'desktop') => {
+    if (btwActive) await closeSideChat()
+    await saveConfig({ profile: next === 'desktop' ? 'desktop' : 'shared' })
+    applyProfile()
+    if (next === 'desktop') await fs.mkdir(profile.agentDir(), { recursive: true })
+    await startPi(status.cwd)
+    return { ok: true, profile: currentProfile(), profileDir: desktopProfileDir() }
+  })
+
+  ipcMain.handle('providers:import-cli', async () => {
+    try {
+      const result = await providers.importFromCli()
+      if (result.error) return { ok: false, error: result.error }
+      await reloadPiConfig()
+      return { ok: true, copied: result.copied, skipped: result.skipped }
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) }
+    }
+  })
 
   ipcMain.handle('updates:snapshot', () => updates.getSnapshot())
   ipcMain.handle('updates:check', () => updates.check())
@@ -1150,7 +1214,7 @@ function registerIpc(): void {
   })
 
   ipcMain.handle('pi:open-agent-dir', async () => {
-    const dir = path.join(os.homedir(), '.pi', 'agent')
+    const dir = profile.agentDir()
     await fs.mkdir(dir, { recursive: true })
     await shell.openPath(dir)
   })
@@ -1795,6 +1859,8 @@ app.whenReady().then(async () => {
   await migrateLegacyUserData()
   await applySystemProxy()
   desktopConfig = await loadConfig()
+  // Before anything reads a provider, model list or MCP config: point the modules at the profile.
+  applyProfile()
   await loadToolCache()
   // Web tools resolve their backend per call, so a model switch or a config edit needs no restart.
   web.configure({
