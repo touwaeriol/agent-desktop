@@ -1,5 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { AppUpdateSnapshot, AskAnswer, AskRequest, PiStatus, SessionSummary } from '@shared/types'
+import type {
+  AppUpdateSnapshot,
+  AskAnswer,
+  AskRequest,
+  McpState,
+  PiStatus,
+  SessionSummary
+} from '@shared/types'
 import { Conversation } from './components/Conversation'
 import { Composer } from './components/Composer'
 import { IconRail } from './components/IconRail'
@@ -8,7 +15,15 @@ import { TabBar } from './components/TabBar'
 import { SettingsModal } from './components/SettingsModal'
 import { SessionNavigator } from './components/SessionNavigator'
 import { AskQuestionPanel } from './components/AskQuestionPanel'
+import { Markdown } from './components/Markdown'
 import type { DraftImage } from './lib/images'
+
+export interface BtwAnswer {
+  question: string
+  answer?: string
+  error?: string
+  loading?: boolean
+}
 
 export interface QueuedMessage {
   id: string
@@ -108,6 +123,9 @@ export default function App(): React.JSX.Element {
   const [draftImages, setDraftImages] = useState<DraftImage[]>([])
   // Messages written while a run is streaming: they wait here and are sent when it settles.
   const [queued, setQueued] = useState<QueuedMessage[]>([])
+  const [btw, setBtw] = useState<BtwAnswer | undefined>(undefined)
+  const [mcpOpen, setMcpOpen] = useState(false)
+  const [mcpState, setMcpState] = useState<McpState | undefined>(undefined)
   const queueRef = useRef<QueuedMessage[]>([])
   useEffect(() => {
     queueRef.current = queued
@@ -489,34 +507,12 @@ export default function App(): React.JSX.Element {
     []
   )
 
+  /** Runs a desktop slash command; returns true when the text was consumed. */
+
   /**
    * While a run is streaming, a new message queues instead of interrupting it. Ctrl+Enter, or the
    * send button on a queued item, forces it into the current turn with `steer`.
    */
-  const send = useCallback(
-    async (mode: 'send' | 'steer') => {
-      const text = draft.trim()
-      if (!text && draftImages.length === 0) return
-      const streaming = statusRef.current.isStreaming
-      if (streaming && mode === 'send') {
-        setQueued((prev) => [
-          ...prev,
-          {
-            id: `q-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-            text,
-            images: draftImages
-          }
-        ])
-        setDraft('')
-        setDraftImages([])
-        return
-      }
-      setDraft('')
-      setDraftImages([])
-      await deliver(text, draftImages, streaming ? 'steer' : undefined)
-    },
-    [draft, draftImages, deliver]
-  )
 
   /**
    * Send the next queued message when a run settles.
@@ -548,6 +544,105 @@ export default function App(): React.JSX.Element {
     void loadSessions()
   }, [loadSessions])
 
+  const runCommand = useCallback(
+    async (raw: string): Promise<boolean> => {
+      const text = raw.trim()
+      const space = text.indexOf(' ')
+      const name = (space === -1 ? text : text.slice(0, space)).toLowerCase()
+      const arg = space === -1 ? '' : text.slice(space + 1).trim()
+      switch (name) {
+        case '/clear': {
+          await newSession()
+          setToast('已清空当前会话')
+          return true
+        }
+        case '/compact': {
+          setToast(arg ? `正在压缩（自定义提示词：${arg}）…` : '正在压缩上下文…')
+          const result = await window.pi.compactSession(arg || undefined)
+          if (!result.ok) {
+            setToast(result.error ?? '压缩失败')
+            return true
+          }
+          await loadMessages()
+          setToast('上下文已压缩')
+          return true
+        }
+        case '/autocompact': {
+          if (!arg) {
+            setToast('用法：/autocompact 500000（阈值 token 数）或 /autocompact off')
+            return true
+          }
+          if (arg === 'off' || arg === 'on') {
+            const result = await window.pi.setAutoCompact(arg === 'on')
+            setToast(result.ok ? `自动压缩已${arg === 'on' ? '开启' : '关闭'}` : (result.error ?? '设置失败'))
+            return true
+          }
+          const tokens = Number(arg.replace(/[^0-9]/g, ''))
+          if (!Number.isFinite(tokens) || tokens <= 0) {
+            setToast('阈值要写数字，例如 /autocompact 500000')
+            return true
+          }
+          const result = await window.pi.setCompactThreshold(tokens)
+          setToast(
+            result.ok
+              ? `自动压缩阈值：${tokens} tokens（保留 ${result.reserveTokens}，窗口 ${result.contextWindow}）`
+              : (result.error ?? '设置失败')
+          )
+          return true
+        }
+        case '/mcp': {
+          setMcpState(await window.pi.getMcpState())
+          setMcpOpen(true)
+          return true
+        }
+        case '/btw': {
+          if (!arg) {
+            setToast('用法：/btw <问题>')
+            return true
+          }
+          setBtw({ question: arg, loading: true })
+          const result = await window.pi.sideQuestion(arg)
+          setBtw({
+            question: arg,
+            answer: result.answer,
+            error: result.ok ? undefined : (result.error ?? '侧边提问失败')
+          })
+          return true
+        }
+        default:
+          return false
+      }
+    },
+    [loadMessages, newSession]
+  )
+  const send = useCallback(
+    async (mode: 'send' | 'steer') => {
+      const text = draft.trim()
+      if (!text && draftImages.length === 0) return
+      if (text.startsWith('/') && !statusRef.current.isStreaming) {
+        setDraft('')
+        if (await runCommand(text)) return
+      }
+      const streaming = statusRef.current.isStreaming
+      if (streaming && mode === 'send') {
+        setQueued((prev) => [
+          ...prev,
+          {
+            id: `q-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+            text,
+            images: draftImages
+          }
+        ])
+        setDraft('')
+        setDraftImages([])
+        return
+      }
+      setDraft('')
+      setDraftImages([])
+      await deliver(text, draftImages, streaming ? 'steer' : undefined)
+    },
+    [draft, draftImages, deliver, runCommand]
+  )
   const selectSession = useCallback(
     async (session: SessionSummary, options: { remember?: boolean } = {}) => {
       if (session.path === activePath) return
@@ -796,6 +891,26 @@ export default function App(): React.JSX.Element {
           />
         )}
 
+        {btw && (
+          <div className="btw-card">
+            <div className="btw-head">
+              <span className="btw-title">侧边提问</span>
+              <span className="btw-question">{btw.question}</span>
+              <button className="btw-close" onClick={() => setBtw(undefined)} title="关闭">
+                ×
+              </button>
+            </div>
+            <div className="btw-body">
+              {btw.loading && <span className="btw-loading">正在基于当前会话开分支回答…</span>}
+              {!btw.loading && btw.error && <span className="btw-error">{btw.error}</span>}
+              {!btw.loading && !btw.error && <Markdown>{btw.answer || '（没有回答）'}</Markdown>}
+            </div>
+            <div className="btw-foot">
+              基于发送时点的会话快照，在临时分支里回答；分支已丢弃，主会话未受影响。
+            </div>
+          </div>
+        )}
+
         <Composer
           value={draft}
           onChange={setDraft}
@@ -824,6 +939,66 @@ export default function App(): React.JSX.Element {
           status={status}
           onChooseWorkspace={() => void chooseWorkspace()}
         />
+
+        {mcpOpen && (
+          <div
+            className="mcp-overlay"
+            onMouseDown={(event) => {
+              if (event.target === event.currentTarget) setMcpOpen(false)
+            }}
+          >
+            <div className="mcp-overlay-card">
+              <div className="mcp-overlay-head">
+                <span>MCP 服务器</span>
+                <button className="icon-btn" onClick={() => setMcpOpen(false)} title="关闭">
+                  ×
+                </button>
+              </div>
+              <div className="mcp-overlay-body">
+                {(mcpState?.servers ?? []).length === 0 && (
+                  <div className="provider-empty">没有 MCP 服务器</div>
+                )}
+                {(mcpState?.servers ?? []).map((server) => (
+                  <div className="mcp-overlay-row" key={server.name}>
+                    <div className="mcp-overlay-main">
+                      <span className="mcp-overlay-name">
+                        {server.name}
+                        {server.builtin && <span className="badge">内置</span>}
+                        <span className="mcp-overlay-transport">{server.transport}</span>
+                      </span>
+                      <span className="mcp-overlay-sub">
+                        {server.summary || server.description || ''}
+                      </span>
+                    </div>
+                    <span className={`mcp-overlay-state ${server.enabled ? 'on' : ''}`}>
+                      {server.enabled ? '启用' : '停用'}
+                    </span>
+                  </div>
+                ))}
+                <div className="mcp-overlay-tools">
+                  {(mcpState?.desktopTools ?? []).map((tool) => (
+                    <span key={tool.name} className="mcp-overlay-tool">
+                      desktop:{tool.name}
+                    </span>
+                  ))}
+                  {(mcpState?.engines ?? []).flatMap((engine) =>
+                    (engine.tools ?? []).map((tool) => (
+                      <span key={`${engine.id}-${tool.name}`} className="mcp-overlay-tool">
+                        {engine.id}:{tool.name}
+                      </span>
+                    ))
+                  )}
+                </div>
+              </div>
+              <div className="mcp-overlay-foot">
+                完整配置在 设置 → MCP。工具数量：桌面 {mcpState?.desktopTools.length ?? 0}
+                {(mcpState?.engines ?? [])
+                  .map((engine) => ` · ${engine.name} ${engine.tools?.length ?? 0}`)
+                  .join('')}
+              </div>
+            </div>
+          </div>
+        )}
 
         {!stick && items.length > 0 && (
           <button

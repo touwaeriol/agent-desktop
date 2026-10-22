@@ -393,6 +393,20 @@ export interface PiBridge {
   setSubagentsEnabled(enabled: boolean): Promise<McpState>
   setAgentExposure(exposure: 'prompt' | 'lazy' | 'hidden'): Promise<McpState>
   openAgentsConfig(): Promise<void>
+  compactSession(instructions?: string): Promise<{ ok: boolean; summary?: string; error?: string }>
+  setAutoCompact(enabled: boolean): Promise<{ ok: boolean; error?: string }>
+  setCompactThreshold(tokens: number): Promise<{
+    ok: boolean
+    contextWindow?: number
+    reserveTokens?: number
+    error?: string
+  }>
+  sideQuestion(question: string): Promise<{
+    ok: boolean
+    answer?: string
+    settled?: boolean
+    error?: string
+  }>
   saveAgentPreset(draft: AgentPresetDraft): Promise<{ ok: boolean; error?: string; state?: McpState }>
   deleteAgentPreset(id: string): Promise<{ ok: boolean; error?: string; state?: McpState }>
   refreshMcpEngines(): Promise<McpState>

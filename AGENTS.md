@@ -71,6 +71,16 @@ npm run typecheck    # node + web 两个 tsconfig 分别检查
 - 点任意缩略图打开 `ImageLightbox`（Esc / 点背景关闭）；会话里用户消息用 `MessageImages` 渲染，图片在气泡**上方**右对齐（`.message.user` 是 column + align-items flex-end）。
 - 允许只发图片不发文字：`prompt` 的 `message` 传空串，pi 接受（实测模型能收到图）。
 
+## 斜杠命令
+
+- 输入框打 `/` 弹出命令菜单（`Composer.tsx` 的 `SLASH_COMMANDS`），↑/↓ 选择、Enter/Tab 填入、Esc 清空。**填入后 `slashPicked` 记住当前值**，否则菜单会一直打开、Enter 永远只是重复填入，命令发不出去。
+- 命令在渲染层拦截（`App.tsx` 的 `runCommand`），只有不认识的 `/xxx` 才当普通消息发给 pi：
+  - `/clear`：开新会话（= 侧栏「新建」），不是清空当前 JSONL。
+  - `/compact [提示词]`：RPC `compact` + `customInstructions`；会话太小时 pi 会返回 `Nothing to compact`，原样提示给用户。
+  - `/autocompact <token 数 | on | off>`：写 `~/.pi/agent/settings.json` 的 `compaction.enabled` / `compaction.reserveTokens`（`reserveTokens = contextWindow - 阈值`，按当前模型的 `contextWindow` 换算），然后重启 pi；`on/off` 额外调 RPC `set_auto_compaction` 立即生效。
+  - `/mcp`：用 `getMcpState()` 弹浮层列出所有服务器（名称/传输/内置/启用状态）与全部工具名。
+  - `/btw <问题>`：**RPC `clone`**（不是 `fork`——`fork` 需要具体 entry id，传 leaf 会报 `Invalid entry ID for forking`）复制当前会话到临时分支，在那里提问，取 `get_last_assistant_text`，再 `switch_session` 回原会话并删除临时分支文件。整个过程 `btwActive` 为真：`setStatus` 和 `pi:event` 都不发给窗口，否则渲染层会看到分支会话的 sessionFile 并把它加载进主记录。
+
 ## 设置界面
 
 - 设置弹窗可拖右下角缩放（CSS `resize: both`，最小 720×460），尺寸存 `localStorage["pi-settings-size"]`，由 `ResizeObserver` 在 400ms 防抖后写入；`SettingsModal` 常驻挂载，所以关闭再打开尺寸不会丢。

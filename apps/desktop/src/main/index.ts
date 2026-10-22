@@ -515,8 +515,12 @@ function cancelPendingAsks(reason: string): void {
   mainWindow?.webContents.send('ask:cleared')
 }
 
+/** While a /btw fork is running the window must not see that session at all. */
+let btwActive = false
+
 function setStatus(patch: Partial<PiStatus>): void {
   status = { ...status, ...patch }
+  if (btwActive) return
   broadcastStatus()
 }
 
@@ -601,10 +605,27 @@ async function startPi(cwd?: string, extraArgs: string[] = []): Promise<PiStatus
   }
 }
 
+/** Resolvers waiting for the current run to settle (used by /btw and /compact). */
+const settleWaiters: Array<() => void> = []
+
+function waitForSettle(timeoutMs: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    let done = false
+    const finish = (settled: boolean): void => {
+      if (done) return
+      done = true
+      resolve(settled)
+    }
+    settleWaiters.push(() => finish(true))
+    setTimeout(() => finish(false), timeoutMs)
+  })
+}
+
 function forwardEvent(record: Record<string, unknown>): void {
   if (record.type === 'agent_start') setStatus({ isStreaming: true })
   if (record.type === 'agent_settled' || record.type === 'agent_end') {
     setStatus({ isStreaming: false })
+    for (const waiter of settleWaiters.splice(0)) waiter()
     void refreshState()
   }
   if (record.type === 'thinking_level_changed' && typeof record.level === 'string') {
@@ -613,6 +634,7 @@ function forwardEvent(record: Record<string, unknown>): void {
   if (record.type === 'session_info_changed') {
     setStatus({ sessionName: typeof record.name === 'string' ? record.name : undefined })
   }
+  if (btwActive) return
   mainWindow?.webContents.send('pi:event', record)
 }
 
@@ -898,6 +920,100 @@ function registerIpc(): void {
     await agents.saveExposure(app.getPath('userData'), exposure)
     await reloadPiConfig()
     return buildMcpState()
+  })
+
+  ipcMain.handle('pi:compact', async (_event, instructions?: string) => {
+    try {
+      const response = await rpc.request<{ data?: { summary?: string } }>(
+        'compact',
+        { ...(instructions?.trim() ? { customInstructions: instructions.trim() } : {}) },
+        600_000
+      )
+      await refreshState()
+      return { ok: true, summary: response.data?.summary }
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) }
+    }
+  })
+
+  ipcMain.handle('pi:set-auto-compact', async (_event, enabled: boolean) => {
+    try {
+      await rpc.request('set_auto_compaction', { enabled }, 10_000)
+      await providers.setCompactionSettings({ enabled })
+      return { ok: true }
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) }
+    }
+  })
+
+  /** `/autocompact 500000`: start compacting once the context passes that many tokens. */
+  ipcMain.handle('pi:set-compact-threshold', async (_event, tokens: number) => {
+    try {
+      const choices = await providers.listModelChoices()
+      const current = status.model
+      const match = choices.find(
+        (choice) => choice.provider === current?.provider && choice.id === current?.id
+      )
+      const contextWindow = match?.contextWindow
+      if (!contextWindow) {
+        return { ok: false, error: '当前模型没有上下文窗口信息，无法换算阈值' }
+      }
+      const reserveTokens = Math.max(0, contextWindow - Math.max(1000, Math.round(tokens)))
+      await providers.setCompactionSettings({ enabled: true, reserveTokens })
+      await startPi(status.cwd, sessionArgs())
+      return { ok: true, contextWindow, reserveTokens }
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) }
+    }
+  })
+
+  /**
+   * `/btw <question>`: fork the session at its current tip, ask there, then come back. The window
+   * never sees the fork, so the side answer cannot leak into the transcript.
+   */
+  ipcMain.handle('pi:btw', async (_event, question: string) => {
+    const trimmed = question.trim()
+    if (!trimmed) return { ok: false, error: '缺少问题' }
+    if (status.isStreaming) return { ok: false, error: '正在回复中，等这一轮结束再问' }
+    const original = status.sessionFile
+    if (!original) return { ok: false, error: '当前会话还没有保存到文件，先发一条消息' }
+    btwActive = true
+    let forkPath: string | undefined
+    try {
+      // `clone` duplicates the session at its current position, which is exactly the snapshot a
+      // side question needs; `fork` requires a specific entry id and rejects the leaf.
+      const cloned = await rpc.request<{ data?: { cancelled?: boolean } }>('clone', {}, 20_000)
+      if (cloned.data?.cancelled) return { ok: false, error: '克隆会话被取消' }
+      const state = await rpc.request<{ data?: Record<string, unknown> }>('get_state', {}, 5000)
+      forkPath = typeof state.data?.sessionFile === 'string' ? state.data.sessionFile : undefined
+      await rpc.request('prompt', { message: trimmed }, 30_000)
+      const settled = await waitForSettle(300_000)
+      const last = await rpc.request<{ data?: { text?: string | null } }>(
+        'get_last_assistant_text',
+        {},
+        10_000
+      )
+      return {
+        ok: true,
+        answer: last.data?.text ?? '',
+        settled,
+        forkPath
+      }
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) }
+    } finally {
+      try {
+        await rpc.request('switch_session', { sessionPath: original }, 20_000)
+      } catch {
+        // restore below
+      }
+      btwActive = false
+      if (forkPath && forkPath !== original) {
+        await fs.unlink(forkPath).catch(() => undefined)
+      }
+      await refreshState()
+      broadcastStatus()
+    }
   })
 
   ipcMain.handle('agents:save-preset', async (_event, draft: agents.PresetDraft) => {

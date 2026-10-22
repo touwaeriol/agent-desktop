@@ -100,6 +100,10 @@ const bridge: PiBridge = {
   setAgentExposure: (exposure: 'prompt' | 'lazy' | 'hidden') =>
     ipcRenderer.invoke('agents:set-exposure', exposure) as Promise<McpState>,
   openAgentsConfig: () => ipcRenderer.invoke('agents:open-config') as Promise<void>,
+  compactSession: (instructions) => ipcRenderer.invoke('pi:compact', instructions),
+  setAutoCompact: (enabled) => ipcRenderer.invoke('pi:set-auto-compact', enabled),
+  setCompactThreshold: (tokens) => ipcRenderer.invoke('pi:set-compact-threshold', tokens),
+  sideQuestion: (question) => ipcRenderer.invoke('pi:btw', question),
   saveAgentPreset: (draft) => ipcRenderer.invoke('agents:save-preset', draft),
   deleteAgentPreset: (id) => ipcRenderer.invoke('agents:delete-preset', id),
   chooseMcpEngineEntry: () =>

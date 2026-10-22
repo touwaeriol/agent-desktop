@@ -23,6 +23,14 @@ function contextLabel(value?: number): string {
   return `${Math.round(value / 1000)}K`
 }
 
+export const SLASH_COMMANDS = [
+  { name: '/clear', args: '', hint: '清空当前会话（开一个新会话）' },
+  { name: '/compact', args: '[提示词]', hint: '压缩上下文，可附加自定义提示词' },
+  { name: '/autocompact', args: '[token 数 | off | on]', hint: '自动压缩阈值，例如 /autocompact 500000' },
+  { name: '/mcp', args: '', hint: '查看所有 MCP 服务器与工具' },
+  { name: '/btw', args: '<问题>', hint: '侧边提问：基于当前会话开分支回答，不污染主线程' }
+] as const
+
 const THINKING_LABELS: Record<string, string> = {
   off: '关闭',
   minimal: '最少',
@@ -81,6 +89,9 @@ export function Composer({
   const [thinkingError, setThinkingError] = useState<string>()
   const [preview, setPreview] = useState<DraftImage>()
   const [dragging, setDragging] = useState(false)
+  const [slashIndex, setSlashIndex] = useState(0)
+  // Set when a command was inserted from the menu, so Enter sends instead of re-applying it.
+  const [slashPicked, setSlashPicked] = useState<string | undefined>(undefined)
   const [contextOpen, setContextOpen] = useState(false)
   const [contextQuery, setContextQuery] = useState('')
   const [contextFiles, setContextFiles] = useState<string[]>([])
@@ -88,6 +99,28 @@ export function Composer({
   const [contextError, setContextError] = useState<string>()
 
   // Images are plain attachments: no filename captions, no [图片N] markers in the text.
+  const slashQuery =
+    value !== slashPicked && value.startsWith('/') && !value.includes(' ') && !value.includes('\n')
+      ? value.slice(1).toLowerCase()
+      : undefined
+  const slashMatches =
+    slashQuery === undefined
+      ? []
+      : SLASH_COMMANDS.filter((command) => command.name.slice(1).startsWith(slashQuery))
+
+  const applyCommand = (name: string, args: string): void => {
+    const next = args ? `${name} ` : name
+    onChange(next)
+    setSlashPicked(next)
+    setSlashIndex(0)
+    requestAnimationFrame(() => {
+      const element = ref.current
+      if (!element) return
+      element.focus()
+      element.setSelectionRange(next.length, next.length)
+    })
+  }
+
   const addImages = async (files: File[]): Promise<void> => {
     const added: DraftImage[] = []
     for (const file of files) {
@@ -328,6 +361,26 @@ export function Composer({
           handleFiles(files)
         }}
       >
+        {slashMatches.length > 0 && (
+          <div className="slash-menu">
+            {slashMatches.map((command, index) => (
+              <button
+                key={command.name}
+                className={`slash-item ${index === Math.min(slashIndex, slashMatches.length - 1) ? 'active' : ''}`}
+                onMouseDown={(event) => {
+                  event.preventDefault()
+                  applyCommand(command.name, command.args)
+                }}
+              >
+                <span className="slash-name">
+                  {command.name}
+                  {command.args && <span className="slash-args"> {command.args}</span>}
+                </span>
+                <span className="slash-hint">{command.hint}</span>
+              </button>
+            ))}
+          </div>
+        )}
         {queued.length > 0 && (
           <div className="queue-panel">
             <div className="queue-head">
@@ -365,12 +418,36 @@ export function Composer({
           placeholder={streaming ? '继续输入，Enter 排队，Ctrl+Enter 强制引导' : '给 pi 发消息…（可直接粘贴图片）'}
           onChange={(event) => {
             const next = event.target.value
+            if (next !== slashPicked) setSlashPicked(undefined)
             onChange(next)
             if (next.endsWith('@') && (next.length === 1 || /\s/.test(next[next.length - 2]))) {
               void openContextPicker()
             }
           }}
           onKeyDown={(event) => {
+            if (slashMatches.length > 0) {
+              if (event.key === 'ArrowDown') {
+                event.preventDefault()
+                setSlashIndex((index) => (index + 1) % slashMatches.length)
+                return
+              }
+              if (event.key === 'ArrowUp') {
+                event.preventDefault()
+                setSlashIndex((index) => (index - 1 + slashMatches.length) % slashMatches.length)
+                return
+              }
+              if (event.key === 'Enter' || event.key === 'Tab') {
+                event.preventDefault()
+                const command = slashMatches[Math.min(slashIndex, slashMatches.length - 1)]
+                applyCommand(command.name, command.args)
+                return
+              }
+              if (event.key === 'Escape') {
+                event.preventDefault()
+                onChange('')
+                return
+              }
+            }
             if (event.key !== 'Enter') return
             if (event.nativeEvent.isComposing) return
             if (event.shiftKey) return

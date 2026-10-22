@@ -345,6 +345,24 @@ async function readRawSettings(): Promise<RawSettings> {
   }
 }
 
+/** Persist compaction settings into `~/.pi/agent/settings.json`, keeping the other keys. */
+export async function setCompactionSettings(next: {
+  enabled?: boolean
+  reserveTokens?: number
+}): Promise<void> {
+  const raw = (await readRawSettings()) as Record<string, unknown>
+  const compaction = { ...((raw.compaction as Record<string, unknown>) ?? {}) }
+  if (typeof next.enabled === 'boolean') compaction.enabled = next.enabled
+  if (typeof next.reserveTokens === 'number') {
+    compaction.reserveTokens = Math.max(0, Math.round(next.reserveTokens))
+  }
+  raw.compaction = compaction
+  await fs.mkdir(path.dirname(SETTINGS_PATH), { recursive: true })
+  await fs.writeFile(SETTINGS_PATH, `${JSON.stringify(raw, null, 2)}
+`, 'utf8')
+  invalidateCache()
+}
+
 export async function getAppSettings(): Promise<AppSettings> {
   const raw = await readRawSettings()
   return {
