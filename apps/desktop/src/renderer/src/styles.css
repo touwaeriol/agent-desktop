@@ -4178,27 +4178,27 @@ button:disabled {
 .draft-images {
   display: flex;
   flex-wrap: wrap;
+  align-items: center;
   gap: 6px;
-  margin-bottom: 7px;
+  margin-bottom: 8px;
 }
 
 .draft-image {
   position: relative;
   display: flex;
-  padding: 3px;
-  border-radius: 8px;
-  border: 1px solid var(--border);
-  background: var(--bg-input);
+  flex: none;
 }
 
+/* Every attachment is scaled into the same square tile, whatever its aspect ratio. */
 .draft-image-thumb {
   display: block;
-  width: 56px;
-  height: 56px;
+  width: 42px;
+  height: 42px;
   padding: 0;
-  border-radius: 5px;
+  border-radius: 8px;
   overflow: hidden;
   background: var(--bg-elev-2);
+  box-shadow: inset 0 0 0 1px var(--border);
 }
 
 .draft-image-thumb img {
@@ -4210,18 +4210,25 @@ button:disabled {
 
 .draft-image-remove {
   position: absolute;
-  top: -5px;
-  right: -5px;
+  top: -4px;
+  right: -4px;
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 16px;
-  height: 16px;
+  width: 15px;
+  height: 15px;
   padding: 0;
   border-radius: 50%;
   border: 1px solid var(--border-strong);
   background: var(--bg-elev);
   color: var(--text-dim);
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+
+.draft-image:hover .draft-image-remove,
+.draft-image-remove:focus-visible {
+  opacity: 1;
 }
 
 .draft-image-remove:hover {
