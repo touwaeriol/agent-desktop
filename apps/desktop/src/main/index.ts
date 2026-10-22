@@ -468,6 +468,10 @@ async function buildMcpState(): Promise<McpState> {
         description: preset.description,
         mode: preset.mode,
         tools: preset.tools,
+        model: preset.model,
+        appendSystemPrompt: preset.appendSystemPrompt,
+        visible: preset.visible,
+        timeoutMs: preset.timeoutMs,
         source: preset.source
       })),
       running: subagents?.list().filter((record) => record.status !== 'stopped').length ?? 0,
@@ -894,6 +898,28 @@ function registerIpc(): void {
     await agents.saveExposure(app.getPath('userData'), exposure)
     await reloadPiConfig()
     return buildMcpState()
+  })
+
+  ipcMain.handle('agents:save-preset', async (_event, draft: agents.PresetDraft) => {
+    try {
+      await agents.savePreset(app.getPath('userData'), draft)
+      await refreshAgents()
+      await reloadPiConfig()
+      return { ok: true, state: await buildMcpState() }
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) }
+    }
+  })
+
+  ipcMain.handle('agents:delete-preset', async (_event, id: string) => {
+    try {
+      await agents.deletePreset(app.getPath('userData'), id)
+      await refreshAgents()
+      await reloadPiConfig()
+      return { ok: true, state: await buildMcpState() }
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) }
+    }
   })
 
   ipcMain.handle('agents:open-config', async () => {

@@ -100,6 +100,8 @@ const bridge: PiBridge = {
   setAgentExposure: (exposure: 'prompt' | 'lazy' | 'hidden') =>
     ipcRenderer.invoke('agents:set-exposure', exposure) as Promise<McpState>,
   openAgentsConfig: () => ipcRenderer.invoke('agents:open-config') as Promise<void>,
+  saveAgentPreset: (draft) => ipcRenderer.invoke('agents:save-preset', draft),
+  deleteAgentPreset: (id) => ipcRenderer.invoke('agents:delete-preset', id),
   chooseMcpEngineEntry: () =>
     ipcRenderer.invoke('mcp:choose-engine-entry') as Promise<string | null>,
   onMcpState: (listener) => {

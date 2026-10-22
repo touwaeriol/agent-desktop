@@ -1704,8 +1704,14 @@ button:disabled {
 .settings {
   width: min(920px, 94vw);
   height: min(640px, 88vh);
+  min-width: 720px;
+  min-height: 460px;
+  max-width: 96vw;
+  max-height: 94vh;
   display: flex;
   overflow: hidden;
+  /* Drag the bottom-right corner to resize; the size is remembered. */
+  resize: both;
   background: var(--bg-main);
   border: 1px solid var(--border-strong);
   border-radius: 14px;
@@ -3804,12 +3810,12 @@ button:disabled {
 
 .mcp-row {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: space-between;
-  gap: 14px;
-  padding: 10px 12px;
-  margin-bottom: 8px;
-  border-radius: 9px;
+  gap: 12px;
+  padding: 6px 10px;
+  margin-bottom: 5px;
+  border-radius: 8px;
   border: 1px solid var(--border);
   background: var(--bg-sidebar);
 }
@@ -3817,19 +3823,26 @@ button:disabled {
 .mcp-row-main {
   display: flex;
   flex-direction: column;
-  gap: 3px;
+  gap: 1px;
   min-width: 0;
 }
 
 .mcp-row-title {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
   color: var(--text-strong);
-  font-size: 12.6px;
+  font-size: 12.2px;
 }
 
+/* One line per description: the full text is still in the row's tooltip. */
 .mcp-row-sub {
   color: var(--faint);
-  font-size: 10.9px;
-  line-height: 1.6;
+  font-size: 10.6px;
+  line-height: 1.45;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .mcp-row-warn {
@@ -3896,9 +3909,9 @@ button:disabled {
 }
 
 .mcp-engine {
-  padding: 10px 12px;
-  margin-bottom: 8px;
-  border-radius: 9px;
+  padding: 7px 10px;
+  margin-bottom: 6px;
+  border-radius: 8px;
   border: 1px solid var(--border);
   background: var(--bg-sidebar);
 }
@@ -4915,4 +4928,114 @@ button:disabled {
   width: 1px;
   height: 14px;
   background: var(--border-strong);
+}
+
+.agent-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.agent-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg-sidebar);
+}
+
+.agent-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.agent-title {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  color: var(--text-strong);
+  font-size: 12.2px;
+}
+
+.agent-title code {
+  font-family: 'Cascadia Code', 'Consolas', monospace;
+  font-size: 11px;
+  color: var(--text);
+}
+
+.agent-name {
+  color: var(--text-dim);
+}
+
+.agent-meta {
+  color: var(--faint);
+  font-size: 10.4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-desc {
+  color: var(--text-dim);
+  font-size: 10.8px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-actions {
+  display: flex;
+  gap: 2px;
+  flex: none;
+}
+
+.agent-editor {
+  margin-top: 6px;
+  padding: 10px;
+  border-radius: 10px;
+  border: 1px solid var(--border-strong);
+  background: var(--bg-elev);
+}
+
+.agent-mode,
+.agent-tools,
+.agent-model {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px;
+}
+
+.agent-model input {
+  flex: 1;
+  min-width: 140px;
+}
+
+.agent-tools .ghost {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+}
+
+.agent-tools .ghost code {
+  font-family: 'Cascadia Code', 'Consolas', monospace;
+  font-size: 10.6px;
+}
+
+.ghost.active {
+  border-color: var(--border-strong);
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+.agent-editor-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 8px;
 }

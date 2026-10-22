@@ -71,6 +71,11 @@ npm run typecheck    # node + web 两个 tsconfig 分别检查
 - 点任意缩略图打开 `ImageLightbox`（Esc / 点背景关闭）；会话里用户消息用 `MessageImages` 渲染，图片在气泡**上方**右对齐（`.message.user` 是 column + align-items flex-end）。
 - 允许只发图片不发文字：`prompt` 的 `message` 传空串，pi 接受（实测模型能收到图）。
 
+## 设置界面
+
+- 设置弹窗可拖右下角缩放（CSS `resize: both`，最小 720×460），尺寸存 `localStorage["pi-settings-size"]`，由 `ResizeObserver` 在 400ms 防抖后写入；`SettingsModal` 常驻挂载，所以关闭再打开尺寸不会丢。
+- MCP 页的行要压扁：描述一律单行省略（`.mcp-row-sub` 的 `nowrap`），行内边距 6px 10px，内置引擎卡片 7px 10px，工具列表默认折叠。不要再让一段说明换两三行——一个服务器占半屏时下面的服务器列表会被挤出视野。
+
 ## 消息队列
 
 - 运行中（`status.isStreaming`）发消息**默认进队列**，不再直接 `steer`：队列在渲染层（`App.tsx` 的 `queued`），输入框上方显示「N 条排队消息」，每条可编辑（放回输入框）、删除、立即发送。
@@ -132,6 +137,7 @@ npm run typecheck    # node + web 两个 tsconfig 分别检查
 - **工具返回默认是 Markdown**，JSON 只在显式传 `format: "json"` / `include` / `detail` 时返回；`ask_user_question` 也不再附带 JSON 副本。模型不需要解析结构，重复的键名纯属浪费 token。
 - `get_subagent` / `wait_subagent` **默认只返回最终结论 + 改动摘要**，运行中只给状态行；要看过程必须显式传 `include: ["messages"]`（带 `since` 游标）或 `["last"]`。
 - 预设：内置 `explorer` / `reviewer` / `tester` / `worker`（`apps/desktop/src/main/agents.ts`），用户可在 `%APPDATA%/agent-desktop/agents.json` 覆盖或新增；优先级 = 内置 ← 用户文件 ← `start_subagent` 显式参数。预设字段全部落到 pi 启动参数（`--tools`、`--provider/--model`、`--append-system-prompt`）。
+- 子代理的界面在 **设置 → 代理**（`AgentsPanel.tsx`），不在 MCP 页：预设列表 + 编辑器（id/名称/说明/启动方式/工具白名单/模型/追加系统提示词），保存走 `agents.savePreset` 写 `agents.json` 后重启 pi；删除走 `agents.deletePreset`（内置预设会恢复默认）。`Toggle` 已抽到 `components/Toggle.tsx`，MCP 与代理两页共用。
 - **预设没有"加载"概念**：`search_agents` 返回 id 后可直接 `start_subagent({ agent })`，不需要像 `tool_search` 那样把 schema 声明进工具列表。`agents.exposure` 只控制要不要提前把列表写进系统提示词（`prompt` / `lazy` / `hidden`，超过 `promptLimit` 自动只列 `visible` 的）。
 - `<agents>` 段由主进程渲染后经 `AGENT_DESKTOP_AGENTS_SECTION` 传给扩展，扩展在 `before_agent_start` 里注入 `sections.subagents`，**门控**：`pi.getActiveTools()` 里有 `mcp__desktop__start_subagent` 才注入，否则删除。
 - 桥内部 API（JSON，给 mcp-core 用）：`GET /agents`、`GET /models`、`POST /subagents`、`GET /subagents/:id`、`POST /subagents/:id/{prompt,stop,wait}`、`GET /subagents/:id/changes`。令牌沿用桥的 Bearer。

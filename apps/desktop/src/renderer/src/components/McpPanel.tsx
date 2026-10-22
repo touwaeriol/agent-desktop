@@ -9,6 +9,7 @@ import {
   RefreshIcon,
   TrashIcon
 } from './Icons'
+import { Toggle } from './Toggle'
 
 const TEMPLATE_STDIO = `{
   "command": "npx",
@@ -25,28 +26,6 @@ const TEMPLATE_HTTP = `{
 const INSTALL_HINTS: Record<McpEngineId, string> = {
   codegraph: 'npm i -g @colbymchenry/codegraph',
   warpgrep: '在 Morph 控制台创建 API Key 后粘贴到下方'
-}
-
-function Toggle({
-  checked,
-  disabled,
-  onChange
-}: {
-  checked: boolean
-  disabled?: boolean
-  onChange: (value: boolean) => void
-}): React.JSX.Element {
-  return (
-    <button
-      className={`mcp-switch ${checked ? 'on' : ''}`}
-      role="switch"
-      aria-checked={checked}
-      disabled={disabled}
-      onClick={() => onChange(!checked)}
-    >
-      <span />
-    </button>
-  )
 }
 
 function ToolSection({
@@ -479,87 +458,6 @@ export function McpPanel({
         ))}
         {!state && loading && <div className="provider-empty">正在检测内置引擎…</div>}
       </div>
-
-      {state && (
-        <div className="field">
-          <label>子代理</label>
-          <div className={`mcp-engine ${state.subagents.enabled ? '' : 'disabled'}`}>
-            <div className="mcp-row">
-              <div className="mcp-row-main">
-                <span className="mcp-row-title">
-                  子代理
-                  <span className="mcp-version">
-                    {state.subagents.presets.length} 个预设
-                    {state.subagents.running > 0 ? ` · ${state.subagents.running} 个在跑` : ''}
-                  </span>
-                </span>
-                <span className="mcp-row-sub">
-                  主会话可以起独立 pi 进程干活（探查、审查、测试、实现），并收集结论、插话、终止、查看改动。
-                  子代理默认 <code>--no-mcp</code>，不会反问用户、也不能再起子代理。
-                </span>
-                <span className="mcp-row-meta mcp-entry" title={state.subagents.configPath}>
-                  {state.subagents.configPath}
-                </span>
-              </div>
-              <Toggle
-                checked={state.subagents.enabled}
-                disabled={busy}
-                onChange={(value) =>
-                  void run(
-                    () => window.pi.setSubagentsEnabled(value),
-                    value ? '子代理已启用' : '子代理已关闭'
-                  )
-                }
-              />
-            </div>
-
-            {state.subagents.enabled && (
-              <>
-                <div className="mcp-engine-actions">
-                  <span className="mcp-row-meta">预设如何暴露给模型：</span>
-                  {(
-                    [
-                      ['prompt', '直接写进系统提示词'],
-                      ['lazy', '按需搜索（search_agents）'],
-                      ['hidden', '不提示']
-                    ] as const
-                  ).map(([value, label]) => (
-                    <button
-                      key={value}
-                      className={`ghost ${state.subagents.exposure === value ? 'active' : ''}`}
-                      disabled={busy}
-                      onClick={() =>
-                        void run(() => window.pi.setAgentExposure(value), `暴露方式：${label}`)
-                      }
-                    >
-                      {label}
-                    </button>
-                  ))}
-                  <button className="ghost" disabled={busy} onClick={() => void window.pi.openAgentsConfig()}>
-                    编辑预设
-                  </button>
-                </div>
-                <div className="mcp-tool-grid">
-                  {state.subagents.presets.map((preset) => (
-                    <div key={preset.id} className="mcp-tool-row">
-                      <span className="mcp-tool-name">{preset.id}</span>
-                      <span className="mcp-tool-meta">
-                        {preset.mode ?? 'background'} ·{' '}
-                        {preset.tools?.length
-                          ? preset.tools.some((tool) => ['edit', 'write', 'bash'].includes(tool))
-                            ? '可写'
-                            : '只读'
-                          : '全量'}
-                        {preset.source === 'user' ? ' · 自定义' : ''}
-                      </span>
-                    </div>
-                  ))}
-                </div>
-              </>
-            )}
-          </div>
-        </div>
-      )}
 
       <div className="field">
         <div className="mcp-head">

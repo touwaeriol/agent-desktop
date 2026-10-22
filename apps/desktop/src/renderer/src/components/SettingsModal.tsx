@@ -15,6 +15,7 @@ import type {
 import {
   CheckIcon,
   CloseIcon,
+  SparkIcon,
   CopyIcon,
   ExternalIcon,
   FolderIcon,
@@ -30,9 +31,10 @@ import {
 } from './Icons'
 import { CustomProvidersPanel } from './CustomProvidersPanel'
 import { McpPanel } from './McpPanel'
+import { AgentsPanel } from './AgentsPanel'
 import { updateBusy, updateProgress, updateStatusText } from '../lib/updates'
 
-type Tab = 'providers' | 'custom' | 'mcp' | 'general'
+type Tab = 'providers' | 'custom' | 'mcp' | 'agents' | 'general'
 
 const THINKING_LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
 
@@ -287,6 +289,42 @@ export function SettingsModal({
   onChooseWorkspace: () => Promise<void> | void
 }) {
   const [tab, setTab] = useState<Tab>(initialTab ?? 'providers')
+  const dialogRef = useRef<HTMLDivElement>(null)
+  const [dialogSize, setDialogSize] = useState<{ width: number; height: number } | undefined>(() => {
+    try {
+      const raw = localStorage.getItem('pi-settings-size')
+      if (!raw) return undefined
+      const parsed = JSON.parse(raw) as { width?: number; height?: number }
+      if (!parsed.width || !parsed.height) return undefined
+      return { width: parsed.width, height: parsed.height }
+    } catch {
+      return undefined
+    }
+  })
+  const dialogStyle = dialogSize
+    ? { width: `${dialogSize.width}px`, height: `${dialogSize.height}px` }
+    : undefined
+
+  // Remember the size the user dragged the dialog to; the CSS resize handle does the rest.
+  useEffect(() => {
+    const element = dialogRef.current
+    if (!element || typeof ResizeObserver === 'undefined') return
+    let timer: number | undefined
+    const observer = new ResizeObserver(() => {
+      if (timer) window.clearTimeout(timer)
+      timer = window.setTimeout(() => {
+        const width = Math.round(element.getBoundingClientRect().width)
+        const height = Math.round(element.getBoundingClientRect().height)
+        localStorage.setItem('pi-settings-size', JSON.stringify({ width, height }))
+        setDialogSize({ width, height })
+      }, 400)
+    })
+    observer.observe(element)
+    return () => {
+      if (timer) window.clearTimeout(timer)
+      observer.disconnect()
+    }
+  }, [open])
   const [providers, setProviders] = useState<ProviderInfo[]>([])
   const [providersLoading, setProvidersLoading] = useState(false)
   const [query, setQuery] = useState('')
@@ -634,7 +672,7 @@ export function SettingsModal({
         if (event.target === event.currentTarget) onClose()
       }}
     >
-      <div className="settings">
+      <div className="settings" ref={dialogRef} style={dialogStyle}>
         <aside className="settings-nav">
           <div className="settings-title">
             <span className="wordmark-mark">π</span>
@@ -652,6 +690,9 @@ export function SettingsModal({
           </button>
           <button className={tab === 'mcp' ? 'active' : ''} onClick={() => setTab('mcp')}>
             <PlugIcon size={15} /> MCP
+          </button>
+          <button className={tab === 'agents' ? 'active' : ''} onClick={() => setTab('agents')}>
+            <SparkIcon size={15} /> 代理
           </button>
           <button className={tab === 'general' ? 'active' : ''} onClick={() => setTab('general')}>
             <FolderIcon size={15} /> 通用
@@ -672,7 +713,9 @@ export function SettingsModal({
                     ? '自定义服务商'
                     : tab === 'mcp'
                       ? 'MCP'
-                      : '通用'}
+                      : tab === 'agents'
+                        ? '代理'
+                        : '通用'}
               </h2>
               <p>
                 {tab === 'providers'
@@ -681,7 +724,9 @@ export function SettingsModal({
                     ? '通过 models.json 配置 OpenAI 兼容端点、baseUrl 与模型列表'
                     : tab === 'mcp'
                       ? 'MCP 总开关、桌面提问工具与 ~/.pi/agent/mcp.json 里的服务器'
-                      : '当前会话目录、会话存储、默认模型与思考等级'}
+                      : tab === 'agents'
+                        ? '子代理预设：注入哪些工具、追加什么提示词，以及如何暴露给模型'
+                        : '当前会话目录、会话存储、默认模型与思考等级'}
               </p>
             </div>
             <button className="icon-btn" onClick={onClose} title="关闭 (Esc)">
@@ -803,6 +848,8 @@ export function SettingsModal({
               onOpenFile={() => void window.pi.openModelsJson()}
             />
           )}
+
+          {tab === 'agents' && <AgentsPanel onNotice={setNotice} onError={setError} />}
 
           {tab === 'mcp' && <McpPanel onNotice={setNotice} onError={setError} />}
 

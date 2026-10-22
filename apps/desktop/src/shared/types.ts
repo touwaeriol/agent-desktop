@@ -285,7 +285,23 @@ export interface SubagentPresetInfo {
   description: string
   mode?: 'sync' | 'background'
   tools?: string[]
+  model?: { provider: string; id: string; thinking?: string } | 'inherit'
+  appendSystemPrompt?: string
+  visible?: boolean
+  timeoutMs?: number
   source: 'builtin' | 'user'
+}
+
+export interface AgentPresetDraft {
+  id: string
+  name?: string
+  description?: string
+  mode?: 'sync' | 'background'
+  tools?: string[] | null
+  model?: { provider: string; id: string; thinking?: string } | 'inherit' | null
+  appendSystemPrompt?: string
+  visible?: boolean
+  timeoutMs?: number
 }
 
 export interface SubagentState {
@@ -377,6 +393,8 @@ export interface PiBridge {
   setSubagentsEnabled(enabled: boolean): Promise<McpState>
   setAgentExposure(exposure: 'prompt' | 'lazy' | 'hidden'): Promise<McpState>
   openAgentsConfig(): Promise<void>
+  saveAgentPreset(draft: AgentPresetDraft): Promise<{ ok: boolean; error?: string; state?: McpState }>
+  deleteAgentPreset(id: string): Promise<{ ok: boolean; error?: string; state?: McpState }>
   refreshMcpEngines(): Promise<McpState>
   buildMcpIndex(): Promise<{ ok: boolean; message: string }>
   setMcpToolEnabled(server: string, tool: string, enabled: boolean): Promise<McpState>
