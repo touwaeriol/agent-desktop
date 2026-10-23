@@ -7,6 +7,7 @@ import { PropheyEngine } from './agent/prophey-engine'
 import { PiEngine } from './agent/pi-engine'
 import { listSessions, readSummary } from './sessions'
 import { SessionStore, toSummary } from './session-store'
+import { TranscriptStore } from './transcript-store'
 import * as providers from './providers'
 import * as updates from './updates'
 import * as mcp from './mcp'
@@ -106,7 +107,7 @@ async function rememberSession(extra: { title?: string } = {}): Promise<void> {
       path: file,
       cwd: status.cwd,
       ...(title ? { title } : {}),
-      additional: engine.workspace().additional,
+      additional: currentEngine.workspace().additional,
       ...(desktopConfig.activeProject ? { projectId: desktopConfig.activeProject } : {}),
       updatedAt: Date.now()
     })
@@ -145,7 +146,12 @@ function createEngine(): AgentEngine {
     onExit: () => handleExit()
   }
   if (desktopConfig.engine === 'prophey') {
-    return new PropheyEngine({ ...shared, toolModulePath: coreToolsModule() })
+    return new PropheyEngine({
+      ...shared,
+      toolModulePath: coreToolsModule(),
+      transcripts: new TranscriptStore(path.join(app.getPath('userData'), 'transcripts')),
+      sessionId: () => desktopConfig.propheySessionId
+    })
   }
   return new PiEngine({
     ...shared,
@@ -189,8 +195,8 @@ function createEngine(): AgentEngine {
   })
 }
 
-/** Created in `whenReady`, once `config.engine` is known. */
-let engine: AgentEngine
+/** Created in `whenReady`, once `config.engine` is known; replaced when the engine changes. */
+let currentEngine: AgentEngine
 
 if (process.env.PI_DEBUG_PORT) {
   app.commandLine.appendSwitch('remote-debugging-port', process.env.PI_DEBUG_PORT)
@@ -258,6 +264,8 @@ interface DesktopConfig {
   activeProject?: string
   /** Which engine runs the turn: `pi` (default) or `prophey` (ours). */
   engine?: 'pi' | 'prophey'
+  /** Current Prophey-engine session id; rotates when a new session starts. */
+  propheySessionId?: string
   /** Repositories the user worked in, most recent first (sidebar "切换仓库" menu). */
   recentRepos?: string[]
   /** Per-repository defaults applied to a new session in that repository. */
@@ -975,7 +983,7 @@ let btwFork: string | undefined
 let btwGeneration = 0
 
 function setStatus(patch: Partial<PiStatus>): void {
-  engine.setStatus(patch)
+  currentEngine.setStatus(patch)
   // While the side-chat panel is open the window keeps showing the main session's status.
   if (btwActive) return
   broadcastStatus()
@@ -1006,7 +1014,7 @@ function currentWorkspace(cwd?: string): AgentWorkspace {
 
 /** Start or restart the session; the engine hands the in-flight promise to a second caller. */
 async function startPi(cwd?: string, extraArgs: string[] = []): Promise<PiStatus> {
-  const next = await engine.start(currentWorkspace(cwd), extraArgs)
+  const next = await currentEngine.start(currentWorkspace(cwd), extraArgs)
   if (next.phase === 'ready') await afterStart(next.cwd, extraArgs)
   return next
 }
@@ -1031,16 +1039,12 @@ async function afterStart(workspace: string, extraArgs: string[]): Promise<void>
   const defaults = desktopConfig.repoDefaults?.[workspace]
   if (!defaults) return
   if (defaults.provider && defaults.model) {
-    await engine
-      .request('set_model', { provider: defaults.provider, modelId: defaults.model }, 10_000)
-      .catch(() => undefined)
+    await currentEngine.setModel(defaults.provider, defaults.model).catch(() => undefined)
   }
   if (defaults.thinkingLevel) {
-    await engine
-      .request('set_thinking_level', { level: defaults.thinkingLevel }, 10_000)
-      .catch(() => undefined)
+    await currentEngine.setThinkingLevel(defaults.thinkingLevel).catch(() => undefined)
   }
-  await engine.refresh()
+  await currentEngine.refresh()
 }
 
 /** Vendor wording for "this account may not use that processing tier". */
@@ -1094,28 +1098,28 @@ async function closeSideChat(): Promise<void> {
   btwOriginal = undefined
   btwFork = undefined
   try {
-    if (engine.busy() && engine.running()) {
-      await engine.abort().catch(() => undefined)
-      await engine.waitForSettle(15_000)
+    if (currentEngine.busy() && currentEngine.running()) {
+      await currentEngine.abort().catch(() => undefined)
+      await currentEngine.waitForSettle(15_000)
     }
-    if (original && engine.running()) {
-      await engine.switchSession(original)
+    if (original && currentEngine.running()) {
+      await currentEngine.switchSession(original)
     }
   } catch {
     // `refreshState` below re-syncs whatever pi ended up on.
   }
   if (fork && fork !== original) await fs.unlink(fork).catch(() => undefined)
-  await engine.refresh()
+  await currentEngine.refresh()
   broadcastStatus()
 }
 
 /** One turn on the session pi is currently parked on (the `/btw` fork while a side chat is open). */
 async function btwPrompt(message: string): Promise<{ text: string; settled: boolean }> {
   // Arm the waiter first: a short answer can settle before the prompt response even arrives.
-  const settling = engine.waitForSettle(300_000)
-  await engine.send(message)
+  const settling = currentEngine.waitForSettle(300_000)
+  await currentEngine.send(message)
   const settled = await settling
-  const text = (await engine.lastAssistantText()) ?? ''
+  const text = (await currentEngine.lastAssistantText()) ?? ''
   if (text.trim()) return { text, settled }
   return { text: settled ? '（没有回答）' : '（超过 5 分钟仍未结束，可以关闭窗口）', settled }
 }
@@ -1126,13 +1130,13 @@ function submitPrompt(
   behavior?: 'steer' | 'followUp',
   images?: PromptImage[]
 ): Promise<PromptResult> {
-  return engine.prompt(message, { behavior, images })
+  return currentEngine.prompt(message, { behavior, images })
 }
 
 async function reloadPiConfig(): Promise<void> {
   if (btwActive) await closeSideChat()
   await refreshAgents()
-  if (engine.busy()) {
+  if (currentEngine.busy()) {
     // pi cannot pick up new MCP servers mid-run; remember it and restart when the run settles,
     // otherwise the switch the user just flipped would silently never apply.
     configPending = true
@@ -1322,6 +1326,7 @@ function registerIpc(): void {
   })
 
   ipcMain.handle('desktop:config', () => ({
+    engine: desktopConfig.engine === 'prophey' ? 'prophey' : 'pi',
     cwd: status.cwd,
     sessionMode: currentSessionMode(),
     sessionDir: currentSessionDir(),
@@ -1366,6 +1371,22 @@ function registerIpc(): void {
   ipcMain.handle('updates:auto', (_event, enabled: boolean) => updates.setAuto(enabled))
   ipcMain.handle('app:proxy', () => getProxyInfo())
 
+  ipcMain.handle('desktop:set-engine', async (_event, next: 'pi' | 'prophey') => {
+    if (btwActive) await closeSideChat()
+    const engine = next === 'prophey' ? 'prophey' : 'pi'
+    await saveConfig({
+      engine,
+      ...(engine === 'prophey' && !desktopConfig.propheySessionId
+        ? { propheySessionId: `s_${Math.random().toString(16).slice(2, 14)}` }
+        : {})
+    })
+    // The engine object itself changes, so a restart is a rebuild, not a relaunch.
+    const previous = currentEngine
+    currentEngine = createEngine()
+    previous.dispose()
+    return startPi(status.cwd)
+  })
+
   ipcMain.handle('desktop:set-session-mode', async (_event, mode: SessionMode) => {
     if (btwActive) await closeSideChat()
     await saveConfig({ sessionMode: mode === 'isolated' ? 'isolated' : 'shared' })
@@ -1401,20 +1422,24 @@ function registerIpc(): void {
     // A subagent that settles right after a manual stop must not start a new turn behind the
     // user's back; the notice is queued instead (see subagentManager onSettle).
     lastAbortAt = Date.now()
-    if (!engine.running()) return
+    if (!currentEngine.running()) return
     try {
-      await engine.abort()
+      await currentEngine.abort()
     } catch {
       // ignore
     }
-    await engine.refresh()
+    await currentEngine.refresh()
   })
 
   ipcMain.handle('pi:new-session', async () => {
-    if (!engine.running()) return { ok: false, error: 'pi 未运行' }
+    if (!currentEngine.running()) return { ok: false, error: 'pi 未运行' }
     if (btwActive) await closeSideChat()
     try {
-      const response = await engine.newSession()
+      // Our engine keeps its own transcript, so a new session is a new file.
+      if (currentEngine instanceof PropheyEngine) {
+        await saveConfig({ propheySessionId: `s_${Math.random().toString(16).slice(2, 14)}` })
+      }
+      const response = await currentEngine.newSession()
       return { ok: true, cancelled: response.cancelled }
     } catch (error) {
       return { ok: false, error: error instanceof Error ? error.message : String(error) }
@@ -1422,10 +1447,10 @@ function registerIpc(): void {
   })
 
   ipcMain.handle('pi:switch-session', async (_event, sessionPath: string) => {
-    if (!engine.running()) return { ok: false, error: 'pi 未运行' }
+    if (!currentEngine.running()) return { ok: false, error: 'pi 未运行' }
     if (btwActive) await closeSideChat()
     try {
-      await engine.switchSession(sessionPath)
+      await currentEngine.switchSession(sessionPath)
       return { ok: true }
     } catch (error) {
       return { ok: false, error: error instanceof Error ? error.message : String(error) }
@@ -1433,8 +1458,8 @@ function registerIpc(): void {
   })
 
   ipcMain.handle('pi:get-messages', async () => {
-    if (!engine.running()) return []
-    return engine.messages()
+    if (!currentEngine.running()) return []
+    return currentEngine.messages()
   })
 
   ipcMain.handle('pi:list-sessions', async () => {
@@ -1447,9 +1472,9 @@ function registerIpc(): void {
   })
 
   ipcMain.handle('pi:session-stats', async () => {
-    if (!engine.running()) return {}
+    if (!currentEngine.running()) return {}
     try {
-      return (await engine.stats()) as SessionStats
+      return (await currentEngine.stats()) as SessionStats
     } catch {
       return {}
     }
@@ -1654,7 +1679,7 @@ function registerIpc(): void {
     // Compacting the fork would summarize the throwaway branch and leave the real session alone.
     if (btwActive) await closeSideChat()
     try {
-      const result = await engine.compact(instructions)
+      const result = await currentEngine.compact(instructions)
       return { ok: true, summary: result.summary }
     } catch (error) {
       return { ok: false, error: error instanceof Error ? error.message : String(error) }
@@ -1667,7 +1692,7 @@ function registerIpc(): void {
    */
   ipcMain.handle('pi:set-auto-compact', async (_event, enabled: boolean) => {
     try {
-      await engine.setAutoCompaction({ enabled })
+      await currentEngine.setAutoCompaction({ enabled })
       await providers.setCompactionSettings({ enabled })
       autoCompactEnabled = enabled
       broadcastStatus()
@@ -1739,8 +1764,8 @@ function registerIpc(): void {
       await providers.setCompactionSettings({ enabled: true })
       // `syncAutoCompact` only restarts when the reserve changes, so make the switch effective for
       // the process that is running right now (it may have been left with compaction off).
-      if (engine.running()) {
-        await engine.setAutoCompaction({ enabled: true }).catch(() => undefined)
+      if (currentEngine.running()) {
+        await currentEngine.setAutoCompaction({ enabled: true }).catch(() => undefined)
       }
       broadcastStatus()
       const reserveTokens = await syncAutoCompact({ restart: true })
@@ -1772,10 +1797,10 @@ function registerIpc(): void {
   ipcMain.handle('pi:btw-start', async (_event, question: string) => {
     const trimmed = question.trim()
     if (!trimmed) return { ok: false, error: '缺少问题' }
-    if (!engine.running()) return { ok: false, error: 'pi 未运行' }
+    if (!currentEngine.running()) return { ok: false, error: 'pi 未运行' }
     if (btwActive) await closeSideChat()
     const generation = ++btwGeneration
-    if (engine.busy() && !(await engine.waitForIdle(600_000))) {
+    if (currentEngine.busy() && !(await currentEngine.waitForIdle(600_000))) {
       return { ok: false, error: '当前回合还没结束，稍后再问' }
     }
     if (generation !== btwGeneration) return { ok: false, error: '侧边提问已取消' }
@@ -1785,7 +1810,7 @@ function registerIpc(): void {
     btwOriginal = original
     try {
       // `fork` requires a specific entry id and rejects the leaf; `clone` is the snapshot we want.
-      const forkPath = await engine.clone()
+      const forkPath = await currentEngine.clone()
       if (forkPath) btwFork = forkPath
       const answer = await btwPrompt(trimmed)
       return { ok: true, answer: answer.text, settled: answer.settled, forkPath: btwFork }
@@ -1800,7 +1825,7 @@ function registerIpc(): void {
     const trimmed = question.trim()
     if (!trimmed) return { ok: false, error: '缺少问题' }
     if (!btwActive) return { ok: false, error: '侧边提问已经关闭了' }
-    if (engine.busy() && !(await engine.waitForIdle(600_000))) {
+    if (currentEngine.busy() && !(await currentEngine.waitForIdle(600_000))) {
       return { ok: false, error: '上一轮还在回答，稍等一下' }
     }
     if (!btwActive) return { ok: false, error: '侧边提问已经关闭了' }
@@ -1968,9 +1993,9 @@ function registerIpc(): void {
   ipcMain.handle('settings:models', () => providers.listModelChoices())
 
   ipcMain.handle('pi:list-models', async () => {
-    if (!engine.running()) return []
+    if (!currentEngine.running()) return []
     try {
-      const models = await engine.models()
+      const models = await currentEngine.models()
       const names = new Map<string, string>()
       try {
         for (const provider of await providers.listProviders()) {
@@ -2000,9 +2025,9 @@ function registerIpc(): void {
   })
 
   ipcMain.handle('pi:set-model', async (_event, provider: string, modelId: string) => {
-    if (!engine.running()) return { ok: false, error: 'pi 未运行' }
+    if (!currentEngine.running()) return { ok: false, error: 'pi 未运行' }
     try {
-      await engine.setModel(provider, modelId)
+      await currentEngine.setModel(provider, modelId)
       // A different window means a different 90% point; pi only reads the reserve at startup, so
       // this restarts when (and only when) the number actually changed.
       await syncAutoCompact({ restart: true }).catch(() => undefined)
@@ -2013,18 +2038,18 @@ function registerIpc(): void {
   })
 
   ipcMain.handle('pi:list-thinking-levels', async () => {
-    if (!engine.running()) return []
+    if (!currentEngine.running()) return []
     try {
-      return engine.thinkingLevels()
+      return currentEngine.thinkingLevels()
     } catch {
       return []
     }
   })
 
   ipcMain.handle('pi:set-thinking-level', async (_event, level: string) => {
-    if (!engine.running()) return { ok: false, error: 'pi 未运行' }
+    if (!currentEngine.running()) return { ok: false, error: 'pi 未运行' }
     try {
-      await engine.setThinkingLevel(level)
+      await currentEngine.setThinkingLevel(level)
       setStatus({ thinkingLevel: level })
       return { ok: true }
     } catch (error) {
@@ -2131,7 +2156,7 @@ let shuttingDown = false
 
 function handleExit(): void {
   if (status.phase === 'stopped') return
-  setStatus({ phase: 'error', error: engine.stderrTail() || 'pi 进程已退出', isStreaming: false })
+  setStatus({ phase: 'error', error: currentEngine.stderrTail() || 'pi 进程已退出', isStreaming: false })
   if (shuttingDown) return
   // pi died on its own (a crashing extension, an OOM kill). Leaving the window dead means the next
   // message is lost with "pi 未运行", so bring it back on the same session.
@@ -2144,7 +2169,7 @@ function handleExit(): void {
   crashRestarts += 1
   console.warn(`[pi] exited unexpectedly, restarting (${crashRestarts}/3)`)
   setTimeout(() => {
-    if (!shuttingDown && !engine.running() && !engine.starting()) {
+    if (!shuttingDown && !currentEngine.running() && !currentEngine.starting()) {
       void startPi(status.cwd, sessionArgs())
     }
   }, 1000)
@@ -2161,8 +2186,11 @@ app.whenReady().then(async () => {
   // The window's session list: ids, titles and workspaces we own; pi's files are engine storage.
   sessionStore = new SessionStore(path.join(app.getPath('userData'), 'sessions.json'))
   await sessionStore.load().catch(() => undefined)
-  engine = createEngine()
-  if (engine instanceof PiEngine) engine.watch()
+  if (desktopConfig.engine === 'prophey' && !desktopConfig.propheySessionId) {
+    await saveConfig({ propheySessionId: `s_${Math.random().toString(16).slice(2, 14)}` })
+  }
+  currentEngine = createEngine()
+  if (currentEngine instanceof PiEngine) currentEngine.watch()
   // Before anything reads a provider, model list or MCP config: point the modules at the profile.
   applyProfile()
   await loadToolCache()
@@ -2253,7 +2281,7 @@ async function startBridge(): Promise<void> {
 app.on('window-all-closed', () => {
   shuttingDown = true
   cancelPendingAsks('桌面窗口已关闭')
-  engine.dispose()
+  currentEngine.dispose()
   subagents?.stopAll(true)
   gateway.stopAll(true)
   status = { ...status, phase: 'stopped' }
@@ -2274,5 +2302,5 @@ app.on('before-quit', () => {
       // already gone
     }
   }
-  engine.dispose()
+  currentEngine.dispose()
 })

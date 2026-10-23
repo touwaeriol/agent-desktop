@@ -39,6 +39,7 @@ const bridge: PiBridge = {
   openSession: (sessionPath: string, cwd: string) =>
     ipcRenderer.invoke('pi:open-session', sessionPath, cwd) as Promise<PiStatus>,
   getDesktopConfig: () => ipcRenderer.invoke('desktop:config'),
+  setEngine: (engine: 'pi' | 'prophey') => ipcRenderer.invoke('desktop:set-engine', engine),
   setSessionMode: (mode: 'shared' | 'isolated') =>
     ipcRenderer.invoke('desktop:set-session-mode', mode) as Promise<PiStatus>,
   setProfile: (mode: 'shared' | 'desktop') => ipcRenderer.invoke('desktop:set-profile', mode),

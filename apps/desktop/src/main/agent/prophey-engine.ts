@@ -1,6 +1,7 @@
 import type { Model } from '@earendil-works/pi-ai'
 import type { PiModel, PiStatus, PromptImage, PromptResult } from '@shared/types'
 import * as providers from '../providers'
+import type { TranscriptStore } from '../transcript-store'
 import { loadWorkspaceTools, toolDeclarations, type CoreTool } from './core-tools'
 import type { AgentEngine, AgentWorkspace } from './engine'
 
@@ -27,6 +28,8 @@ export class PropheyEngine implements AgentEngine {
   private model: Model<string> | undefined
   private transcript: Array<Record<string, unknown>> = []
   private tools: CoreTool[] | undefined
+  private sessionId: string | undefined
+  private loaded = false
 
   constructor(
     private readonly options: {
@@ -35,6 +38,10 @@ export class PropheyEngine implements AgentEngine {
       onSettled(): void
       /** Absolute path of `tools/workspace.mjs`; the tools are shared with pi's MCP server. */
       toolModulePath?: string
+      /** Where our own transcripts live; without it the conversation stays in memory. */
+      transcripts?: TranscriptStore
+      /** Current session id; the app allocates and rotates it. */
+      sessionId?: () => string | undefined
     }
   ) {}
 
@@ -74,6 +81,10 @@ export class PropheyEngine implements AgentEngine {
     this.roots = { primary: wanted.primary, additional: [...wanted.additional] }
     this.snapshot = { phase: 'ready', cwd: wanted.primary, isStreaming: false, compacting: false }
     this.options.onStatus(this.snapshot)
+    // Pick a model up front: the window reads it from the status, and an unset model shows as
+    // "未登录 / 无可用模型" even though the engine is perfectly able to run.
+    if (!this.model) await this.pickModel().catch(() => undefined)
+    await this.resume()
     return this.snapshot
   }
 
@@ -168,6 +179,9 @@ export class PropheyEngine implements AgentEngine {
 
   newSession(): Promise<{ cancelled?: boolean }> {
     this.transcript = []
+    // A new session means a new transcript file: ask the app for the id it just allocated.
+    this.sessionId = this.options.sessionId?.() ?? this.sessionId
+    this.persist()
     return Promise.resolve({ cancelled: false })
   }
 
@@ -189,6 +203,42 @@ export class PropheyEngine implements AgentEngine {
     await this.prompt(message)
   }
   // --- the turn --------------------------------------------------------------------------------
+
+  /** First configured model, published to the status so the window shows it. */
+  private async pickModel(): Promise<Model<string> | undefined> {
+    const runtime = await providers.getRuntime()
+    const choices = await providers.listModelChoices({ includeUnconfigured: false })
+    const first = choices[0]
+    if (!first) return undefined
+    const model = runtime.getModel(first.provider, first.id) as Model<string> | undefined
+    if (model) {
+      this.model = model
+      this.setStatus({ model: modelInfo(model) })
+    }
+    return model
+  }
+
+  /** Restore the stored conversation for this session, once per process. */
+  private async resume(): Promise<void> {
+    if (this.loaded) return
+    this.loaded = true
+    this.sessionId = this.options.sessionId?.()
+    const store = this.options.transcripts
+    if (!store || !this.sessionId) return
+    const stored = await store.load(this.sessionId).catch(() => undefined)
+    if (!stored) return
+    this.transcript = stored.messages
+    // The window draws the transcript from the engine, so it has to hear about the restored one.
+    for (const message of this.transcript) {
+      this.options.onEvent({ type: 'message_end', message })
+    }
+  }
+
+  private persist(): void {
+    const store = this.options.transcripts
+    if (!store || !this.sessionId) return
+    void store.save(this.sessionId, this.roots, this.transcript).catch(() => undefined)
+  }
 
   /** Tools are loaded once; the module is the same one pi's MCP server serves. */
   private async toolSet(): Promise<CoreTool[]> {
@@ -256,6 +306,7 @@ export class PropheyEngine implements AgentEngine {
       timestamp: Date.now()
     }
     this.transcript.push(user)
+    this.persist()
     this.isBusy = true
     this.setStatus({ isStreaming: true })
     this.options.onEvent({ type: 'agent_start' })
@@ -265,14 +316,17 @@ export class PropheyEngine implements AgentEngine {
       // One round = one model response. A round that asks for tools is followed by another round,
       // which is the whole loop: think, call, read the result, continue.
       for (let round = 0; round < MAX_ROUNDS; round += 1) {
-        const answer = await this.streamRound(runtime, model, tools)
+        const answer = await this.streamRoundWithRetry(runtime, model, tools)
         if (!answer.ok) {
           this.finishWithError(answer.error)
           return { ok: false, error: answer.error }
         }
         const calls = toolCallsOf(answer.message)
         if (calls.length === 0) break
-        for (const call of calls) this.transcript.push(await this.runTool(call, tools))
+        for (const call of calls) {
+          this.transcript.push(await this.runTool(call, tools))
+          this.persist()
+        }
       }
       this.isBusy = false
       this.setStatus({ isStreaming: false })
@@ -285,6 +339,35 @@ export class PropheyEngine implements AgentEngine {
       this.finishWithError(text)
       return { ok: false, error: text }
     }
+  }
+
+  /**
+   * One model call with a small retry budget.
+   *
+   * Provider streams fail for transient reasons (connection reset, 429, 5xx). pi retries these too;
+   * a turn that dies on the first blip is worse than one that waits two seconds.
+   */
+  private async streamRoundWithRetry(
+    runtime: Awaited<ReturnType<typeof providers.getRuntime>>,
+    model: Model<string>,
+    tools: CoreTool[]
+  ): Promise<{ ok: true; message: Record<string, unknown> } | { ok: false; error: string }> {
+    let lastError = ''
+    for (let attempt = 0; attempt < RETRY_DELAYS_MS.length; attempt += 1) {
+      const result = await this.streamRound(runtime, model, tools)
+      if (result.ok) return result
+      lastError = result.error
+      if (!isRetryable(lastError)) return result
+      this.options.onEvent({
+        type: 'auto_retry_start',
+        attempt: attempt + 1,
+        delayMs: RETRY_DELAYS_MS[attempt],
+        error: lastError
+      })
+      await new Promise((resolve) => setTimeout(resolve, RETRY_DELAYS_MS[attempt]))
+      this.options.onEvent({ type: 'auto_retry_end', success: false })
+    }
+    return { ok: false, error: lastError }
   }
 
   /** One model call; appends the assistant message and streams its deltas to the window. */
@@ -323,6 +406,7 @@ export class PropheyEngine implements AgentEngine {
     const message = (partial ?? { role: 'assistant', content: [] }) as Record<string, unknown>
     this.transcript.push(message)
     this.options.onEvent({ type: 'message_end', message })
+    this.persist()
     return { ok: true, message }
   }
 
@@ -381,6 +465,16 @@ export class PropheyEngine implements AgentEngine {
 
 /** Rounds per turn: a tool-using answer rarely needs more, and it bounds a runaway loop. */
 const MAX_ROUNDS = 16
+
+/** Backoff before each retry; length is the retry budget. */
+const RETRY_DELAYS_MS = [1500, 4000, 9000]
+
+/** Only transient failures are worth another attempt: a bad key or a bad request never recovers. */
+function isRetryable(message: string): boolean {
+  return /rate.?limit|429|overloaded|timeout|timed out|ECONNRESET|socket hang up|network|fetch failed|502|503|504|stream (ended|closed)|premature close/i.test(
+    message
+  )
+}
 
 /** The status shape the window expects for the current model. */
 function modelInfo(model: Model<string>): PiModel {

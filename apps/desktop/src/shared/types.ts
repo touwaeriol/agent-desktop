@@ -257,6 +257,8 @@ export interface DesktopConfig {
   cliDir: string
   /** Project the window is working in, when one is selected. */
   activeProject?: string
+  /** Which engine runs the turn. */
+  engine?: 'pi' | 'prophey'
 }
 
 export type AppUpdateStatus =
@@ -511,6 +513,8 @@ export interface PiBridge {
   openSession(sessionPath: string, cwd: string): Promise<PiStatus>
   getDesktopConfig(): Promise<DesktopConfig>
   setSessionMode(mode: 'shared' | 'isolated'): Promise<PiStatus>
+  /** Switch the engine; the main process rebuilds it and restarts the session. */
+  setEngine(engine: 'pi' | 'prophey'): Promise<PiStatus>
   /** Switch between the CLI's pi profile and the desktop's own directory. */
   setProfile(mode: 'shared' | 'desktop'): Promise<{
     ok: boolean

@@ -850,6 +850,20 @@ export function SettingsModal({
     void loadSettings()
   }, [modelConfig, loadProviders, loadSettings])
 
+  const changeEngine = useCallback(async (engine: 'pi' | 'prophey') => {
+    const next = await window.pi.setEngine(engine)
+    if (next.phase === 'error') {
+      setError(next.error ?? '切换引擎失败')
+      return
+    }
+    setDesktopConfig(await window.pi.getDesktopConfig())
+    setNotice(
+      engine === 'prophey'
+        ? '已切换到 Prophey 引擎（自带循环与工具；压缩、子代理、/btw 还不支持）'
+        : '已切换到 pi 引擎'
+    )
+  }, [])
+
   const changeSessionMode = useCallback(async (mode: 'shared' | 'isolated') => {
     const next = await window.pi.setSessionMode(mode)
     if (next.phase === 'error') {
@@ -1213,6 +1227,31 @@ export function SettingsModal({
                     <span className="field-inline">只补缺失文件，不覆盖已有配置</span>
                   </div>
                 )}
+              </div>
+
+              <div className="field">
+                <label>引擎</label>
+                <div className="theme-switch storage-switch">
+                  <button
+                    className={desktopConfig?.engine !== 'prophey' ? 'active' : ''}
+                    onClick={() => void changeEngine('pi')}
+                  >
+                    pi
+                  </button>
+                  <button
+                    className={desktopConfig?.engine === 'prophey' ? 'active' : ''}
+                    onClick={() => void changeEngine('prophey')}
+                  >
+                    Prophey
+                  </button>
+                </div>
+                <p className="field-hint">
+                  pi：完整的编码 agent（工具、压缩、子代理、扩展、<code>/btw</code>）。
+                </p>
+                <p className="field-hint">
+                  Prophey：我们自己的循环——直连服务商、跑同一套根感知工具、会话存我们自己的
+                  transcript。压缩、自动重试之外的恢复、子代理与 <code>/btw</code> 还不支持。
+                </p>
               </div>
 
               <div className="field">

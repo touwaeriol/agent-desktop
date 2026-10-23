@@ -1,4 +1,4 @@
-# pi-mcps
+# Prophey（仓库原名 pi-mcps，本地目录不变）
 
 ## Layout
 
@@ -129,9 +129,12 @@ npm run typecheck    # node + web 两个 tsconfig 分别检查
 - `index.ts` 里的 `status` 只是**镜像**：引擎通过 `onStatus` 推过来，`statusSnapshot()` 再加应用自己的字段（压缩百分比、档位、仓库）。写状态必须走 `engine.setStatus()`，不要直接赋值。
 - 新增 pi 调用时用引擎的**语义方法**（`setModel` / `thinkingLevels` / `stats` / `messages` / `compact` / `newSession` / `switchSession` / `clone` / `abort` / `send`），**不要**再写 `engine.request('set_model')` 这种命令名：那等于把 pi 的命令表写进窗口，第二个引擎就接不进来。`PiEngine` 里这些方法只是薄封装，`index.ts` 已无一处 `engine.request(`。
 - `engine.prompt()` 承担「窗口和 pi 对忙碌判断不一致」的全部兜底（压缩中等空闲后重试、`already processing` 改发 `followUp` 并回 `queued: true`），所以它是唯一发送入口；不要在别处再包一层重试。
-- **own 引擎（v1，实验）**：`agent/own-engine.ts`，`config.engine = 'own'` 才启用（默认 `pi`）。它自己调 `ModelRuntime.streamSimple` 跑循环：一轮 = 一次模型回复，回复里有 `toolCall` 就执行、把 `toolResult` 塞回 transcript、再来一轮（上限 `MAX_ROUNDS = 16`），事件流和 pi 一致（`agent_start → message_start → message_update… → message_end → tool_execution_start/end → agent_end → agent_settled`）。transcript 只在内存里。
-- own 引擎的工具**复用 pi 那边同一份实现**：`agent/core-tools.ts` 按绝对路径 import `packages/mcp-core/tools/workspace.mjs`（打包后在 `resources/mcp/tools/`），不复制第二份；工具调用的 `root` 语义、越界拒绝、Git Bash 路径全部一致。
-- own 引擎还缺：会话持久化、压缩、自动重试、子代理、`/btw`、扩展钩子；以及**登录/模型横幅的语义**（横幅看 `status.model`，own 引擎在第一次发消息才确定模型，所以首屏会显示「未登录/无可用模型」）。这些方法一律抛「own 引擎 v1 还不支持…」。
+- **Prophey 引擎（v1）**：`agent/prophey-engine.ts`，`config.engine = 'prophey'` 或设置 → 引擎切换（默认 `pi`）。它自己调 `ModelRuntime.streamSimple` 跑循环：一轮 = 一次模型回复，回复里有 `toolCall` 就执行、把 `toolResult` 塞回 transcript、再来一轮（上限 `MAX_ROUNDS = 16`），事件流和 pi 一致（`agent_start → message_start → message_update… → message_end → tool_execution_start/end → agent_end → agent_settled`）。transcript 只在内存里。
+- Prophey 引擎的工具**复用 pi 那边同一份实现**：`agent/core-tools.ts` 按绝对路径 import `packages/mcp-core/tools/workspace.mjs`（打包后在 `resources/mcp/tools/`），不复制第二份；工具调用的 `root` 语义、越界拒绝、Git Bash 路径全部一致。
+- **会话持久化**：`transcript-store.ts` 把 transcript 写 `userData/transcripts/<sessionId>.jsonl`（头行 + 每条消息一行，全量重写、原子 rename）；`start()` 时 resume 一次并把历史按 `message_end` 重放给窗口，所以刷新/重启后对话还在。sessionId 存在 `config.propheySessionId`，新建会话时轮换。
+- **重试**：`streamRoundWithRetry` 对瞬时错误（429/5xx/timeout/ECONNRESET/流提前关闭）退避重试 3 次，发 `auto_retry_start/end`；鉴权/参数错误不重试。
+- Prophey 引擎还缺：上下文压缩、子代理、`/btw`、扩展钩子。这些方法一律抛「Prophey 引擎 v1 还不支持…」。切换引擎是热替换（`desktop:set-engine` 重建引擎对象并重启会话），不需要退出应用。
+- 改名说明：产品名是 Prophey，但 `app.setName('agent-desktop')` **故意保留**——它决定 `%APPDATA%/agent-desktop`，改了等于丢失用户的配置、会话、项目和凭据。
 - 还没搬完的部分：`/btw` 的 clone/switch、压缩阈值同步、登录消息、MCP 启动参数装配（`prepare` 仍由 `index.ts` 提供，这是刻意的）。
 
 ## 会话存储（我们自己的）
@@ -184,7 +187,7 @@ npm run typecheck    # node + web 两个 tsconfig 分别检查
 ## Updates & packaging
 
 - 更新实现：`apps/desktop/src/main/updates.ts` 使用 `electron-updater`。打包版走 electron-updater（GitHub Release 的 `latest.yml` + NSIS 安装包）；开发模式用 GitHub Release API 只做版本检测，`canInstall=false`。启动 5 秒后及每 6 小时自动检查，开关存在 userData 的 `updates.json`。
-- 更新源默认 `touwaeriol/agent-desktop`，可用环境变量覆盖：`PI_DESKTOP_UPDATE_REPO=owner/repo`、`PI_DESKTOP_UPDATE_URL=<generic feed>`、`PI_DESKTOP_RELEASES_URL=<发布页>`。`electron-builder.yml` 的 `publish` 也要同步 owner/repo。
+- 更新源默认 `touwaeriol/prophey`，可用环境变量覆盖：`PI_DESKTOP_UPDATE_REPO=owner/repo`、`PI_DESKTOP_UPDATE_URL=<generic feed>`、`PI_DESKTOP_RELEASES_URL=<发布页>`。`electron-builder.yml` 的 `publish` 也要同步 owner/repo。
 - 打包：根目录 `npm run dist`（`electron-builder.yml`，NSIS，输出 `release/`）。`asarUnpack` 包含 `@earendil-works/**`、`quickjs-wasi`、`@silvia-odwyer/**`；`findBundledCli` 在打包版优先从 `process.resourcesPath/app.asar.unpacked` 找 pi CLI。
 - 系统代理：`proxy.ts` 用 `session.resolveProxy` 解析系统代理，设置 `HTTP(S)_PROXY`/`NO_PROXY`/`NODE_USE_ENV_PROXY`，并通过 `setGlobalDispatcher(new EnvHttpProxyAgent())` 让主进程 fetch 走代理；pi 子进程继承同一环境。设置页「网络代理」显示检测结果。
 - 应用名：`app.setName('agent-desktop')`，userData 为 `%APPDATA%\agent-desktop`；启动时会从旧 `%APPDATA%\@pi-mcps\desktop` 迁移 `config.json`/`device-id`/`updates.json`。
