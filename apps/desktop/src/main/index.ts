@@ -621,25 +621,49 @@ const WORKSPACE_SKIP = new Set([
 ])
 const WORKSPACE_MAX_FILES = 4000
 
-async function listWorkspaceFiles(root: string): Promise<string[]> {
+/**
+ * Files for the composer's `@` picker, across the whole project.
+ *
+ * The primary root keeps relative paths (that is how the model resolves them from its working
+ * directory); every other repository is listed with absolute paths, which `read`/`edit` accept, so
+ * a mention still works without pretending the other repo is a subdirectory.
+ */
+async function listWorkspaceFiles(roots: string[]): Promise<string[]> {
+  const all = roots.length > 0 ? roots : [status.cwd]
+  const primary = path.resolve(status.cwd)
+  // The repository pi sits in is what the user is working on: it gets the larger share, and the
+  // others split the rest instead of flooding the list (an installed tool directory can hold more
+  // files than the whole project).
+  const ordered = [primary, ...all.map((root) => path.resolve(root)).filter((root) => root !== primary)]
+  const primaryBudget = ordered.length > 1 ? Math.floor(WORKSPACE_MAX_FILES * 0.6) : WORKSPACE_MAX_FILES
+  const otherBudget = ordered.length > 1 ? Math.floor((WORKSPACE_MAX_FILES - primaryBudget) / (ordered.length - 1)) : 0
   const files: string[] = []
-  const queue = [root]
-  while (queue.length > 0 && files.length < WORKSPACE_MAX_FILES) {
-    const dir = queue.pop() as string
-    let entries
-    try {
-      entries = await fs.readdir(dir, { withFileTypes: true })
-    } catch {
-      continue
-    }
-    for (const entry of entries) {
-      if (files.length >= WORKSPACE_MAX_FILES) break
-      const full = path.join(dir, entry.name)
-      if (entry.isDirectory()) {
-        if (WORKSPACE_SKIP.has(entry.name)) continue
-        queue.push(full)
-      } else if (entry.isFile()) {
-        files.push(path.relative(root, full).split(path.sep).join('/'))
+  for (const [index, absoluteRoot] of ordered.entries()) {
+    const budget = index === 0 ? primaryBudget : Math.max(200, otherBudget)
+    const queue = [absoluteRoot]
+    let count = 0
+    while (queue.length > 0 && count < budget) {
+      const dir = queue.pop() as string
+      let entries
+      try {
+        entries = await fs.readdir(dir, { withFileTypes: true })
+      } catch {
+        continue
+      }
+      for (const entry of entries) {
+        if (count >= budget) break
+        const full = path.join(dir, entry.name)
+        if (entry.isDirectory()) {
+          if (WORKSPACE_SKIP.has(entry.name)) continue
+          queue.push(full)
+        } else if (entry.isFile()) {
+          count += 1
+          files.push(
+            absoluteRoot === primary
+              ? path.relative(absoluteRoot, full).split(path.sep).join('/')
+              : full.split(path.sep).join('/')
+          )
+        }
       }
     }
   }
@@ -1381,7 +1405,11 @@ function registerIpc(): void {
     return true
   })
 
-  ipcMain.handle('workspace:files', () => listWorkspaceFiles(status.cwd))
+  ipcMain.handle('workspace:files', () => {
+    // A project's picker covers every repository, not just the one pi sits in.
+    const roots = activeProject()?.roots.map((root) => root.path) ?? [status.cwd]
+    return listWorkspaceFiles(roots)
+  })
 
   ipcMain.handle('mcp:set-enabled', async (_event, enabled: boolean) => {
     await saveConfig({ mcp: { ...desktopConfig.mcp, enabled: Boolean(enabled) } })

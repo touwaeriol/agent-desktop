@@ -136,7 +136,9 @@ npm run typecheck    # node + web 两个 tsconfig 分别检查
 - 最近仓库 `config.recentRepos`（最多 12 个，启动时更新），侧栏「更多 → 最近仓库」；每仓库默认模型/思考等级存 `config.repoDefaults[cwd]`，**只在新建会话时应用**（带 `--session` 的重启不覆盖用户当前选择）。
 - 项目激活时**会话目录也归到项目**：`--session-dir <profile>/sessions/projects/<projectId>`，`listSessions()` 仍然从 profile 根递归读，所以旧会话不会消失。
 - 索引按项目铺开：`afterStart` 对主仓库和项目的每个根都调 `startCodegraphIndex`（`indexedRoots` 去重），否则跨仓库时代码图只覆盖主仓库。
-- 项目编辑在 `ProjectEditor.tsx`（改名 / 加仓库 / 移除仓库 / 换主仓库），保存走 `projects:update`；取目录用 `repos:pick-folders`（**无副作用**，不要复用 `pi:choose-workspace`，它会切会话）。
+- 项目编辑在 `ProjectEditor.tsx`（改名 / 加仓库 / 移除仓库 / 换主仓库），保存走 `projects:update`；取目录用 `repos:pick-folders`（**无副作用**，不要复用 `pi:choose-workspace`，它会切会话）。移除仓库和删除项目都要**两步确认**，并且最后一个仓库不能被移除（`项目至少要有一个仓库`）。
+- `@` 上下文选择器（`workspace:files`）覆盖项目的**所有根**：主仓库给相对路径（模型从 cwd 解析），其他仓库给绝对路径（`read`/`edit` 接受），预算主仓库 60%、其余平分——一个装了几千文件的工具目录否则会把列表淹掉。
+- 侧栏视图选项里有「只看「项目名」」（`prefs.onlyActiveProject`），用来隐藏不属于当前项目的会话。
 
 ## 速度档位（fast / ultrafast）
 

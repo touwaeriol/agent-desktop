@@ -34,13 +34,16 @@ interface Prefs {
   group: GroupMode
   sort: SortMode
   showEmptyGroups: boolean
+  /** Hide sessions that belong to another project (or to none) while a project is active. */
+  onlyActiveProject: boolean
 }
 
 const DEFAULT_PREFS: Prefs = {
   environment: 'all',
   group: 'folder',
   sort: 'activity',
-  showEmptyGroups: false
+  showEmptyGroups: false,
+  onlyActiveProject: false
 }
 
 const STATUS_LABELS: Record<StatusFilter, string> = {
@@ -84,7 +87,8 @@ function loadPrefs(): Prefs {
       sort: SORT_OPTIONS.includes(raw.sort as SortMode)
         ? (raw.sort as SortMode)
         : DEFAULT_PREFS.sort,
-      showEmptyGroups: Boolean(raw.showEmptyGroups)
+      showEmptyGroups: Boolean(raw.showEmptyGroups),
+      onlyActiveProject: Boolean(raw.onlyActiveProject)
     }
   } catch {
     return DEFAULT_PREFS
@@ -415,6 +419,14 @@ export function Sidebar({
         })
     }
 
+    // "Only this project" hides everything that is not one of its repositories.
+    const projectFiltered =
+      prefs.onlyActiveProject && activeProject
+        ? visible.filter((session) =>
+            activeProject.roots.some((root) => pathKey(root.path) === pathKey(session.cwd || ''))
+          )
+        : visible
+
     const folders = new Map<string, SessionSummary[]>()
     // Sessions are keyed by repository, but a project groups several of them under one head so the
     // list reads as "the thing I am working on" instead of three unrelated folders.
@@ -424,7 +436,7 @@ export function Sidebar({
       const belongs = activeProject.roots.some((root) => pathKey(root.path) === needle)
       return belongs ? 'project:' + activeProject.id : dir
     }
-    for (const session of visible) {
+    for (const session of projectFiltered) {
       const key = projectKey(session.cwd || '')
       const list = folders.get(key) ?? []
       list.push(session)
@@ -462,7 +474,17 @@ export function Sidebar({
       prefs.sort === 'name' ? a.label.localeCompare(b.label, 'zh-CN') : b.latest - a.latest
     )
     return result
-  }, [sessions, pinned, prefs, archived, projectStatus, projectQueries, status.cwd, activeProject])
+  }, [
+    sessions,
+    pinned,
+    prefs,
+    archived,
+    projectStatus,
+    projectQueries,
+    status.cwd,
+    activeProject
+  ])
+
 
   useEffect(() => {
     if (!activePath) return
@@ -640,6 +662,17 @@ export function Sidebar({
               {prefs.showEmptyGroups && <CheckIcon size={11} />}
             </span>
           </button>
+          {activeProject && (
+            <button
+              className="filter-row"
+              onClick={() => updatePrefs({ onlyActiveProject: !prefs.onlyActiveProject })}
+            >
+              <span>只看「{activeProject.name}」</span>
+              <span className={`filter-check ${prefs.onlyActiveProject ? 'on' : ''}`}>
+                {prefs.onlyActiveProject && <CheckIcon size={11} />}
+              </span>
+            </button>
+          )}
           <button
             className="filter-row disabled"
             disabled

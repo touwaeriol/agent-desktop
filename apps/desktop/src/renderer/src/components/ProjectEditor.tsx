@@ -20,6 +20,8 @@ export function ProjectEditor({
   const [name, setName] = useState(project.name)
   const [roots, setRoots] = useState<ProjectRoot[]>(project.roots)
   const [busy, setBusy] = useState(false)
+  /** Removing a repository is the one destructive action here, so it takes two clicks. */
+  const [pendingRemove, setPendingRemove] = useState<string>()
   const [error, setError] = useState<string>()
 
   useEffect(() => {
@@ -53,6 +55,11 @@ export function ProjectEditor({
       setError('至少要保留一个仓库')
       return
     }
+    if (pendingRemove !== target) {
+      setPendingRemove(target)
+      return
+    }
+    setPendingRemove(undefined)
     setError(undefined)
     setRoots((current) => {
       const next = current.filter((root) => root.path !== target)
@@ -135,14 +142,14 @@ export function ProjectEditor({
                   <span className="project-editor-name">{root.name}</span>
                   <span className="project-editor-path">{root.path}</span>
                   <button
-                    className="project-editor-remove"
-                    title="从项目里移除"
+                    className={`project-editor-remove ${pendingRemove === root.path ? 'confirm' : ''}`}
+                    title={pendingRemove === root.path ? '再点一次移除' : '从项目里移除'}
                     onClick={(event) => {
                       event.stopPropagation()
                       remove(root.path)
                     }}
                   >
-                    <TrashIcon size={12} />
+                    {pendingRemove === root.path ? <span>再点一次</span> : <TrashIcon size={12} />}
                   </button>
                 </div>
               ))}
