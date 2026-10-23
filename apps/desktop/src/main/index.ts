@@ -190,7 +190,11 @@ function createEngine(): AgentEngine {
     return new ClaudeCodeEngine({
       ...shared,
       binary: claudeBinary(),
-      disabledTools: () => desktopConfig.engineTools?.claude ?? []
+      // Ignore retired web toggles so old settings cannot silently disable native search.
+      disabledTools: () =>
+        (desktopConfig.engineTools?.claude ?? []).filter(
+          (tool) => tool !== 'WebFetch' && tool !== 'WebSearch'
+        )
     })
   }
   if (desktopConfig.engine === 'codex') {
@@ -199,7 +203,8 @@ function createEngine(): AgentEngine {
       ...shared,
       binary: command,
       script,
-      disabledTools: () => desktopConfig.engineTools?.codex ?? []
+      disabledTools: () =>
+        (desktopConfig.engineTools?.codex ?? []).filter((tool) => tool !== 'web_search')
     })
   }
   if (desktopConfig.engine !== 'pi') {
@@ -575,6 +580,9 @@ function coreToolsModule(): string | undefined {
  *
  * pi reaches them through its own MCP client; the Prophey engine calls the same endpoints itself,
  * so both engines end up with the same servers for the same project.
+ *
+ * The CLI engines (Claude Code, Codex) are not given these on purpose: they ship their own web
+ * search and their own tool set, and injecting ours would only compete with them.
  */
 async function mcpEndpointsFor(
   workspace: AgentWorkspace

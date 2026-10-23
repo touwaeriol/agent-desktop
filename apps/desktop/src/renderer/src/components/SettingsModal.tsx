@@ -1275,6 +1275,7 @@ export function SettingsModal({
                 <p className="field-hint">
                   Claude Code / Codex：调用本机的 CLI，用它自己的循环、工具和登录。多目录用
                   <code>--add-dir</code>；压缩、<code>/btw</code> 等归 CLI 自己管，引擎会明确报不支持。
+                  它们自带联网搜索，我们不会把自己的 web 工具塞进去。
                 </p>
                 <p className="field-hint">
                   Prophey（默认）：我们自己的循环——直连服务商、根感知工具、MCP、子代理、
@@ -1283,7 +1284,7 @@ export function SettingsModal({
                 {desktopConfig?.engine === 'claude' && (
                   <div className="field-row engine-tools">
                     <span className="field-inline">禁用的工具</span>
-                    {['Bash', 'Write', 'Edit', 'WebFetch', 'WebSearch', 'Task'].map((tool) => {
+                    {['Bash', 'Write', 'Edit', 'Task'].map((tool) => {
                       const off = (desktopConfig?.engineTools?.claude ?? []).includes(tool)
                       return (
                         <button
@@ -1293,25 +1294,6 @@ export function SettingsModal({
                           title={off ? '已禁用，点击恢复' : '点击禁用'}
                         >
                           {tool}
-                          {off ? ' 已禁用' : ''}
-                        </button>
-                      )
-                    })}
-                  </div>
-                )}
-                {desktopConfig?.engine === 'codex' && (
-                  <div className="field-row engine-tools">
-                    <span className="field-inline">禁用的工具</span>
-                    {['web_search'].map((tool) => {
-                      const off = (desktopConfig?.engineTools?.codex ?? []).includes(tool)
-                      return (
-                        <button
-                          key={tool}
-                          className={`ghost ${off ? 'danger' : ''}`}
-                          onClick={() => void toggleEngineTool('codex', tool)}
-                          title={off ? '已禁用，点击恢复' : '点击禁用'}
-                        >
-                          网页搜索
                           {off ? ' 已禁用' : ''}
                         </button>
                       )
