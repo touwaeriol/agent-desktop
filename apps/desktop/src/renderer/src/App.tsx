@@ -5,6 +5,7 @@ import type {
   AskRequest,
   McpState,
   PiStatus,
+  Project,
   RepoInfo,
   SessionSummary,
   SideChatResult,
@@ -321,6 +322,88 @@ export default function App(): React.JSX.Element {
       cancelled = true
     }
   }, [sessions, status.cwd])
+
+  const [projects, setProjects] = useState<Project[]>([])
+  const [activeProjectId, setActiveProjectId] = useState<string>()
+  const [recentRepos, setRecentRepos] = useState<string[]>([])
+
+  const loadProjects = useCallback(async () => {
+    try {
+      const list = await window.pi.listProjects()
+      setProjects(list)
+      const config = await window.pi.getDesktopConfig()
+      setActiveProjectId(config.activeProject)
+      setRecentRepos(await window.pi.recentRepos())
+    } catch {
+      // a missing projects file is not an error, just no projects
+    }
+  }, [])
+
+  useEffect(() => {
+    void loadProjects()
+  }, [loadProjects, status.cwd])
+
+  const activeProject = useMemo(
+    () => projects.find((project) => project.id === activeProjectId),
+    [projects, activeProjectId]
+  )
+
+  const selectProject = useCallback(
+    async (id: string) => {
+      const current = projects.find((project) => project.id === id)
+      const next = activeProjectId === id ? undefined : id
+      setActiveProjectId(next)
+      const result = await window.pi.activateProject(next)
+      if ('phase' in result) setStatus(result)
+      if (current) setToast(`已切换到项目「${current.name}」`)
+      await loadSessions()
+    },
+    [activeProjectId, projects, loadSessions]
+  )
+
+  const createProject = useCallback(async () => {
+    const result = await window.pi.createProjectFromDialog()
+    if (!result.ok) {
+      if (result.error && result.error !== '已取消') setToast(result.error)
+      return
+    }
+    await loadProjects()
+    if (result.project) {
+      setActiveProjectId(result.project.id)
+      const started = await window.pi.activateProject(result.project.id)
+      if ('phase' in started) setStatus(started)
+      setToast(`已创建项目「${result.project.name}」`)
+      await loadSessions()
+    }
+  }, [loadProjects, loadSessions])
+
+  const editProject = useCallback(
+    async (id: string) => {
+      const result = await window.pi.addProjectRoot(id)
+      if (!result.ok) {
+        if (result.error && result.error !== '已取消') setToast(result.error)
+        return
+      }
+      await loadProjects()
+      if (result.project) setToast(`「${result.project.name}」现在有 ${result.project.roots.length} 个仓库`)
+    },
+    [loadProjects]
+  )
+
+  const deleteProject = useCallback(
+    async (id: string) => {
+      const name = projects.find((project) => project.id === id)?.name ?? '项目'
+      await window.pi.removeProject(id)
+      if (activeProjectId === id) {
+        setActiveProjectId(undefined)
+        const started = await window.pi.activateProject(undefined)
+        if ('phase' in started) setStatus(started)
+      }
+      await loadProjects()
+      setToast(`已删除「${name}」`)
+    },
+    [activeProjectId, projects, loadProjects]
+  )
   const loadMessages = useCallback(async () => {
     try {
       const messages = await window.pi.getMessages()
@@ -1036,6 +1119,9 @@ export default function App(): React.JSX.Element {
         <Sidebar
           sessions={sessions}
           repos={repos}
+          projects={projects}
+          activeProject={activeProject}
+          recentRepos={recentRepos}
           activePath={activePath}
           status={status}
           canGoBack={historyNav.canBack}
@@ -1046,6 +1132,17 @@ export default function App(): React.JSX.Element {
           onSelect={(session) => void selectSession(session)}
           onNewInProject={(cwd) => void newSessionInProject(cwd)}
           onChooseWorkspace={() => void chooseWorkspace()}
+          onSelectProject={(id) => void selectProject(id)}
+          onCreateProject={() => void createProject()}
+          onEditProject={(id) => void editProject(id)}
+          onDeleteProject={(id) => void deleteProject(id)}
+          onNewInRepo={(dir) => void newSessionInProject(dir)}
+          onSaveRepoDefaults={() => {
+            void window.pi.saveRepoDefaults().then(() => {
+              setToast('已把当前模型与思考等级设为该仓库的默认')
+              void loadProjects()
+            })
+          }}
           onOpenSettings={() => {
             setSettingsTab('providers')
             setSettingsOpen(true)

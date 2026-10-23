@@ -55,6 +55,28 @@ export interface SessionSummary {
 }
 
 /**
+ * One repository inside a project. `primary` is the agent's working directory; the others are
+ * reachable with absolute paths.
+ */
+export interface ProjectRoot {
+  path: string
+  name: string
+  primary?: boolean
+}
+
+/**
+ * A project groups several repositories so one conversation can work across them. Sessions still
+ * belong to a single repository (the primary root); the project is the layer above that.
+ */
+export interface Project {
+  id: string
+  name: string
+  roots: ProjectRoot[]
+  createdAt: number
+  updatedAt: number
+}
+
+/**
  * The repository a session belongs to. A session is scoped to one git repository (multi-repo
  * "projects" are a later layer), so this is what the sidebar groups by and what the header shows.
  */
@@ -233,6 +255,8 @@ export interface DesktopConfig {
   profileDir: string
   /** The pi CLI's directory, i.e. the import source. */
   cliDir: string
+  /** Project the window is working in, when one is selected. */
+  activeProject?: string
 }
 
 export type AppUpdateStatus =
@@ -461,6 +485,27 @@ export interface PiBridge {
   repoInfo(dir?: string): Promise<RepoInfo>
   /** Same lookup for several directories at once; keys are the resolved paths that were asked for. */
   listRepos(dirs: string[]): Promise<Record<string, RepoInfo>>
+  /** Repositories the user worked in, most recent first. */
+  recentRepos(): Promise<string[]>
+  /** Remember the current model/thinking level as this repository's default for new sessions. */
+  saveRepoDefaults(): Promise<{ ok: boolean; error?: string }>
+  listProjects(): Promise<Project[]>
+  createProject(input: {
+    name: string
+    roots: string[]
+    primary?: string
+  }): Promise<{ ok: boolean; project?: Project; error?: string }>
+  updateProject(
+    id: string,
+    patch: { name?: string; roots?: string[]; primary?: string }
+  ): Promise<{ ok: boolean; project?: Project; error?: string }>
+  /** Folder picker, then a project named after the first repository. */
+  createProjectFromDialog(): Promise<{ ok: boolean; project?: Project; error?: string }>
+  /** Folder picker, then that repository is appended to the project. */
+  addProjectRoot(id: string): Promise<{ ok: boolean; project?: Project; error?: string }>
+  removeProject(id: string): Promise<{ ok: boolean }>
+  /** Restart pi on the project's primary repository (undefined clears the selection). */
+  activateProject(id?: string): Promise<PiStatus | { ok: false; error: string }>
   openSession(sessionPath: string, cwd: string): Promise<PiStatus>
   getDesktopConfig(): Promise<DesktopConfig>
   setSessionMode(mode: 'shared' | 'isolated'): Promise<PiStatus>

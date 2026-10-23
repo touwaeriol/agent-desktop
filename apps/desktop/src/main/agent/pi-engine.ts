@@ -1,0 +1,329 @@
+import { existsSync } from 'node:fs'
+import os from 'node:os'
+import type { PiModel, PiStatus } from '@shared/types'
+import { PiRpcClient } from '../pi-rpc'
+import type { AgentEngine } from './engine'
+
+export interface PiEngineOptions {
+  /**
+   * Launch args and environment for a workspace (MCP servers, extension, profile, speed tier).
+   *
+   * The engine does not know what a profile or an MCP server is; it asks for them, so a second
+   * engine can be given a completely different set.
+   */
+  prepare(workspace: string): Promise<{ args: string[]; env: NodeJS.ProcessEnv }>
+  /** Extra args that pin the session (session file, provider/model). */
+  sessionArgs(): string[]
+  /** Session directory args. */
+  sessionDirArgs(): string[]
+  /** Every state change, so the app can broadcast its decorated snapshot. */
+  onStatus(next: PiStatus): void
+  /** Every event line from the engine, already folded into the run state. */
+  onEvent(record: Record<string, unknown>): void
+  /** A run ended and the engine is idle; the app applies whatever it deferred. */
+  onSettled(): void
+  /** An assistant message ended with `stopReason: error`; the app decides what that means. */
+  onAssistantError(message: string): void
+  /** The child exited; the app decides whether to restart it. */
+  onExit?(): void
+}
+
+/**
+ * pi as an agent engine.
+ *
+ * Owns the child process, the run state machine and the settle waiters. The state machine is the
+ * part that caused most of this app's bugs (`agent_end` is not idle; a lost `agent_settled` parks
+ * the message queue forever), so it lives in one place and the app only consumes it.
+ */
+export class PiEngine implements AgentEngine {
+  readonly id = 'pi'
+
+  private readonly rpc = new PiRpcClient()
+  private snapshot: PiStatus = { phase: 'stopped', cwd: process.cwd() }
+  private starting_ = false
+  private startPromise: Promise<PiStatus> | undefined
+  private settleWaiters: Array<() => void> = []
+  /** Busy from `agent_start`/`compaction_start` until `agent_settled`. */
+  private isBusy = false
+  private isCompacting = false
+
+  constructor(private readonly options: PiEngineOptions) {}
+
+  state(): PiStatus {
+    return this.snapshot
+  }
+
+  busy(): boolean {
+    return this.isBusy
+  }
+
+  compacting(): boolean {
+    return this.isCompacting
+  }
+
+  running(): boolean {
+    return this.rpc.running
+  }
+
+  stderrTail(): string {
+    return this.rpc.stderrTail
+  }
+
+  request<T = Record<string, unknown>>(
+    type: string,
+    payload: Record<string, unknown> = {},
+    timeoutMs = 60_000
+  ): Promise<T> {
+    return this.rpc.request<T>(type, payload, timeoutMs)
+  }
+
+  /** Wire the client's streams into the state machine; called once from the app's bootstrap. */
+  attach(): void {
+    this.rpc.on('event', (record: Record<string, unknown>) => this.handleRecord(record))
+    this.rpc.on('exit', ({ code, signal }: { code?: number | null; signal?: string | null }) => {
+      this.isBusy = false
+      this.isCompacting = false
+      this.setStatus({ phase: 'error', error: `pi exited (${code ?? signal})`, isStreaming: false })
+      this.resolveSettled()
+      this.options.onExit?.()
+    })
+  }
+
+  /** True while a start is in flight; the app uses it to avoid restarting over a start. */
+  starting(): boolean {
+    return this.starting_
+  }
+
+  setStatus(patch: Partial<PiStatus>): void {
+    this.snapshot = { ...this.snapshot, ...patch }
+    this.options.onStatus(this.snapshot)
+  }
+
+  async start(cwd?: string, extraArgs: string[] = []): Promise<PiStatus> {
+    // A second caller while a start is running used to receive `phase: 'starting'` and wait forever;
+    // hand it the same promise instead.
+    if (this.startPromise) return this.startPromise
+    const run = this.runStart(cwd, extraArgs).finally(() => {
+      if (this.startPromise === run) this.startPromise = undefined
+    })
+    this.startPromise = run
+    return run
+  }
+
+  private async runStart(cwd: string | undefined, extraArgs: string[]): Promise<PiStatus> {
+    this.starting_ = true
+    let workspace = cwd ?? this.snapshot.cwd
+    if (!existsSync(workspace)) {
+      console.warn(`[pi] workspace does not exist, falling back to home: ${workspace}`)
+      workspace = os.homedir()
+    }
+    this.rpc.stop()
+    this.isBusy = false
+    this.isCompacting = false
+    this.setStatus({ phase: 'starting', cwd: workspace, error: undefined, stderrTail: undefined })
+    try {
+      const launch = await this.options.prepare(workspace)
+      this.rpc.start(
+        workspace,
+        [...extraArgs, ...this.options.sessionDirArgs(), ...launch.args],
+        launch.env
+      )
+      const data = await this.waitForReady()
+      this.snapshot = { phase: 'ready', cwd: workspace }
+      this.applyState(data)
+      return this.snapshot
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      this.snapshot = {
+        phase: 'error',
+        cwd: workspace,
+        error: message,
+        stderrTail: this.rpc.stderrTail || undefined
+      }
+      this.options.onStatus(this.snapshot)
+      return this.snapshot
+    } finally {
+      this.starting_ = false
+    }
+  }
+
+  stop(): void {
+    this.rpc.stop()
+  }
+
+  dispose(): void {
+    this.rpc.killNow()
+  }
+
+  private async waitForReady(): Promise<Record<string, unknown>> {
+    const deadline = Date.now() + 20_000
+    let lastError: unknown
+    while (Date.now() < deadline) {
+      if (!this.rpc.running) throw new Error(this.rpc.stderrTail || 'pi 进程已退出')
+      try {
+        const response = await this.rpc.request<{ data?: Record<string, unknown> }>(
+          'get_state',
+          {},
+          3000
+        )
+        return response.data ?? {}
+      } catch (error) {
+        lastError = error
+        await new Promise((resolve) => setTimeout(resolve, 300))
+      }
+    }
+    throw new Error(
+      `pi 未在预期时间内就绪${lastError instanceof Error ? `: ${lastError.message}` : ''}`
+    )
+  }
+
+  /**
+   * Fold a `get_state` answer into the run state.
+   *
+   * `get_state` is authoritative: it already counts queued work and compaction as streaming, and
+   * reports compaction separately.
+   */
+  private applyState(data: Record<string, unknown> | undefined): void {
+    if (!data) return
+    this.isBusy = Boolean(data.isStreaming) || Boolean(data.isCompacting)
+    this.isCompacting = Boolean(data.isCompacting)
+    this.snapshot = {
+      ...this.snapshot,
+      model: modelFromState(data) ?? this.snapshot.model,
+      thinkingLevel:
+        typeof data.thinkingLevel === 'string' ? data.thinkingLevel : this.snapshot.thinkingLevel,
+      sessionName: typeof data.sessionName === 'string' ? data.sessionName : undefined,
+      sessionFile: typeof data.sessionFile === 'string' ? data.sessionFile : this.snapshot.sessionFile,
+      isStreaming: this.isBusy,
+      compacting: this.isCompacting
+    }
+    this.options.onStatus(this.snapshot)
+  }
+
+  async refresh(): Promise<void> {
+    if (!this.rpc.running) return
+    try {
+      const response = await this.rpc.request<{ data?: Record<string, unknown> }>(
+        'get_state',
+        {},
+        5000
+      )
+      this.applyState(response.data)
+    } catch {
+      // transient failures are expected around restarts
+    }
+  }
+
+  /**
+   * Poll the run state while busy, because `busy` is the only thing that unblocks the message queue.
+   *
+   * It is set from events, and events can be lost: a compaction that ends while pi is restarting, a
+   * line dropped by a killed child, an `agent_settled` that never arrived. Nothing else would ever
+   * clear it, and the window would keep showing a finished run as running with every queued message
+   * stranded behind it. `get_state` is cheap, so ask the engine and let the answer win.
+   */
+  watch(): void {
+    setInterval(() => {
+      if (!this.isBusy || !this.rpc.running) return
+      void this.refresh()
+    }, 3000)
+  }
+
+  waitForSettle(timeoutMs: number): Promise<boolean> {
+    return new Promise((resolve) => {
+      let done = false
+      const finish = (settled: boolean): void => {
+        if (done) return
+        done = true
+        resolve(settled)
+      }
+      this.settleWaiters.push(() => finish(true))
+      setTimeout(() => finish(false), timeoutMs)
+    })
+  }
+
+  async waitForIdle(timeoutMs: number): Promise<boolean> {
+    const deadline = Date.now() + timeoutMs
+    while (this.isBusy && Date.now() < deadline) {
+      const left = deadline - Date.now()
+      const settled = await this.waitForSettle(Math.min(3000, Math.max(250, left)))
+      if (settled) return true
+      if (!this.rpc.running) return false
+      const state = await this.rpc
+        .request<{ data?: Record<string, unknown> }>('get_state', {}, 5000)
+        .catch(() => undefined)
+      if (state?.data && !state.data.isStreaming && !state.data.isCompacting) {
+        this.isBusy = false
+        this.isCompacting = false
+        return true
+      }
+    }
+    return !this.isBusy
+  }
+
+  private resolveSettled(): void {
+    for (const waiter of this.settleWaiters.splice(0)) waiter()
+  }
+
+  private handleRecord(record: Record<string, unknown>): void {
+    if (record.type === 'agent_start') {
+      this.isBusy = true
+      this.setStatus({ isStreaming: true })
+    }
+    if (record.type === 'message_end') {
+      const message = record.message as
+        | { role?: string; stopReason?: string; errorMessage?: string }
+        | undefined
+      if (message?.role === 'assistant' && message.stopReason === 'error' && message.errorMessage) {
+        this.options.onAssistantError(message.errorMessage)
+      }
+    }
+    if (record.type === 'agent_end') {
+      // One low-level run ended, but retries, compaction recovery and queued messages may continue:
+      // the session only becomes idle at `agent_settled`.
+      void this.refresh()
+    }
+    if (record.type === 'agent_settled') {
+      this.isBusy = false
+      this.isCompacting = false
+      this.setStatus({ isStreaming: false, compacting: false })
+      this.resolveSettled()
+      void this.refresh()
+      this.options.onSettled()
+    }
+    if (record.type === 'compaction_start') {
+      this.isCompacting = true
+      this.setStatus({ isStreaming: true, compacting: true })
+    }
+    if (record.type === 'compaction_end') {
+      this.isCompacting = false
+      this.setStatus({ compacting: false })
+      // A manual `/compact` never starts a run, and `willRetry` may or may not continue one:
+      // `get_state` is the only reliable answer for "busy".
+      void this.refresh()
+    }
+    if (record.type === 'thinking_level_changed' && typeof record.level === 'string') {
+      this.setStatus({ thinkingLevel: record.level })
+    }
+    if (record.type === 'session_info_changed') {
+      this.setStatus({ sessionName: typeof record.name === 'string' ? record.name : undefined })
+    }
+    this.options.onEvent(record)
+  }
+}
+
+export function modelFromState(data: Record<string, unknown> | undefined): PiModel | undefined {
+  const raw = data?.model as Record<string, unknown> | undefined
+  if (!raw) return undefined
+  const provider = String(raw.provider ?? '')
+  const id = String(raw.id ?? raw.modelId ?? '')
+  if (!provider && !id) return undefined
+  if (id === 'unknown' || provider === 'unknown') return undefined
+  return {
+    provider,
+    id,
+    name: typeof raw.name === 'string' ? raw.name : undefined,
+    contextWindow: typeof raw.contextWindow === 'number' ? raw.contextWindow : undefined,
+    api: typeof raw.api === 'string' ? raw.api : undefined
+  }
+}

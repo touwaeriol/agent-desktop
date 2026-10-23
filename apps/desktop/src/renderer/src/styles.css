@@ -4788,6 +4788,153 @@ button:disabled {
   color: var(--text);
 }
 
+/* Recent repositories inside the "更多" menu: the branch glyph plus the folder name. */
+.nav-menu-label {
+  padding: 6px 8px 2px;
+  color: var(--text-faint);
+  font-size: 10.4px;
+}
+
+.nav-menu-row.recent-repo {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.nav-menu-row.recent-repo.active {
+  color: var(--text);
+}
+
+.recent-repo-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Project switcher: one chip per project, above the session list. */
+.project-switcher {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  overflow-x: auto;
+  padding: 6px 10px 4px;
+  scrollbar-width: none;
+}
+
+.project-switcher::-webkit-scrollbar {
+  display: none;
+}
+
+.project-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 0 auto;
+  max-width: 200px;
+  padding: 3px 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  background: var(--bg-hover);
+  color: var(--text-dim);
+  font-size: 11.4px;
+  white-space: nowrap;
+  cursor: default;
+}
+
+.project-chip.active {
+  border-color: var(--accent);
+  color: var(--text);
+}
+
+.project-chip-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.project-chip-sep {
+  color: var(--text-faint);
+}
+
+.project-chip-count {
+  color: var(--text-faint);
+  font-size: 10.4px;
+}
+
+.project-chip-actions {
+  display: none;
+  align-items: center;
+  gap: 1px;
+}
+
+.project-chip:hover .project-chip-actions,
+.project-chip:focus-within .project-chip-actions {
+  display: inline-flex;
+}
+
+.project-chip-action {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 2px;
+  border-radius: 4px;
+  color: var(--text-faint);
+}
+
+.project-chip-action:hover {
+  background: var(--bg-elev);
+  color: var(--text);
+}
+
+.project-chip-action.danger:hover {
+  color: var(--danger-text);
+}
+
+.project-chip-action.confirm {
+  padding: 1px 5px;
+  color: var(--danger-text);
+  font-size: 10.4px;
+  white-space: nowrap;
+}
+
+.project-chip-add {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  padding: 3px 6px;
+  border: 1px dashed var(--border-strong);
+  border-radius: 999px;
+  color: var(--text-faint);
+}
+
+.project-chip-add:hover {
+  color: var(--text);
+}
+
+.project-switcher-empty {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 0;
+}
+
+.project-switcher-create {
+  padding: 3px 9px;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  color: var(--text-dim);
+  font-size: 11.4px;
+}
+
+.project-switcher-create:hover {
+  color: var(--text);
+  background: var(--bg-hover);
+}
+
+.project-switcher-hint {
+  color: var(--text-faint);
+  font-size: 10.4px;
+}
+
 .section-label {
   padding: 6px 16px 4px;
   color: var(--text-faint);

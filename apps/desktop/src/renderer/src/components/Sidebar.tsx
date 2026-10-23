@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import type { PiStatus, RepoInfo, SessionSummary } from '@shared/types'
+import { ProjectSwitcher } from './ProjectSwitcher'
+import type { PiStatus, Project, RepoInfo, SessionSummary } from '@shared/types'
 import {
   ArrowLeftIcon,
   ArrowRightIcon,
@@ -140,6 +141,11 @@ function baseName(cwd: string): string {
   return parts[parts.length - 1] ?? cwd
 }
 
+/** Windows compares paths case-insensitively; the same repo arrives with different casing. */
+function pathKey(dir: string): string {
+  return /^[A-Za-z]:/.test(dir) || dir.includes('\\') ? dir.toLowerCase() : dir
+}
+
 const STATUS_TEXT: Record<PiStatus['phase'], string> = {
   starting: '启动中',
   ready: '已连接',
@@ -161,6 +167,9 @@ interface SessionGroup {
 export function Sidebar({
   sessions,
   repos,
+  projects,
+  activeProject,
+  recentRepos,
   activePath,
   status,
   canGoBack,
@@ -171,6 +180,12 @@ export function Sidebar({
   onSelect,
   onNewInProject,
   onChooseWorkspace,
+  onSelectProject,
+  onCreateProject,
+  onEditProject,
+  onDeleteProject,
+  onNewInRepo,
+  onSaveRepoDefaults,
   onOpenSettings,
   onOpenAgentDir,
   onRestart,
@@ -179,6 +194,10 @@ export function Sidebar({
   sessions: SessionSummary[]
   /** Repository facts per working directory, used for the branch badge in each group head. */
   repos: Record<string, RepoInfo>
+  projects: Project[]
+  /** The project the window works in; its repositories are grouped together in the list. */
+  activeProject?: Project
+  recentRepos: string[]
   activePath?: string
   status: PiStatus
   canGoBack: boolean
@@ -189,6 +208,12 @@ export function Sidebar({
   onSelect: (session: SessionSummary) => void
   onNewInProject: (cwd: string) => void
   onChooseWorkspace: () => void
+  onSelectProject: (id: string) => void
+  onCreateProject: () => void
+  onEditProject: (id: string) => void
+  onDeleteProject: (id: string) => void
+  onNewInRepo: (dir: string) => void
+  onSaveRepoDefaults: () => void
   onOpenSettings: () => void
   onOpenAgentDir: () => void
   onRestart: () => void
@@ -391,8 +416,16 @@ export function Sidebar({
     }
 
     const folders = new Map<string, SessionSummary[]>()
+    // Sessions are keyed by repository, but a project groups several of them under one head so the
+    // list reads as "the thing I am working on" instead of three unrelated folders.
+    const projectKey = (dir: string): string => {
+      if (!activeProject) return dir
+      const needle = pathKey(dir)
+      const belongs = activeProject.roots.some((root) => pathKey(root.path) === needle)
+      return belongs ? 'project:' + activeProject.id : dir
+    }
     for (const session of visible) {
-      const key = session.cwd || ''
+      const key = projectKey(session.cwd || '')
       const list = folders.get(key) ?? []
       list.push(session)
       folders.set(key, list)
@@ -405,12 +438,19 @@ export function Sidebar({
       }
     }
     const result = [...folders.entries()].map(([cwd, list]) => {
-      const key = `folder:${cwd}`
+      const isProject = cwd.startsWith('project:')
+      const key = isProject ? cwd : `folder:${cwd}`
       const view = applyProjectView(key, list)
+      const primary = isProject
+        ? activeProject?.roots.find((root) => root.primary) ?? activeProject?.roots[0]
+        : undefined
       return {
         key,
-        label: baseName(cwd) || '未命名目录',
-        cwd,
+        label: isProject
+          ? `${activeProject?.name ?? '项目'} · ${activeProject?.roots.length ?? 0} 个仓库`
+          : baseName(cwd) || '未命名目录',
+        // "+ new session" and the branch badge use the primary repository.
+        cwd: isProject ? primary?.path ?? cwd : cwd,
         sessions: view.sessions,
         total: view.total,
         searching: view.searching,
@@ -422,7 +462,7 @@ export function Sidebar({
       prefs.sort === 'name' ? a.label.localeCompare(b.label, 'zh-CN') : b.latest - a.latest
     )
     return result
-  }, [sessions, pinned, prefs, archived, projectStatus, projectQueries, status.cwd])
+  }, [sessions, pinned, prefs, archived, projectStatus, projectQueries, status.cwd, activeProject])
 
   useEffect(() => {
     if (!activePath) return
@@ -612,6 +652,15 @@ export function Sidebar({
         </div>
       )}
 
+      <ProjectSwitcher
+        projects={projects}
+        activeId={activeProject?.id}
+        onSelect={onSelectProject}
+        onCreate={onCreateProject}
+        onEdit={onEditProject}
+        onDelete={onDeleteProject}
+      />
+
       <div className="sidebar-nav">
         <button className="nav-row" onClick={onNew}>
           <span className="nav-glyph">
@@ -653,6 +702,36 @@ export function Sidebar({
                 }}
               >
                 在新目录新建会话
+              </button>
+              {recentRepos.length > 0 && (
+                <>
+                  <div className="nav-menu-label">最近仓库</div>
+                  {recentRepos.slice(0, 6).map((dir) => (
+                    <button
+                      key={dir}
+                      className={`nav-menu-row recent-repo ${
+                        pathKey(dir) === pathKey(status.cwd) ? 'active' : ''
+                      }`}
+                      title={dir}
+                      onClick={() => {
+                        setMoreOpen(false)
+                        onNewInRepo(dir)
+                      }}
+                    >
+                      <BranchIcon size={11} />
+                      <span className="recent-repo-name">{baseName(dir)}</span>
+                    </button>
+                  ))}
+                </>
+              )}
+              <button
+                className="nav-menu-row"
+                onClick={() => {
+                  setMoreOpen(false)
+                  onSaveRepoDefaults()
+                }}
+              >
+                设为该仓库默认模型
               </button>
               <button
                 className="nav-menu-row"

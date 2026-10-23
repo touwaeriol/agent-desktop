@@ -19,6 +19,7 @@ const WEB_FETCH_TOOL = 'mcp__web__web_fetch'
 const PROMPT_SECTION = 'desktop_tools'
 const AGENTS_SECTION = 'subagents'
 const WEB_SECTION = 'web_tools'
+const PROJECT_SECTION = 'project'
 
 /**
  * Guidelines, not a section: `systemPromptOptions.promptGuidelines` are rendered as bullets in the
@@ -88,6 +89,35 @@ const WEB_GUIDANCE = [
   '',
   'Local and private addresses are refused by design; use the repository tools or bash for those.'
 ].join('\n')
+
+/**
+ * The project section, for a window that works across several repositories.
+ *
+ * pi has one working directory; its tools do not care (read/edit take absolute paths, grep/find
+ * take a `path`, bash can `cd`). What the model cannot know on its own is *which* repositories
+ * belong together and where they live, so the app sends that list and this renders it. Absent for a
+ * single-repository session, which needs no explanation.
+ */
+function projectSection(raw) {
+  const project = parseJson(raw, undefined)
+  const roots = Array.isArray(project?.roots) ? project.roots : []
+  if (roots.length <= 1) return undefined
+  const primary = roots.find((root) => root?.primary) ?? roots[0]
+  return [
+    `当前项目「${String(project.name ?? '')}」包含 ${roots.length} 个仓库，你的工作目录是主仓库 ${
+      primary?.name ?? ''
+    }（${primary?.path ?? ''}）：`,
+    ...roots.map((root) =>
+      root?.primary
+        ? `- ${String(root.name ?? '')}（主仓库）  ${String(root.path ?? '')}`
+        : `- ${String(root.name ?? '')}  ${String(root.path ?? '')}`
+    ),
+    '',
+    '跨仓库引用文件一律写绝对路径，不要按工作目录去推算相对路径，也不要把别的仓库当成子目录。',
+    '每条 bash 命令都是新的 shell，cd 不会保留：要进哪个仓库就先 `cd <仓库路径> && …`。',
+    '跨仓库搜索用 grep 工具的 `path` 参数指向仓库目录，不要用 `bash grep -rn` 扫整个磁盘。'
+  ].join('\n')
+}
 
 function parseJson(value, fallback) {
   if (!value) return fallback
@@ -180,8 +210,14 @@ export default function desktopMcp(pi) {  const url = process.env.AGENT_DESKTOP_
   const toggles = parseJson(process.env.AGENT_DESKTOP_MCP_TOGGLES, {})
   const subagentsEnabled = process.env.AGENT_DESKTOP_SUBAGENTS === '1'
   const agentsSection = process.env.AGENT_DESKTOP_AGENTS_SECTION ?? ''
-  // Request-level, so it must not depend on the bridge: the built-in servers can be off.
+  const projectText = projectSection(process.env.AGENT_DESKTOP_PROJECT)
+  // Prompt- and request-level, so neither may depend on the bridge: the built-in servers can be off.
   registerSpeed(pi)
+  if (projectText) {
+    pi.on('before_agent_start', (event) => {
+      event.systemPromptOptions.sections[PROJECT_SECTION] = projectText
+    })
+  }
   if (!url) return
 
   if (coreScript) {

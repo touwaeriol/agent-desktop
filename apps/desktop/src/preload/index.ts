@@ -9,6 +9,7 @@ import type {
   PiBridge,
   PiStatus,
   PromptImage,
+  Project,
   ProviderAuthType,
   RepoInfo,
   SessionSummary,
@@ -24,6 +25,15 @@ const bridge: PiBridge = {
   repoInfo: (dir?: string) => ipcRenderer.invoke('pi:repo-info', dir) as Promise<RepoInfo>,
   listRepos: (dirs: string[]) =>
     ipcRenderer.invoke('pi:repos', dirs) as Promise<Record<string, RepoInfo>>,
+  recentRepos: () => ipcRenderer.invoke('repos:recent') as Promise<string[]>,
+  saveRepoDefaults: () => ipcRenderer.invoke('repos:save-defaults'),
+  listProjects: () => ipcRenderer.invoke('projects:list') as Promise<Project[]>,
+  createProject: (input) => ipcRenderer.invoke('projects:create', input),
+  updateProject: (id, patch) => ipcRenderer.invoke('projects:update', id, patch),
+  createProjectFromDialog: () => ipcRenderer.invoke('projects:create-from-dialog'),
+  addProjectRoot: (id: string) => ipcRenderer.invoke('projects:add-root', id),
+  removeProject: (id) => ipcRenderer.invoke('projects:remove', id),
+  activateProject: (id?: string) => ipcRenderer.invoke('projects:activate', id),
   openSession: (sessionPath: string, cwd: string) =>
     ipcRenderer.invoke('pi:open-session', sessionPath, cwd) as Promise<PiStatus>,
   getDesktopConfig: () => ipcRenderer.invoke('desktop:config'),

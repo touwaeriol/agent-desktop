@@ -117,6 +117,23 @@ npm run typecheck    # node + web 两个 tsconfig 分别检查
 - 注意 `withRealBash(env)` 的 `env` 只是**要追加的变量**（`launch.env` 通常没有 PATH），PATH 必须从 `process.env` 取；写成从 `env` 取会把整条 PATH 换成单个目录，`where.exe` 自己就找不到了（表现成 `No bash shell found`）。合并后只保留一种大小写（`PATH` / `Path` 同时出现时 Windows 取哪个是不确定的）。
 - 用户在 `settings.json` 里写 `shellPath` 时仍然优先（pi 先看它），不要覆盖。
 
+## 引擎边界（`src/main/agent/`）
+
+- 目标形态是「我们自己的 agent，pi 只是可替换的引擎」。`agent/engine.ts` 是契约（`state/busy/compacting/running/start/stop/request/refresh/waitForSettle/waitForIdle`），`agent/pi-engine.ts` 是 pi 的实现。
+- **引擎只负责跑一轮和运行状态机**：子进程、`agent_start → agent_settled` 的 busy、压缩、settle waiter、`get_state` 权威校正、崩溃退出通知。**应用策略全部留在 `index.ts`**：MCP 服务器、`/btw` 分支、压缩阈值、速度档位、config、profile、子代理。
+- 引擎要的启动参数（MCP 参数、扩展、profile、速度档位、项目根）由 `prepare(workspace)` 回调提供，所以引擎不认识 MCP/profile 这些概念；`sessionArgs()` / `sessionDirArgs()` 同理。
+- `index.ts` 里的 `status` 只是**镜像**：引擎通过 `onStatus` 推过来，`statusSnapshot()` 再加应用自己的字段（压缩百分比、档位、仓库）。写状态必须走 `engine.setStatus()`，不要直接赋值。
+- 新增 pi 调用时用 `engine.request('命令', payload)`；不要重新引入第二个 `PiRpcClient`（子代理进程有自己的，那是另一回事）。
+- 还没搬完的部分：`prompt` 的排队/重试策略（`submitPrompt`）、`/btw` 的 clone/switch、压缩阈值同步、登录消息都还在 `index.ts`。下一步按块搬，每搬一块保持行为不变。
+
+## 项目（多仓库）
+
+- `src/main/projects.ts`：`ProjectStore`（`projects.json`，原子写、坏文件静默当空）+ `renderProjectSection()`。一个 project = 多个仓库根，**恰好一个 primary**，它是 pi 的 cwd。
+- 激活项目：`projects:activate` 把 `config.activeProject` 存下并重启 pi 到主仓库；扩展通过环境变量 `AGENT_DESKTOP_PROJECT`（`{id,name,roots}`）收到根清单，在 `before_agent_start` 里注入 `<project>` 段——**只在多根时注入**，单仓库就是普通会话。这个段和速度档位一样，注册在 `if (!url) return` 之前，MCP 全关也要生效。
+- pi 没有 `--add-dir`：跨仓库靠提示词约定（绝对路径、每条 bash 是新 shell 要 `cd`、跨仓库搜索用 grep 的 `path` 参数）。实测模型能准确复述两个仓库的绝对路径。
+- 侧栏在项目激活时把该项目所有仓库的会话归到同一个组头（`project:<id>`），组头的 `+` 和分支徽标用主仓库。
+- 最近仓库 `config.recentRepos`（最多 12 个，启动时更新），侧栏「更多 → 最近仓库」；每仓库默认模型/思考等级存 `config.repoDefaults[cwd]`，**只在新建会话时应用**（带 `--session` 的重启不覆盖用户当前选择）。
+
 ## 速度档位（fast / ultrafast）
 
 - 两家都把它放在**请求体**里，但字段不同，Anthropic 还要 beta 头：OpenAI `service_tier`（`fast` 即原来的 `priority`，`ultrafast` 只有 `gpt-6-astra` / `gpt-6.1-sol`）；Anthropic `speed: "fast"` + `anthropic-beta: fast-mode-2026-02-01`，且只支持 Claude Opus 5.5 / 5 / 4.8（Opus 4.7 直接报错，4.6 静默按标准速度跑）。

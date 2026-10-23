@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto'
 import { existsSync, promises as fs, unlinkSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { PiRpcClient } from './pi-rpc'
+import { PiEngine, modelFromState } from './agent/pi-engine'
 import { listSessions } from './sessions'
 import * as providers from './providers'
 import * as updates from './updates'
@@ -18,6 +18,7 @@ import * as bridge from './bridge'
 import { applySystemProxy, getProxyInfo } from './proxy'
 import * as profile from './profile'
 import * as repo from './repo'
+import * as projects from './projects'
 import { withRealBash } from './shell'
 import * as speed from './speed'
 import type {
@@ -36,23 +37,75 @@ import type {
   SpeedMode
 } from '../shared/types'
 
-const rpc = new PiRpcClient()
 let mainWindow: BrowserWindow | null = null
-let status: PiStatus = { phase: 'stopped', cwd: process.cwd() }
-let starting = false
 /**
- * pi is busy from `agent_start` until `agent_settled`.
+ * The window's view of the run state.
  *
- * `agent_end` is *not* idle: automatic retry, overflow recovery, compaction retry and queued
- * messages can still start another run, and `prompt` rejects anything that arrives in that window
- * ("Agent is already processing…" / "Cannot submit a prompt while compaction is in progress").
- * Sending on `agent_end` is what made a queued message bounce back into the composer.
+ * The engine owns the state machine; this is the mirror it pushes into, decorated with the app's
+ * own facts (compaction percentage, speed tier, repository) by `statusSnapshot()`. Reads here stay
+ * cheap, writes must go through `engine.setStatus()`.
  */
-let busy = false
-/** Auto-compaction counts as busy: pi refuses prompts until it finishes. */
-let compacting = false
+let status: PiStatus = { phase: 'stopped', cwd: process.cwd() }
 /** An MCP/agent config change arrived mid-run and still has to restart pi. */
 let configPending = false
+
+/**
+ * pi behind the `AgentEngine` contract.
+ *
+ * Everything that is app policy stays on this side: MCP servers, `/btw` forks, compaction
+ * thresholds, speed tiers, config and profiles. The engine only runs turns and owns the run state.
+ */
+let projectStore: projects.ProjectStore | undefined
+
+/** The project the window is working in, when one is selected. */
+function activeProject(): projects.Project | undefined {
+  const id = desktopConfig.activeProject
+  return id ? projectStore?.get(id) : undefined
+}
+
+const engine = new PiEngine({
+  prepare: async (workspace) => {
+    await applySystemProxy()
+    cancelPendingAsks('pi 已重启')
+    const launch = await mcpLaunch(workspace)
+    // An isolated profile is just this variable: pi then reads auth/models/settings/mcp/sessions
+    // from the desktop directory instead of the CLI's.
+    const env = withRealBash({ ...launch.env })
+    // Read by the extension's request hooks; it re-checks the model before touching the payload.
+    env.AGENT_DESKTOP_SPEED = speed.resolveSpeedMode(status.model, currentSpeedMode())
+    // A project with several repositories needs to be explained to the model; one repository is
+    // just a normal session and gets no section.
+    const project = activeProject()
+    if (project && project.roots.length > 1) {
+      env.AGENT_DESKTOP_PROJECT = JSON.stringify({
+        id: project.id,
+        name: project.name,
+        roots: project.roots
+      })
+    }
+    if (profile.isIsolatedProfile()) env.PI_CODING_AGENT_DIR = profile.agentDir()
+    return { args: launch.args, env }
+  },
+  sessionArgs: () => sessionArgs(),
+  sessionDirArgs: () => sessionDirArgs(),
+  onStatus: (next) => {
+    status = next
+  },
+  onEvent: (record) => {
+    // While the `/btw` panel is open the window must not see the fork's transcript.
+    if (btwActive) return
+    mainWindow?.webContents.send('pi:event', record)
+  },
+  onSettled: () => {
+    if (!configPending) return
+    // The run is over, so the deferred MCP/agent restart can finally happen.
+    configPending = false
+    void startPi(status.cwd, sessionArgs())
+  },
+  onAssistantError: (message) => noteSpeedRejection(message),
+  onExit: () => handleExit()
+})
+engine.attach()
 
 if (process.env.PI_DEBUG_PORT) {
   app.commandLine.appendSwitch('remote-debugging-port', process.env.PI_DEBUG_PORT)
@@ -116,6 +169,12 @@ interface DesktopConfig {
   autoCompact?: { ratio?: number }
   /** Processing tier sent with each request; only applied when the active model offers it. */
   speed?: { mode?: SpeedMode }
+  /** Project the window is working in; sessions still start on its primary repository. */
+  activeProject?: string
+  /** Repositories the user worked in, most recent first (sidebar "切换仓库" menu). */
+  recentRepos?: string[]
+  /** Per-repository defaults applied to a new session in that repository. */
+  repoDefaults?: Record<string, { provider?: string; model?: string; thinkingLevel?: string }>
   /** `shared` uses the pi CLI's `~/.pi/agent`; `desktop` keeps its own copy under userData. */
   profile?: 'shared' | 'desktop'
 }
@@ -777,238 +836,46 @@ let btwFork: string | undefined
 let btwGeneration = 0
 
 function setStatus(patch: Partial<PiStatus>): void {
-  status = { ...status, ...patch }
+  engine.setStatus(patch)
+  // While the side-chat panel is open the window keeps showing the main session's status.
   if (btwActive) return
   broadcastStatus()
 }
 
-function modelFromState(data: Record<string, unknown> | undefined): PiModel | undefined {
-  const raw = data?.model as Record<string, unknown> | undefined
-  if (!raw) return undefined
-  const provider = String(raw.provider ?? '')
-  const id = String(raw.id ?? raw.modelId ?? '')
-  if (!provider && !id) return undefined
-  if (id === 'unknown' || provider === 'unknown') return undefined
-  return {
-    provider,
-    id,
-    name: typeof raw.name === 'string' ? raw.name : undefined,
-    contextWindow: typeof raw.contextWindow === 'number' ? raw.contextWindow : undefined,
-    api: typeof raw.api === 'string' ? raw.api : undefined
-  }
-}
-
-function applyState(data: Record<string, unknown> | undefined): void {
-  if (!data) return
-  // `get_state` is authoritative: it already folds queued work and compaction into `isStreaming`,
-  // and reports compaction separately.
-  busy = Boolean(data.isStreaming) || Boolean(data.isCompacting)
-  compacting = Boolean(data.isCompacting)
-  status = {
-    ...status,
-    model: modelFromState(data) ?? status.model,
-    thinkingLevel: typeof data.thinkingLevel === 'string' ? data.thinkingLevel : status.thinkingLevel,
-    sessionName: typeof data.sessionName === 'string' ? data.sessionName : undefined,
-    sessionFile: typeof data.sessionFile === 'string' ? data.sessionFile : status.sessionFile,
-    isStreaming: busy,
-    compacting
-  }
-  broadcastStatus()
-}
-
-async function waitForReady(): Promise<Record<string, unknown>> {
-  const deadline = Date.now() + 20000
-  let lastError: unknown
-  while (Date.now() < deadline) {
-    if (!rpc.running) throw new Error(rpc.stderrTail || 'pi 进程已退出')
-    try {
-      const response = await rpc.request<{ data?: Record<string, unknown> }>('get_state', {}, 3000)
-      return response.data ?? {}
-    } catch (error) {
-      lastError = error
-      await new Promise((resolve) => setTimeout(resolve, 300))
-    }
-  }
-  throw new Error(
-    `pi 未在预期时间内就绪${lastError instanceof Error ? `: ${lastError.message}` : ''}`
-  )
+/** Start or restart the session; the engine hands the in-flight promise to a second caller. */
+async function startPi(cwd?: string, extraArgs: string[] = []): Promise<PiStatus> {
+  const next = await engine.start(cwd, extraArgs)
+  if (next.phase === 'ready') await afterStart(next.cwd, extraArgs)
+  return next
 }
 
 /**
- * The in-flight `startPi`, if any.
+ * Work that follows every successful start: remember the repository, and put a fresh session on
+ * the repository's own defaults.
  *
- * Returning the *current* status for a second caller while a start was running handed back
- * `phase: 'starting'`, and nothing ever moved it to `ready` for that caller: the window then waits
- * forever, which also parks the message queue (it only flushes in `ready`).
+ * A restart (`--session …`, crash recovery, config reload) must keep whatever the user has chosen,
+ * so the defaults only apply when there is no session file to restore.
  */
-let startPromise: Promise<PiStatus> | undefined
-
-function startPi(cwd?: string, extraArgs: string[] = []): Promise<PiStatus> {
-  if (startPromise) return startPromise
-  const run = runStart(cwd, extraArgs).finally(() => {
-    if (startPromise === run) startPromise = undefined
-  })
-  startPromise = run
-  return run
-}
-
-async function runStart(cwd?: string, extraArgs: string[] = []): Promise<PiStatus> {
-  starting = true
-  await applySystemProxy()
-  cancelPendingAsks('pi 已重启')
-  let workspace = cwd ?? status.cwd
-  if (!existsSync(workspace)) {
-    console.warn(`[pi] workspace does not exist, falling back to home: ${workspace}`)
-    workspace = os.homedir()
+async function afterStart(workspace: string, extraArgs: string[]): Promise<void> {
+  // The engine owns the start now, so the app refreshes the repository facts here.
+  void refreshRepo(workspace)
+  startCodegraphIndex(workspace)
+  const recent = [workspace, ...(desktopConfig.recentRepos ?? []).filter((dir) => dir !== workspace)]
+  await saveConfig({ recentRepos: recent.slice(0, 12) })
+  if (extraArgs.includes('--session')) return
+  const defaults = desktopConfig.repoDefaults?.[workspace]
+  if (!defaults) return
+  if (defaults.provider && defaults.model) {
+    await engine
+      .request('set_model', { provider: defaults.provider, modelId: defaults.model }, 10_000)
+      .catch(() => undefined)
   }
-  rpc.stop()
-  busy = false
-  compacting = false
-  setStatus({ phase: 'starting', cwd: workspace, error: undefined, stderrTail: undefined })
-  try {
-    const launch = await mcpLaunch(workspace)
-    // An isolated profile is just this variable: pi then reads auth/models/settings/mcp/sessions
-    // from the desktop directory instead of the CLI's.
-    const env = withRealBash({ ...launch.env })
-    // Read by the extension's request hooks; it re-checks the model before touching the payload.
-    env.AGENT_DESKTOP_SPEED = speed.resolveSpeedMode(status.model, currentSpeedMode())
-    if (profile.isIsolatedProfile()) env.PI_CODING_AGENT_DIR = profile.agentDir()
-    rpc.start(workspace, [...extraArgs, ...sessionDirArgs(), ...launch.args], env)
-    const data = await waitForReady()
-    status = { phase: 'ready', cwd: workspace }
-    applyState(data)
-    void refreshRepo(workspace)
-    startCodegraphIndex(workspace)
-    return status
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error)
-    status = {
-      phase: 'error',
-      cwd: workspace,
-      error: message,
-      stderrTail: rpc.stderrTail || undefined
-    }
-    broadcastStatus()
-    return status
-  } finally {
-    starting = false
+  if (defaults.thinkingLevel) {
+    await engine
+      .request('set_thinking_level', { level: defaults.thinkingLevel }, 10_000)
+      .catch(() => undefined)
   }
-}
-
-/** Resolvers waiting for the current run to settle (used by /btw and /compact). */
-const settleWaiters: Array<() => void> = []
-
-function waitForSettle(timeoutMs: number): Promise<boolean> {
-  return new Promise((resolve) => {
-    let done = false
-    const finish = (settled: boolean): void => {
-      if (done) return
-      done = true
-      resolve(settled)
-    }
-    settleWaiters.push(() => finish(true))
-    setTimeout(() => finish(false), timeoutMs)
-  })
-}
-
-/**
- * Wait until pi really has nothing left to do (no retry, compaction or queued turn).
- *
- * `busy` is event-driven, so a settle that lands between two checks would otherwise be missed;
- * `get_state` is polled as the fallback.
- */
-async function waitForIdle(timeoutMs: number): Promise<boolean> {
-  const deadline = Date.now() + timeoutMs
-  while (busy && Date.now() < deadline) {
-    const left = deadline - Date.now()
-    const settled = await waitForSettle(Math.min(3000, Math.max(250, left)))
-    if (settled) return true
-    if (!rpc.running) return false
-    const state = await rpc.request<{ data?: Record<string, unknown> }>('get_state', {}, 5000).catch(
-      () => undefined
-    )
-    if (state?.data && !state.data.isStreaming && !state.data.isCompacting) {
-      busy = false
-      compacting = false
-      return true
-    }
-  }
-  return !busy
-}
-
-function forwardEvent(record: Record<string, unknown>): void {
-  if (record.type === 'agent_start') {
-    busy = true
-    setStatus({ isStreaming: true })
-  }
-  if (record.type === 'message_end') {
-    const message = record.message as { role?: string; stopReason?: string; errorMessage?: string } | undefined
-    if (message?.role === 'assistant' && message.stopReason === 'error' && message.errorMessage) {
-      noteSpeedRejection(message.errorMessage)
-    }
-  }
-  if (record.type === 'agent_end') {
-    // One low-level run ended, but retries, compaction recovery and queued messages may continue.
-    // Refresh the model/context info; the session only becomes idle at `agent_settled`.
-    void refreshState()
-  }
-  if (record.type === 'agent_settled') {
-    busy = false
-    compacting = false
-    setStatus({ isStreaming: false, compacting: false })
-    for (const waiter of settleWaiters.splice(0)) waiter()
-    void refreshState()
-    if (configPending) {
-      // The run is over, so the deferred MCP/agent restart can finally happen.
-      configPending = false
-      void startPi(status.cwd, sessionArgs())
-    }
-  }
-  if (record.type === 'compaction_start') {
-    compacting = true
-    setStatus({ isStreaming: true, compacting: true })
-  }
-  if (record.type === 'compaction_end') {
-    compacting = false
-    setStatus({ compacting: false })
-    // A manual `/compact` never starts an agent run, and `willRetry` may or may not continue the
-    // current one: `get_state` is the only reliable answer for "busy".
-    void refreshState()
-  }
-  if (record.type === 'thinking_level_changed' && typeof record.level === 'string') {
-    setStatus({ thinkingLevel: record.level })
-  }
-  if (record.type === 'session_info_changed') {
-    setStatus({ sessionName: typeof record.name === 'string' ? record.name : undefined })
-  }
-  if (btwActive) return
-  mainWindow?.webContents.send('pi:event', record)
-}
-
-async function refreshState(): Promise<void> {
-  if (!rpc.running) return
-  try {
-    const response = await rpc.request<{ data?: Record<string, unknown> }>('get_state', {}, 5000)
-    applyState(response.data)
-  } catch {
-    // ignore transient failures
-  }
-}
-
-/**
- * Re-read the run state while `busy`, because `busy` is the only thing that unblocks the window's
- * message queue.
- *
- * It is set from events, and events can be lost: a compaction that ends while pi is being restarted,
- * a line dropped by a killed child, an `agent_settled` that never arrived. Nothing else would ever
- * clear it, and the window would keep showing a finished run as running with every queued message
- * stranded behind it. `get_state` is cheap, so ask pi directly and let the answer win.
- */
-function watchRunState(): void {
-  setInterval(() => {
-    if (!busy || !rpc.running) return
-    void refreshState()
-  }, 3000)
+  await engine.refresh()
 }
 
 /** Vendor wording for "this account may not use that processing tier". */
@@ -1062,28 +929,28 @@ async function closeSideChat(): Promise<void> {
   btwOriginal = undefined
   btwFork = undefined
   try {
-    if (busy && rpc.running) {
-      await rpc.request('abort', {}, 15_000).catch(() => undefined)
-      await waitForSettle(15_000)
+    if (engine.busy() && engine.running()) {
+      await engine.request('abort', {}, 15_000).catch(() => undefined)
+      await engine.waitForSettle(15_000)
     }
-    if (original && rpc.running) {
-      await rpc.request('switch_session', { sessionPath: original }, 20_000)
+    if (original && engine.running()) {
+      await engine.request('switch_session', { sessionPath: original }, 20_000)
     }
   } catch {
     // `refreshState` below re-syncs whatever pi ended up on.
   }
   if (fork && fork !== original) await fs.unlink(fork).catch(() => undefined)
-  await refreshState()
+  await engine.refresh()
   broadcastStatus()
 }
 
 /** One turn on the session pi is currently parked on (the `/btw` fork while a side chat is open). */
 async function btwPrompt(message: string): Promise<{ text: string; settled: boolean }> {
   // Arm the waiter first: a short answer can settle before the prompt response even arrives.
-  const settling = waitForSettle(300_000)
-  await rpc.request('prompt', { message }, 30_000)
+  const settling = engine.waitForSettle(300_000)
+  await engine.request('prompt', { message }, 30_000)
   const settled = await settling
-  const last = await rpc.request<{ data?: { text?: string | null } }>(
+  const last = await engine.request<{ data?: { text?: string | null } }>(
     'get_last_assistant_text',
     {},
     10_000
@@ -1114,14 +981,14 @@ async function submitPrompt(
   behavior?: 'steer' | 'followUp',
   images?: PromptImage[]
 ): Promise<PromptResult> {
-  if (!rpc.running) return { ok: false, error: 'pi 未运行' }
+  if (!engine.running()) return { ok: false, error: 'pi 未运行' }
   const payload = {
     message,
     ...(behavior ? { streamingBehavior: behavior } : {}),
     ...(images && images.length > 0 ? { images } : {})
   }
   const send = async (extra: Record<string, unknown> = {}): Promise<PromptResult['disposition']> => {
-    const response = await rpc.request<{ data?: { disposition?: string } }>('prompt', {
+    const response = await engine.request<{ data?: { disposition?: string } }>('prompt', {
       ...payload,
       ...extra
     })
@@ -1136,7 +1003,7 @@ async function submitPrompt(
   } catch (error) {
     const text = error instanceof Error ? error.message : String(error)
     if (/compaction is in progress/i.test(text)) {
-      if (!(await waitForIdle(180_000))) return { ok: false, error: '上下文压缩还没结束，稍后再发' }
+      if (!(await engine.waitForIdle(180_000))) return { ok: false, error: '上下文压缩还没结束，稍后再发' }
       try {
         return { ok: true, disposition: await send() }
       } catch (retryError) {
@@ -1157,7 +1024,7 @@ async function submitPrompt(
 async function reloadPiConfig(): Promise<void> {
   if (btwActive) await closeSideChat()
   await refreshAgents()
-  if (busy) {
+  if (engine.busy()) {
     // pi cannot pick up new MCP servers mid-run; remember it and restart when the run settles,
     // otherwise the switch the user just flipped would silently never apply.
     configPending = true
@@ -1203,6 +1070,132 @@ function registerIpc(): void {
 
   ipcMain.handle('pi:repos', (_event, dirs: string[]) => repo.repoInfos(dirs))
 
+  ipcMain.handle('projects:list', async () => {
+    if (!projectStore) return []
+    await projectStore.load()
+    return projectStore.list()
+  })
+
+  ipcMain.handle(
+    'projects:create',
+    async (_event, input: { name: string; roots: string[]; primary?: string }) => {
+      if (!projectStore) return { ok: false, error: '项目存储未就绪' }
+      try {
+        // A project is a set of repositories: normalise whatever the picker returned to git roots.
+        const roots = await Promise.all(
+          input.roots.map(async (dir) => (await repo.repoRoot(dir)) ?? dir)
+        )
+        const project = await projectStore.create({ ...input, roots })
+        return { ok: true, project }
+      } catch (error) {
+        return { ok: false, error: error instanceof Error ? error.message : String(error) }
+      }
+    }
+  )
+
+  ipcMain.handle(
+    'projects:update',
+    async (
+      _event,
+      id: string,
+      patch: { name?: string; roots?: string[]; primary?: string }
+    ) => {
+      if (!projectStore) return { ok: false, error: '项目存储未就绪' }
+      try {
+        const roots = patch.roots
+          ? await Promise.all(patch.roots.map(async (dir) => (await repo.repoRoot(dir)) ?? dir))
+          : undefined
+        const project = await projectStore.update(id, { ...patch, roots })
+        if (!project) return { ok: false, error: '项目不存在' }
+        return { ok: true, project }
+      } catch (error) {
+        return { ok: false, error: error instanceof Error ? error.message : String(error) }
+      }
+    }
+  )
+
+  /** Create a project from a folder picker; the first repository becomes the primary root. */
+  ipcMain.handle('projects:create-from-dialog', async () => {
+    if (!projectStore) return { ok: false, error: '项目存储未就绪' }
+    const result = await dialog.showOpenDialog(mainWindow!, {
+      title: '新建项目：选择仓库（可多选）',
+      defaultPath: status.cwd,
+      properties: ['openDirectory', 'multiSelections']
+    })
+    if (result.canceled || result.filePaths.length === 0) return { ok: false, error: '已取消' }
+    try {
+      const roots = await Promise.all(
+        result.filePaths.map(async (dir) => (await repo.repoRoot(dir)) ?? dir)
+      )
+      const project = await projectStore.create({
+        name: path.basename(roots[0]),
+        roots,
+        primary: roots[0]
+      })
+      return { ok: true, project }
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) }
+    }
+  })
+
+  /** Add another repository to a project (the primary root stays where it is). */
+  ipcMain.handle('projects:add-root', async (_event, id: string) => {
+    const project = projectStore?.get(id)
+    if (!projectStore || !project) return { ok: false, error: '项目不存在' }
+    const result = await dialog.showOpenDialog(mainWindow!, {
+      title: `向「${project.name}」添加仓库`,
+      defaultPath: status.cwd,
+      properties: ['openDirectory', 'multiSelections']
+    })
+    if (result.canceled || result.filePaths.length === 0) return { ok: false, error: '已取消' }
+    try {
+      const added = await Promise.all(
+        result.filePaths.map(async (dir) => (await repo.repoRoot(dir)) ?? dir)
+      )
+      const updated = await projectStore.update(id, {
+        roots: [...project.roots.map((root) => root.path), ...added]
+      })
+      return updated ? { ok: true, project: updated } : { ok: false, error: '项目不存在' }
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) }
+    }
+  })
+
+  ipcMain.handle('projects:remove', async (_event, id: string) => {
+    await projectStore?.remove(id)
+    if (desktopConfig.activeProject === id) await saveConfig({ activeProject: undefined })
+    return { ok: true }
+  })
+
+  /**
+   * Work in a project: restart pi on its primary repository. The other roots reach the model
+   * through the extension's `<project>` section (see `prepare`).
+   */
+  ipcMain.handle('projects:activate', async (_event, id?: string) => {
+    const project = id ? projectStore?.get(id) : undefined
+    if (id && !project) return { ok: false, error: '项目不存在' }
+    await saveConfig({ activeProject: project?.id })
+    if (btwActive) await closeSideChat()
+    const primary = project?.roots.find((root) => root.primary) ?? project?.roots[0]
+    return startPi(primary?.path ?? status.cwd)
+  })
+
+  ipcMain.handle('repos:recent', () => desktopConfig.recentRepos ?? [])
+
+  /** Store the current model/thinking level as this repository's default for new sessions. */
+  ipcMain.handle('repos:save-defaults', async () => {
+    const defaults = {
+      ...(desktopConfig.repoDefaults ?? {}),
+      [status.cwd]: {
+        provider: status.model?.provider,
+        model: status.model?.id,
+        thinkingLevel: status.thinkingLevel
+      }
+    }
+    await saveConfig({ repoDefaults: defaults })
+    return { ok: true }
+  })
+
   ipcMain.handle('pi:open-session', async (_event, sessionPath: string, cwd: string) => {
     if (btwActive) await closeSideChat()
     await saveConfig({ cwd })
@@ -1217,7 +1210,8 @@ function registerIpc(): void {
     isolatedSessionDir: path.join(app.getPath('userData'), 'sessions'),
     profile: currentProfile(),
     profileDir: desktopProfileDir(),
-    cliDir: profile.CLI_AGENT_DIR
+    cliDir: profile.CLI_AGENT_DIR,
+    activeProject: desktopConfig.activeProject
   }))
 
   /**
@@ -1288,21 +1282,21 @@ function registerIpc(): void {
     // A subagent that settles right after a manual stop must not start a new turn behind the
     // user's back; the notice is queued instead (see subagentManager onSettle).
     lastAbortAt = Date.now()
-    if (!rpc.running) return
+    if (!engine.running()) return
     try {
-      await rpc.request('abort', {}, 30000)
+      await engine.request('abort', {}, 30000)
     } catch {
       // ignore
     }
-    await refreshState()
+    await engine.refresh()
   })
 
   ipcMain.handle('pi:new-session', async () => {
-    if (!rpc.running) return { ok: false, error: 'pi 未运行' }
+    if (!engine.running()) return { ok: false, error: 'pi 未运行' }
     if (btwActive) await closeSideChat()
     try {
-      const response = await rpc.request<{ data?: { cancelled?: boolean } }>('new_session')
-      await refreshState()
+      const response = await engine.request<{ data?: { cancelled?: boolean } }>('new_session')
+      await engine.refresh()
       return { ok: true, cancelled: response.data?.cancelled }
     } catch (error) {
       return { ok: false, error: error instanceof Error ? error.message : String(error) }
@@ -1310,13 +1304,13 @@ function registerIpc(): void {
   })
 
   ipcMain.handle('pi:switch-session', async (_event, sessionPath: string) => {
-    if (!rpc.running) return { ok: false, error: 'pi 未运行' }
+    if (!engine.running()) return { ok: false, error: 'pi 未运行' }
     if (btwActive) await closeSideChat()
     try {
-      const response = await rpc.request<{ data?: { cancelled?: boolean } }>('switch_session', {
+      const response = await engine.request<{ data?: { cancelled?: boolean } }>('switch_session', {
         sessionPath
       })
-      await refreshState()
+      await engine.refresh()
       return { ok: true, cancelled: response.data?.cancelled }
     } catch (error) {
       return { ok: false, error: error instanceof Error ? error.message : String(error) }
@@ -1324,17 +1318,17 @@ function registerIpc(): void {
   })
 
   ipcMain.handle('pi:get-messages', async () => {
-    if (!rpc.running) return []
-    const response = await rpc.request<{ data?: { messages?: unknown[] } }>('get_messages')
+    if (!engine.running()) return []
+    const response = await engine.request<{ data?: { messages?: unknown[] } }>('get_messages')
     return response.data?.messages ?? []
   })
 
   ipcMain.handle('pi:list-sessions', () => listSessions(currentSessionDir()))
 
   ipcMain.handle('pi:session-stats', async () => {
-    if (!rpc.running) return {}
+    if (!engine.running()) return {}
     try {
-      const response = await rpc.request<{ data?: Record<string, unknown> }>('get_session_stats')
+      const response = await engine.request<{ data?: Record<string, unknown> }>('get_session_stats')
       const data = response.data ?? {}
       return {
         tokens: data.tokens as SessionStats['tokens'],
@@ -1541,12 +1535,12 @@ function registerIpc(): void {
     // Compacting the fork would summarize the throwaway branch and leave the real session alone.
     if (btwActive) await closeSideChat()
     try {
-      const response = await rpc.request<{ data?: { summary?: string } }>(
+      const response = await engine.request<{ data?: { summary?: string } }>(
         'compact',
         { ...(instructions?.trim() ? { customInstructions: instructions.trim() } : {}) },
         600_000
       )
-      await refreshState()
+      await engine.refresh()
       return { ok: true, summary: response.data?.summary }
     } catch (error) {
       return { ok: false, error: error instanceof Error ? error.message : String(error) }
@@ -1559,7 +1553,7 @@ function registerIpc(): void {
    */
   ipcMain.handle('pi:set-auto-compact', async (_event, enabled: boolean) => {
     try {
-      await rpc.request('set_auto_compaction', { enabled }, 10_000)
+      await engine.request('set_auto_compaction', { enabled }, 10_000)
       await providers.setCompactionSettings({ enabled })
       autoCompactEnabled = enabled
       broadcastStatus()
@@ -1631,8 +1625,8 @@ function registerIpc(): void {
       await providers.setCompactionSettings({ enabled: true })
       // `syncAutoCompact` only restarts when the reserve changes, so make the switch effective for
       // the process that is running right now (it may have been left with compaction off).
-      if (rpc.running) {
-        await rpc.request('set_auto_compaction', { enabled: true }, 10_000).catch(() => undefined)
+      if (engine.running()) {
+        await engine.request('set_auto_compaction', { enabled: true }, 10_000).catch(() => undefined)
       }
       broadcastStatus()
       const reserveTokens = await syncAutoCompact({ restart: true })
@@ -1664,10 +1658,10 @@ function registerIpc(): void {
   ipcMain.handle('pi:btw-start', async (_event, question: string) => {
     const trimmed = question.trim()
     if (!trimmed) return { ok: false, error: '缺少问题' }
-    if (!rpc.running) return { ok: false, error: 'pi 未运行' }
+    if (!engine.running()) return { ok: false, error: 'pi 未运行' }
     if (btwActive) await closeSideChat()
     const generation = ++btwGeneration
-    if (busy && !(await waitForIdle(600_000))) {
+    if (engine.busy() && !(await engine.waitForIdle(600_000))) {
       return { ok: false, error: '当前回合还没结束，稍后再问' }
     }
     if (generation !== btwGeneration) return { ok: false, error: '侧边提问已取消' }
@@ -1677,9 +1671,9 @@ function registerIpc(): void {
     btwOriginal = original
     try {
       // `fork` requires a specific entry id and rejects the leaf; `clone` is the snapshot we want.
-      const cloned = await rpc.request<{ data?: { cancelled?: boolean } }>('clone', {}, 20_000)
+      const cloned = await engine.request<{ data?: { cancelled?: boolean } }>('clone', {}, 20_000)
       if (cloned.data?.cancelled) throw new Error('克隆会话被取消')
-      const state = await rpc.request<{ data?: Record<string, unknown> }>('get_state', {}, 5000)
+      const state = await engine.request<{ data?: Record<string, unknown> }>('get_state', {}, 5000)
       if (typeof state.data?.sessionFile === 'string') btwFork = state.data.sessionFile
       const answer = await btwPrompt(trimmed)
       return { ok: true, answer: answer.text, settled: answer.settled, forkPath: btwFork }
@@ -1694,7 +1688,7 @@ function registerIpc(): void {
     const trimmed = question.trim()
     if (!trimmed) return { ok: false, error: '缺少问题' }
     if (!btwActive) return { ok: false, error: '侧边提问已经关闭了' }
-    if (busy && !(await waitForIdle(600_000))) {
+    if (engine.busy() && !(await engine.waitForIdle(600_000))) {
       return { ok: false, error: '上一轮还在回答，稍等一下' }
     }
     if (!btwActive) return { ok: false, error: '侧边提问已经关闭了' }
@@ -1862,9 +1856,9 @@ function registerIpc(): void {
   ipcMain.handle('settings:models', () => providers.listModelChoices())
 
   ipcMain.handle('pi:list-models', async () => {
-    if (!rpc.running) return []
+    if (!engine.running()) return []
     try {
-      const response = await rpc.request<{ data?: { models?: Record<string, unknown>[] } }>(
+      const response = await engine.request<{ data?: { models?: Record<string, unknown>[] } }>(
         'get_available_models'
       )
       const names = new Map<string, string>()
@@ -1896,15 +1890,15 @@ function registerIpc(): void {
   })
 
   ipcMain.handle('pi:set-model', async (_event, provider: string, modelId: string) => {
-    if (!rpc.running) return { ok: false, error: 'pi 未运行' }
+    if (!engine.running()) return { ok: false, error: 'pi 未运行' }
     try {
-      const response = await rpc.request<{ data?: Record<string, unknown> }>('set_model', {
+      const response = await engine.request<{ data?: Record<string, unknown> }>('set_model', {
         provider,
         modelId
       })
       const model = modelFromState({ model: response.data })
       if (model) setStatus({ model })
-      await refreshState()
+      await engine.refresh()
       // A different window means a different 90% point; pi only reads the reserve at startup, so
       // this restarts when (and only when) the number actually changed.
       await syncAutoCompact({ restart: true }).catch(() => undefined)
@@ -1915,9 +1909,9 @@ function registerIpc(): void {
   })
 
   ipcMain.handle('pi:list-thinking-levels', async () => {
-    if (!rpc.running) return []
+    if (!engine.running()) return []
     try {
-      const response = await rpc.request<{ data?: { levels?: string[] } }>(
+      const response = await engine.request<{ data?: { levels?: string[] } }>(
         'get_available_thinking_levels'
       )
       return response.data?.levels ?? []
@@ -1927,9 +1921,9 @@ function registerIpc(): void {
   })
 
   ipcMain.handle('pi:set-thinking-level', async (_event, level: string) => {
-    if (!rpc.running) return { ok: false, error: 'pi 未运行' }
+    if (!engine.running()) return { ok: false, error: 'pi 未运行' }
     try {
-      await rpc.request('set_thinking_level', { level })
+      await engine.request('set_thinking_level', { level })
       setStatus({ thinkingLevel: level })
       return { ok: true }
     } catch (error) {
@@ -2029,16 +2023,14 @@ function createWindow(): void {
   })
 }
 
-rpc.on('event', forwardEvent)
 /** Bounded restarts: an extension that crashes on every start must not loop forever. */
 let crashRestarts = 0
 let crashWindowStart = 0
 let shuttingDown = false
-rpc.on('exit', () => {
-  busy = false
-  compacting = false
+
+function handleExit(): void {
   if (status.phase === 'stopped') return
-  setStatus({ phase: 'error', error: rpc.stderrTail || 'pi 进程已退出', isStreaming: false })
+  setStatus({ phase: 'error', error: engine.stderrTail() || 'pi 进程已退出', isStreaming: false })
   if (shuttingDown) return
   // pi died on its own (a crashing extension, an OOM kill). Leaving the window dead means the next
   // message is lost with "pi 未运行", so bring it back on the same session.
@@ -2051,15 +2043,20 @@ rpc.on('exit', () => {
   crashRestarts += 1
   console.warn(`[pi] exited unexpectedly, restarting (${crashRestarts}/3)`)
   setTimeout(() => {
-    if (!shuttingDown && !rpc.running && !starting) void startPi(status.cwd, sessionArgs())
+    if (!shuttingDown && !engine.running() && !engine.starting()) {
+      void startPi(status.cwd, sessionArgs())
+    }
   }, 1000)
-})
+}
 
 app.whenReady().then(async () => {
   registerIpc()
   await migrateLegacyUserData()
   await applySystemProxy()
   desktopConfig = await loadConfig()
+  // Projects live beside the config, in userData; the store reads the file on first use.
+  projectStore = new projects.ProjectStore(path.join(app.getPath('userData'), 'projects.json'))
+  await projectStore.load().catch(() => undefined)
   // Before anything reads a provider, model list or MCP config: point the modules at the profile.
   applyProfile()
   await loadToolCache()
@@ -2127,7 +2124,7 @@ app.whenReady().then(async () => {
     })
     .catch(() => undefined)
   void startPi(cwd).then(() => syncAutoCompact())
-  watchRunState()
+  engine.watch()
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
@@ -2150,7 +2147,7 @@ async function startBridge(): Promise<void> {
 app.on('window-all-closed', () => {
   shuttingDown = true
   cancelPendingAsks('桌面窗口已关闭')
-  rpc.killNow()
+  engine.dispose()
   subagents?.stopAll(true)
   gateway.stopAll(true)
   status = { ...status, phase: 'stopped' }
@@ -2171,5 +2168,5 @@ app.on('before-quit', () => {
       // already gone
     }
   }
-  rpc.killNow()
+  engine.dispose()
 })
