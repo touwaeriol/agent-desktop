@@ -16,6 +16,7 @@ import { Composer } from './components/Composer'
 import { IconRail } from './components/IconRail'
 import { Sidebar } from './components/Sidebar'
 import { TabBar } from './components/TabBar'
+import { ProjectEditor } from './components/ProjectEditor'
 import { SettingsModal } from './components/SettingsModal'
 import { SessionNavigator } from './components/SessionNavigator'
 import { buildOutline } from './lib/outline'
@@ -324,6 +325,7 @@ export default function App(): React.JSX.Element {
   }, [sessions, status.cwd])
 
   const [projects, setProjects] = useState<Project[]>([])
+  const [editingProject, setEditingProject] = useState<Project>()
   const [activeProjectId, setActiveProjectId] = useState<string>()
   const [recentRepos, setRecentRepos] = useState<string[]>([])
 
@@ -378,16 +380,11 @@ export default function App(): React.JSX.Element {
   }, [loadProjects, loadSessions])
 
   const editProject = useCallback(
-    async (id: string) => {
-      const result = await window.pi.addProjectRoot(id)
-      if (!result.ok) {
-        if (result.error && result.error !== '已取消') setToast(result.error)
-        return
-      }
-      await loadProjects()
-      if (result.project) setToast(`「${result.project.name}」现在有 ${result.project.roots.length} 个仓库`)
+    (id: string) => {
+      const project = projects.find((item) => item.id === id)
+      if (project) setEditingProject(project)
     },
-    [loadProjects]
+    [projects]
   )
 
   const deleteProject = useCallback(
@@ -1473,6 +1470,17 @@ export default function App(): React.JSX.Element {
           </div>
         )}
       </main>
+
+      {editingProject && (
+        <ProjectEditor
+          project={editingProject}
+          onClose={() => setEditingProject(undefined)}
+          onSaved={(saved) => {
+            void loadProjects()
+            setToast(`已保存「${saved.name}」：${saved.roots.length} 个仓库`)
+          }}
+        />
+      )}
 
       <SettingsModal
         open={settingsOpen}

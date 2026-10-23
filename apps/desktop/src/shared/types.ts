@@ -487,6 +487,8 @@ export interface PiBridge {
   listRepos(dirs: string[]): Promise<Record<string, RepoInfo>>
   /** Repositories the user worked in, most recent first. */
   recentRepos(): Promise<string[]>
+  /** Folder picker without side effects, resolved to git roots. */
+  pickFolders(title?: string): Promise<string[]>
   /** Remember the current model/thinking level as this repository's default for new sessions. */
   saveRepoDefaults(): Promise<{ ok: boolean; error?: string }>
   listProjects(): Promise<Project[]>

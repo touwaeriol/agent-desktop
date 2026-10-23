@@ -124,7 +124,8 @@ npm run typecheck    # node + web 两个 tsconfig 分别检查
 - 引擎要的启动参数（MCP 参数、扩展、profile、速度档位、项目根）由 `prepare(workspace)` 回调提供，所以引擎不认识 MCP/profile 这些概念；`sessionArgs()` / `sessionDirArgs()` 同理。
 - `index.ts` 里的 `status` 只是**镜像**：引擎通过 `onStatus` 推过来，`statusSnapshot()` 再加应用自己的字段（压缩百分比、档位、仓库）。写状态必须走 `engine.setStatus()`，不要直接赋值。
 - 新增 pi 调用时用 `engine.request('命令', payload)`；不要重新引入第二个 `PiRpcClient`（子代理进程有自己的，那是另一回事）。
-- 还没搬完的部分：`prompt` 的排队/重试策略（`submitPrompt`）、`/btw` 的 clone/switch、压缩阈值同步、登录消息都还在 `index.ts`。下一步按块搬，每搬一块保持行为不变。
+- `engine.prompt()` 承担「窗口和 pi 对忙碌判断不一致」的全部兜底（压缩中等空闲后重试、`already processing` 改发 `followUp` 并回 `queued: true`），所以它是唯一发送入口；不要在别处再包一层重试。
+- 还没搬完的部分：`/btw` 的 clone/switch、压缩阈值同步、登录消息、MCP 启动参数装配（`prepare` 仍由 `index.ts` 提供，这是刻意的）。
 
 ## 项目（多仓库）
 
@@ -133,6 +134,9 @@ npm run typecheck    # node + web 两个 tsconfig 分别检查
 - pi 没有 `--add-dir`：跨仓库靠提示词约定（绝对路径、每条 bash 是新 shell 要 `cd`、跨仓库搜索用 grep 的 `path` 参数）。实测模型能准确复述两个仓库的绝对路径。
 - 侧栏在项目激活时把该项目所有仓库的会话归到同一个组头（`project:<id>`），组头的 `+` 和分支徽标用主仓库。
 - 最近仓库 `config.recentRepos`（最多 12 个，启动时更新），侧栏「更多 → 最近仓库」；每仓库默认模型/思考等级存 `config.repoDefaults[cwd]`，**只在新建会话时应用**（带 `--session` 的重启不覆盖用户当前选择）。
+- 项目激活时**会话目录也归到项目**：`--session-dir <profile>/sessions/projects/<projectId>`，`listSessions()` 仍然从 profile 根递归读，所以旧会话不会消失。
+- 索引按项目铺开：`afterStart` 对主仓库和项目的每个根都调 `startCodegraphIndex`（`indexedRoots` 去重），否则跨仓库时代码图只覆盖主仓库。
+- 项目编辑在 `ProjectEditor.tsx`（改名 / 加仓库 / 移除仓库 / 换主仓库），保存走 `projects:update`；取目录用 `repos:pick-folders`（**无副作用**，不要复用 `pi:choose-workspace`，它会切会话）。
 
 ## 速度档位（fast / ultrafast）
 

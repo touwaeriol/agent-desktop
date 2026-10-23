@@ -33,6 +33,7 @@ import type {
   PiModel,
   PiStatus,
   PromptImage,
+  PromptResult,
   SessionStats,
   SpeedMode
 } from '../shared/types'
@@ -273,9 +274,14 @@ function sharedSessionDir(): string {
 }
 
 function currentSessionDir(): string {
-  return currentSessionMode() === 'isolated'
-    ? path.join(app.getPath('userData'), 'sessions')
-    : sharedSessionDir()
+  const base =
+    currentSessionMode() === 'isolated'
+      ? path.join(app.getPath('userData'), 'sessions')
+      : sharedSessionDir()
+  // A project keeps its conversations together: new sessions land under its own directory, while
+  // the list still walks the whole tree so sessions from before the project stay visible.
+  const project = activeProject()
+  return project ? path.join(base, 'projects', project.id) : base
 }
 
 function sessionDirArgs(): string[] {
@@ -565,19 +571,30 @@ async function saveToolCache(next: ToolCache): Promise<void> {
 
 const engineIndexStatus: Record<string, { state: McpEngineState['index']; message?: string }> = {}
 
+/** Roots already indexed by this process, so a project switch does not re-index from scratch. */
+const indexedRoots = new Set<string>()
+
 function startCodegraphIndex(cwd: string): void {
   const config = engineConfig().codegraph
   if (!config?.enabled) return
+  const key = path.resolve(cwd)
+  if (indexedRoots.has(key)) return
+  indexedRoots.add(key)
   void engines
     .engineEntry('codegraph', config.entry?.trim() || undefined)
     .then((entry) => {
-      if (!entry) return
+      if (!entry) {
+        indexedRoots.delete(key)
+        return
+      }
       engines.ensureCodegraphIndex(cwd, entry, (indexState) => {
         engineIndexStatus.codegraph = indexState
         void broadcastMcpState()
       })
     })
-    .catch(() => undefined)
+    .catch(() => {
+      indexedRoots.delete(key)
+    })
 }
 
 /** Files under the session directory, for the composer's `@` context picker. */
@@ -859,7 +876,10 @@ async function startPi(cwd?: string, extraArgs: string[] = []): Promise<PiStatus
 async function afterStart(workspace: string, extraArgs: string[]): Promise<void> {
   // The engine owns the start now, so the app refreshes the repository facts here.
   void refreshRepo(workspace)
-  startCodegraphIndex(workspace)
+  // Index every repository of the project, not just the one pi is sitting in: code search that
+  // silently only covered the primary root would be worse than no index at all.
+  const roots = activeProject()?.roots.map((root) => root.path) ?? [workspace]
+  for (const root of new Set([workspace, ...roots])) startCodegraphIndex(root)
   const recent = [workspace, ...(desktopConfig.recentRepos ?? []).filter((dir) => dir !== workspace)]
   await saveConfig({ recentRepos: recent.slice(0, 12) })
   if (extraArgs.includes('--session')) return
@@ -960,65 +980,13 @@ async function btwPrompt(message: string): Promise<{ text: string; settled: bool
   return { text: settled ? '（没有回答）' : '（超过 5 分钟仍未结束，可以关闭窗口）', settled }
 }
 
-interface PromptResult {
-  ok: boolean
-  disposition?: 'started' | 'queued' | 'handled'
-  /** True when the window thought pi was idle but pi queued it anyway. */
-  queued?: boolean
-  error?: string
-}
-
-/**
- * Send one prompt and survive the moments where the window and pi disagree about "busy".
- *
- * pi is busy until `agent_settled`: retries, overflow recovery, compaction and queued turns keep it
- * alive after `agent_end`, and `prompt` rejects anything that arrives in between. Rather than
- * bouncing the text back into the composer, the message is queued exactly like `streamingBehavior`
- * would queue it, and a running compaction is waited out.
- */
-async function submitPrompt(
+/** The engine owns the turn; the app only forwards the window's request. */
+function submitPrompt(
   message: string,
   behavior?: 'steer' | 'followUp',
   images?: PromptImage[]
 ): Promise<PromptResult> {
-  if (!engine.running()) return { ok: false, error: 'pi 未运行' }
-  const payload = {
-    message,
-    ...(behavior ? { streamingBehavior: behavior } : {}),
-    ...(images && images.length > 0 ? { images } : {})
-  }
-  const send = async (extra: Record<string, unknown> = {}): Promise<PromptResult['disposition']> => {
-    const response = await engine.request<{ data?: { disposition?: string } }>('prompt', {
-      ...payload,
-      ...extra
-    })
-    return (response.data?.disposition as PromptResult['disposition']) ?? 'started'
-  }
-  const fail = (error: unknown): PromptResult => ({
-    ok: false,
-    error: error instanceof Error ? error.message : String(error)
-  })
-  try {
-    return { ok: true, disposition: await send() }
-  } catch (error) {
-    const text = error instanceof Error ? error.message : String(error)
-    if (/compaction is in progress/i.test(text)) {
-      if (!(await engine.waitForIdle(180_000))) return { ok: false, error: '上下文压缩还没结束，稍后再发' }
-      try {
-        return { ok: true, disposition: await send() }
-      } catch (retryError) {
-        return fail(retryError)
-      }
-    }
-    if (/already processing/i.test(text) && !behavior) {
-      try {
-        return { ok: true, disposition: await send({ streamingBehavior: 'followUp' }), queued: true }
-      } catch (retryError) {
-        return fail(retryError)
-      }
-    }
-    return fail(error)
-  }
+  return engine.prompt(message, { behavior, images })
 }
 
 async function reloadPiConfig(): Promise<void> {
@@ -1181,6 +1149,17 @@ function registerIpc(): void {
   })
 
   ipcMain.handle('repos:recent', () => desktopConfig.recentRepos ?? [])
+
+  /** Folder picker without side effects, resolved to git roots; used by the project editor. */
+  ipcMain.handle('repos:pick-folders', async (_event, title?: string) => {
+    const result = await dialog.showOpenDialog(mainWindow!, {
+      title: title ?? '选择仓库',
+      defaultPath: status.cwd,
+      properties: ['openDirectory', 'multiSelections']
+    })
+    if (result.canceled) return []
+    return Promise.all(result.filePaths.map(async (dir) => (await repo.repoRoot(dir)) ?? dir))
+  })
 
   /** Store the current model/thinking level as this repository's default for new sessions. */
   ipcMain.handle('repos:save-defaults', async () => {

@@ -26,6 +26,8 @@ const bridge: PiBridge = {
   listRepos: (dirs: string[]) =>
     ipcRenderer.invoke('pi:repos', dirs) as Promise<Record<string, RepoInfo>>,
   recentRepos: () => ipcRenderer.invoke('repos:recent') as Promise<string[]>,
+  pickFolders: (title?: string) =>
+    ipcRenderer.invoke('repos:pick-folders', title) as Promise<string[]>,
   saveRepoDefaults: () => ipcRenderer.invoke('repos:save-defaults'),
   listProjects: () => ipcRenderer.invoke('projects:list') as Promise<Project[]>,
   createProject: (input) => ipcRenderer.invoke('projects:create', input),

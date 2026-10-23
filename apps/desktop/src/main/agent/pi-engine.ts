@@ -1,6 +1,6 @@
 import { existsSync } from 'node:fs'
 import os from 'node:os'
-import type { PiModel, PiStatus } from '@shared/types'
+import type { PiModel, PiStatus, PromptImage, PromptResult } from '@shared/types'
 import { PiRpcClient } from '../pi-rpc'
 import type { AgentEngine } from './engine'
 
@@ -259,6 +259,61 @@ export class PiEngine implements AgentEngine {
       }
     }
     return !this.isBusy
+  }
+
+  /**
+   * Send one prompt and survive the moments where the window and pi disagree about "busy".
+   *
+   * pi is busy until `agent_settled`: retries, overflow recovery, compaction and queued turns keep
+   * it alive after `agent_end`, and `prompt` rejects anything that arrives in between. Rather than
+   * bouncing the text back into the composer, the message is queued exactly like
+   * `streamingBehavior` would queue it, and a running compaction is waited out.
+   */
+  async prompt(
+    message: string,
+    options: { behavior?: 'steer' | 'followUp'; images?: PromptImage[] } = {}
+  ): Promise<PromptResult> {
+    if (!this.rpc.running) return { ok: false, error: 'pi 未运行' }
+    const { behavior, images } = options
+    const payload = {
+      message,
+      ...(behavior ? { streamingBehavior: behavior } : {}),
+      ...(images && images.length > 0 ? { images } : {})
+    }
+    const send = async (extra: Record<string, unknown> = {}): Promise<PromptResult['disposition']> => {
+      const response = await this.rpc.request<{ data?: { disposition?: string } }>('prompt', {
+        ...payload,
+        ...extra
+      })
+      return (response.data?.disposition as PromptResult['disposition']) ?? 'started'
+    }
+    const fail = (error: unknown): PromptResult => ({
+      ok: false,
+      error: error instanceof Error ? error.message : String(error)
+    })
+    try {
+      return { ok: true, disposition: await send() }
+    } catch (error) {
+      const text = error instanceof Error ? error.message : String(error)
+      if (/compaction is in progress/i.test(text)) {
+        if (!(await this.waitForIdle(180_000))) {
+          return { ok: false, error: '上下文压缩还没结束，稍后再发' }
+        }
+        try {
+          return { ok: true, disposition: await send() }
+        } catch (retryError) {
+          return fail(retryError)
+        }
+      }
+      if (/already processing/i.test(text) && !behavior) {
+        try {
+          return { ok: true, disposition: await send({ streamingBehavior: 'followUp' }), queued: true }
+        } catch (retryError) {
+          return fail(retryError)
+        }
+      }
+      return fail(error)
+    }
   }
 
   private resolveSettled(): void {
