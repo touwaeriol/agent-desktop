@@ -17,6 +17,8 @@ interface CodexOptions {
   binary: string
   /** Node executable plus script, for the Windows shim that is a .js entry. */
   script?: string
+  /** Config keys to switch off, as `-c tools.<name>=false`. */
+  disabledTools?: () => string[]
 }
 
 export class CodexEngine implements AgentEngine {
@@ -201,6 +203,10 @@ export class CodexEngine implements AgentEngine {
       ? ['exec', 'resume', this.threadId, '--json', '--skip-git-repo-check', '-']
       : ['exec', '--json', '--skip-git-repo-check', '-C', this.roots.primary, '-']
     if (this.model) args.push('-m', this.model)
+    // Codex has no tool flags; its switches are config overrides.
+    for (const tool of this.options.disabledTools?.() ?? []) {
+      args.push('-c', `tools.${tool}=false`)
+    }
 
     const user: Record<string, unknown> = {
       role: 'user',

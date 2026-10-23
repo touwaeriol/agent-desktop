@@ -187,11 +187,20 @@ function createEngine(): AgentEngine {
     onExit: () => handleExit()
   }
   if (desktopConfig.engine === 'claude') {
-    return new ClaudeCodeEngine({ ...shared, binary: claudeBinary() })
+    return new ClaudeCodeEngine({
+      ...shared,
+      binary: claudeBinary(),
+      disabledTools: () => desktopConfig.engineTools?.claude ?? []
+    })
   }
   if (desktopConfig.engine === 'codex') {
     const { command, script } = codexLaunch()
-    return new CodexEngine({ ...shared, binary: command, script })
+    return new CodexEngine({
+      ...shared,
+      binary: command,
+      script,
+      disabledTools: () => desktopConfig.engineTools?.codex ?? []
+    })
   }
   if (desktopConfig.engine !== 'pi') {
     return new PropheyEngine({
@@ -338,6 +347,8 @@ interface DesktopConfig {
   engine?: 'pi' | 'prophey' | 'claude' | 'codex'
   /** Current Prophey-engine session id; rotates when a new session starts. */
   propheySessionId?: string
+  /** Tools switched off for a CLI engine (its own tool names). */
+  engineTools?: { claude?: string[]; codex?: string[] }
   /** Repositories the user worked in, most recent first (sidebar "切换仓库" menu). */
   recentRepos?: string[]
   /** Per-repository defaults applied to a new session in that repository. */
@@ -1444,6 +1455,7 @@ function registerIpc(): void {
   ipcMain.handle('desktop:config', () => ({
     engine: currentEngineId(),
     capabilities: currentEngine.capabilities(),
+    engineTools: desktopConfig.engineTools ?? {},
     cwd: status.cwd,
     sessionMode: currentSessionMode(),
     sessionDir: currentSessionDir(),
@@ -1504,6 +1516,19 @@ function registerIpc(): void {
     currentEngine = createEngine()
     previous.dispose()
     return startPi(status.cwd)
+    }
+  )
+
+  ipcMain.handle(
+    'desktop:set-engine-tools',
+    async (_event, engine: 'claude' | 'codex', disabled: string[]) => {
+      const next = {
+        ...(desktopConfig.engineTools ?? {}),
+        [engine]: Array.isArray(disabled) ? disabled.filter((name) => typeof name === 'string') : []
+      }
+      await saveConfig({ engineTools: next })
+      // The flags are per invocation, so nothing restarts: the next turn picks them up.
+      return { ok: true, engineTools: next }
     }
   )
 

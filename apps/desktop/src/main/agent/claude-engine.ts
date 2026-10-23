@@ -19,6 +19,8 @@ interface ClaudeOptions {
   onSettled(): void
   /** Absolute path of the `claude` executable (the packaged .exe, not the .cmd shim). */
   binary: string
+  /** Tool names to switch off (`--disallowedTools`); empty means the CLI default set. */
+  disabledTools?: () => string[]
 }
 
 interface TurnResult {
@@ -216,6 +218,9 @@ export class ClaudeCodeEngine implements AgentEngine {
     for (const root of this.roots.additional) args.push('--add-dir', root)
     if (this.model) args.push('--model', this.model)
     if (this.sessionId) args.push('--resume', this.sessionId)
+    // The CLI owns its tool set; these are the switches that trim it without replacing it.
+    const disabled = this.options.disabledTools?.() ?? []
+    if (disabled.length > 0) args.push('--disallowedTools', disabled.join(','))
 
 
     const user: Record<string, unknown> = {

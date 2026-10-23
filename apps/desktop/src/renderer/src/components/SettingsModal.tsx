@@ -866,6 +866,24 @@ export function SettingsModal({
     setNotice(`已切换到 ${labels[engine] ?? engine} 引擎`)
   }, [])
 
+  /** Tools a CLI engine should not have; the flags are applied to the next turn. */
+  const toggleEngineTool = useCallback(
+    async (engine: 'claude' | 'codex', tool: string) => {
+      const current = desktopConfig?.engineTools?.[engine] ?? []
+      const next = current.includes(tool)
+        ? current.filter((name) => name !== tool)
+        : [...current, tool]
+      const result = await window.pi.setEngineTools(engine, next)
+      setDesktopConfig(await window.pi.getDesktopConfig())
+      setNotice(
+        result.ok
+          ? `${engine === 'claude' ? 'Claude Code' : 'Codex'}：${tool} ${next.includes(tool) ? '已禁用' : '已启用'}`
+          : '保存失败'
+      )
+    },
+    [desktopConfig]
+  )
+
   const changeSessionMode = useCallback(async (mode: 'shared' | 'isolated') => {
     const next = await window.pi.setSessionMode(mode)
     if (next.phase === 'error') {
@@ -1261,8 +1279,45 @@ export function SettingsModal({
                 <p className="field-hint">
                   Prophey（默认）：我们自己的循环——直连服务商、根感知工具、MCP、子代理、
                   <code>/btw</code>、压缩与重试、自己的 transcript 与系统提示词。
-                  只差 Claude 的快速模式。
                 </p>
+                {desktopConfig?.engine === 'claude' && (
+                  <div className="field-row engine-tools">
+                    <span className="field-inline">禁用的工具</span>
+                    {['Bash', 'Write', 'Edit', 'WebFetch', 'WebSearch', 'Task'].map((tool) => {
+                      const off = (desktopConfig?.engineTools?.claude ?? []).includes(tool)
+                      return (
+                        <button
+                          key={tool}
+                          className={`ghost ${off ? 'danger' : ''}`}
+                          onClick={() => void toggleEngineTool('claude', tool)}
+                          title={off ? '已禁用，点击恢复' : '点击禁用'}
+                        >
+                          {tool}
+                          {off ? ' 已禁用' : ''}
+                        </button>
+                      )
+                    })}
+                  </div>
+                )}
+                {desktopConfig?.engine === 'codex' && (
+                  <div className="field-row engine-tools">
+                    <span className="field-inline">禁用的工具</span>
+                    {['web_search'].map((tool) => {
+                      const off = (desktopConfig?.engineTools?.codex ?? []).includes(tool)
+                      return (
+                        <button
+                          key={tool}
+                          className={`ghost ${off ? 'danger' : ''}`}
+                          onClick={() => void toggleEngineTool('codex', tool)}
+                          title={off ? '已禁用，点击恢复' : '点击禁用'}
+                        >
+                          网页搜索
+                          {off ? ' 已禁用' : ''}
+                        </button>
+                      )
+                    })}
+                  </div>
+                )}
               </div>
 
               <div className="field">

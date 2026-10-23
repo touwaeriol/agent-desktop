@@ -259,6 +259,8 @@ export interface DesktopConfig {
   activeProject?: string
   /** Which engine runs the turn. */
   engine?: 'pi' | 'prophey' | 'claude' | 'codex'
+  /** Tools disabled for a CLI engine (its own tool names). */
+  engineTools?: { claude?: string[]; codex?: string[] }
   /** What the active engine supports, so the window can hide the rest. */
   capabilities?: {
     compact: boolean
@@ -522,6 +524,11 @@ export interface PiBridge {
   setSessionMode(mode: 'shared' | 'isolated'): Promise<PiStatus>
   /** Switch the engine; the main process rebuilds it and restarts the session. */
   setEngine(engine: 'pi' | 'prophey' | 'claude' | 'codex'): Promise<PiStatus>
+  /** Disable tools for a CLI engine; applies to the next turn. */
+  setEngineTools(
+    engine: 'claude' | 'codex',
+    disabled: string[]
+  ): Promise<{ ok: boolean; engineTools: { claude?: string[]; codex?: string[] } }>
   /** Switch between the CLI's pi profile and the desktop's own directory. */
   setProfile(mode: 'shared' | 'desktop'): Promise<{
     ok: boolean
