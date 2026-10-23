@@ -51,8 +51,16 @@ const SPEED_LABELS: Record<SpeedMode, string> = {
 
 const SPEED_OPTIONS: Array<{ mode: SpeedMode; label: string; hint: string }> = [
   { mode: 'standard', label: '标准', hint: '服务商默认档位，计价与平时一致' },
-  { mode: 'fast', label: '快速', hint: 'OpenAI service_tier=fast / Claude speed=fast，按快速档计价' },
-  { mode: 'ultrafast', label: '极速', hint: 'OpenAI service_tier=ultrafast，仅 gpt-6-astra / gpt-6.1-sol' }
+  {
+    mode: 'fast',
+    label: '快速',
+    hint: 'OpenAI service_tier=fast / Claude speed=fast，按快速档计价；需要 API 计费或支持该档位的套餐，账号不支持时会回退标准'
+  },
+  {
+    mode: 'ultrafast',
+    label: '极速',
+    hint: 'OpenAI service_tier=ultrafast，仅 gpt-6-astra / gpt-6.1-sol，且需要 API 计费或支持该档位的套餐'
+  }
 ]
 
 export function Composer({

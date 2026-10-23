@@ -456,6 +456,10 @@ export default function App(): React.JSX.Element {
       case 'extension_error':
         setToast(`扩展错误：${String(record.error ?? '未知错误')}`)
         break
+      case 'speed_unsupported':
+        // The main process already dropped the setting back to `standard` and restarted pi.
+        setToast('这个账号不能使用该速度档位，已回退标准（需要 API 计费或支持该档位的套餐），请重新发送')
+        break
       default:
         break
     }

@@ -122,6 +122,7 @@ npm run typecheck    # node + web 两个 tsconfig 分别检查
 - 判定必须按 **provider**，不能只看 `model.api`：DeepSeek / Moonshot / Z.AI / Groq 都是 `openai-completions`，但都不实现 `service_tier`（发过去是 400 或未知字段）。`src/main/speed.ts` 与扩展里的 `tierFor()` 各判一次，扩展那次是防止模型中途切换后仍把档位塞给不支持的模型。
 - 界面：输入框右侧 `.pill-seg.speed`（只有 `status.speed.available.length > 1` 时出现，非 `standard` 时高亮），点开是「标准 / 快速 / 极速」。`PiStatus.speed = { mode, available, note }`，`note` 说明缺哪档、为什么。
 - 档位通过环境变量 `AGENT_DESKTOP_SPEED` 传给 pi 子进程（扩展在加载时读），所以切换会重启 pi；`sessionArgs()` 因此必须带上 `--provider/--model`：没有消息的新会话在磁盘上还没有文件，不带这两个参数重启会退回 settings.json 的默认模型，用户看到的是「切了档位模型自己变了」。
+- 档位不是所有账号都能用：ChatGPT 订阅登录实测返回 `OpenAI API error (400): {"detail":"Unsupported service_tier: fast"}`（需要 API 计费或支持该档位的套餐，Claude 那边同理）。**没有接口能提前问出来**，所以第一次 400 就是信号：`forwardEvent` 在 `message_end` 里看到 assistant `stopReason === 'error'` 且错误匹配 `TIER_REJECTED` 时，把 `config.speed.mode` 写回 `standard`、`broadcastStatus()`、发一条 `speed_unsupported` 事件给窗口（提示「已回退标准，请重新发送」），再 `reloadPiConfig()` 让扩展不再注入。用户重新发送就正常了。
 - 用户 `settings.json` 里显式写了别的 shell/模型默认值时不要覆盖；`ultrafast` 与 `flex` 的计价不同，UI 里要写清是按服务商计价的档位。
 
 ## 运行状态（busy）

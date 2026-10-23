@@ -922,6 +922,12 @@ function forwardEvent(record: Record<string, unknown>): void {
     busy = true
     setStatus({ isStreaming: true })
   }
+  if (record.type === 'message_end') {
+    const message = record.message as { role?: string; stopReason?: string; errorMessage?: string } | undefined
+    if (message?.role === 'assistant' && message.stopReason === 'error' && message.errorMessage) {
+      noteSpeedRejection(message.errorMessage)
+    }
+  }
   if (record.type === 'agent_end') {
     // One low-level run ended, but retries, compaction recovery and queued messages may continue.
     // Refresh the model/context info; the session only becomes idle at `agent_settled`.
@@ -984,6 +990,29 @@ function watchRunState(): void {
     if (!busy || !rpc.running) return
     void refreshState()
   }, 3000)
+}
+
+/** Vendor wording for "this account may not use that processing tier". */
+const TIER_REJECTED =
+  /unsupported service_tier|service_tier[^"]{0,40}(not supported|invalid)|unsupported[^"]{0,20}speed|fast.?mode[^"]{0,30}(not available|not supported)|invalid.*anthropic-beta/i
+
+/**
+ * A tier the account cannot use is a 400 that kills the turn, so fall back instead of letting the
+ * user resend into the same wall.
+ *
+ * Measured on a ChatGPT subscription login: `{"detail":"Unsupported service_tier: fast"}` — fast and
+ * ultrafast need API billing or a plan that includes them. Nothing advertises that up front, so the
+ * first rejection is the signal: drop back to `standard`, restart pi without the tier, and say why.
+ */
+function noteSpeedRejection(errorMessage: string): void {
+  if (currentSpeedMode() === 'standard' || !TIER_REJECTED.test(errorMessage)) return
+  void saveConfig({ speed: { mode: 'standard' } })
+  broadcastStatus()
+  mainWindow?.webContents.send('pi:event', {
+    type: 'speed_unsupported',
+    detail: errorMessage.slice(0, 200)
+  })
+  void reloadPiConfig()
 }
 
 function sessionArgs(): string[] {

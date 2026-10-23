@@ -26,7 +26,7 @@ export function speedSupport(model?: PiModel): { available: SpeedMode[]; note?: 
       ? { available: ['standard', 'fast', 'ultrafast'] }
       : {
           available: ['standard', 'fast'],
-          note: '极速（ultrafast）只支持 gpt-6-astra 和 gpt-6.1-sol'
+          note: '极速（ultrafast）只支持 gpt-6-astra 和 gpt-6.1-sol；快速/极速需要 API 计费或支持该档位的套餐'
         }
   }
 
