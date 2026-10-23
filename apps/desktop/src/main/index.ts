@@ -20,7 +20,7 @@ import { applySystemProxy, getProxyInfo } from './proxy'
 import * as profile from './profile'
 import * as repo from './repo'
 import * as projects from './projects'
-import { withRealBash } from './shell'
+import { realBashPath, withRealBash } from './shell'
 import * as speed from './speed'
 import type { AgentWorkspace } from './agent/engine'
 import type {
@@ -128,6 +128,9 @@ const engine = new PiEngine({
     const env = withRealBash({ ...launch.env })
     // Read by the extension's request hooks; it re-checks the model before touching the payload.
     env.AGENT_DESKTOP_SPEED = speed.resolveSpeedMode(status.model, currentSpeedMode())
+    // The root-aware bash tool runs in the core server, which has no idea where Git Bash lives.
+    const bash = realBashPath()
+    if (bash) env.AGENT_DESKTOP_SHELL = bash
     // Root-aware file tools need the same list the model is told about, so both come from here.
     if (workspace.additional.length > 0) {
       env.AGENT_DESKTOP_ROOTS = JSON.stringify([

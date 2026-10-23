@@ -61,6 +61,11 @@ function findGitBash(): string | undefined {
  *
  * An explicit `shellPath` in settings.json still wins: pi checks it before touching PATH.
  */
+/** Absolute path of the Git Bash that {@link withRealBash} puts on PATH, when one exists. */
+export function realBashPath(): string | undefined {
+  return process.platform === 'win32' ? findGitBash() : undefined
+}
+
 export function withRealBash(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   if (process.platform !== 'win32') return env
   const bash = findGitBash()

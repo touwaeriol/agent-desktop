@@ -123,8 +123,9 @@ npm run typecheck    # node + web 两个 tsconfig 分别检查
 - **引擎只负责跑一轮和运行状态机**：子进程、`agent_start → agent_settled` 的 busy、压缩、settle waiter、`get_state` 权威校正、崩溃退出通知。**应用策略全部留在 `index.ts`**：MCP 服务器、`/btw` 分支、压缩阈值、速度档位、config、profile、子代理。
 - 引擎要的启动参数（MCP 参数、扩展、profile、速度档位、项目根）由 `prepare(workspace)` 回调提供，所以引擎不认识 MCP/profile 这些概念；`sessionArgs()` / `sessionDirArgs()` 同理。
 - **`AgentWorkspace = { primary, additional[] }`** 是「一个会话跨多个目录」在 agent 层的表达：`primary` 是工作目录（相对路径、bash、搜索默认都对它解析），`additional` 是项目里的其他目录（只能用绝对路径访问，绝不当子目录）。`engine.start()` 收 `string | AgentWorkspace`，`engine.workspace()` 报告当前生效的根；不存在的 additional 根在启动时被丢弃。**会话在项目内启动时覆盖整个项目，在项目外就是一个根**（`currentWorkspace()`），这条是行为分界，别在别处再拼一遍根列表。
-- **根感知工具**（`packages/mcp-core/tools/workspace.mjs`）：`workspace_roots` / `read_file` / `grep_files`，入参是 `root`（目录名）+ 相对路径，越界（`..`、绝对路径、符号出根）直接拒绝。**只在多根会话里列出**（`AGENT_DESKTOP_ROOTS` 多于一个），单目录会话继续用 pi 自带的 read/grep，不重复造轮子。主进程在 `prepare()` 里把根清单写进 `AGENT_DESKTOP_ROOTS`，扩展转给 core server；`<project>` 段会告诉模型优先用它们。
-- 实测（两目录项目）：模型全程只用 `mcp__desktop__*`，`root: "Git"` 读到第二个目录里的文件，没有用 bash、没有绝对路径。
+- **根感知工具**（`packages/mcp-core/tools/workspace.mjs`）：`workspace_roots` / `read_file` / `grep_files` / `write_file` / `edit_file` / `run_bash`，入参是 `root`（目录名）+ 相对路径，越界（`..`、绝对路径、符号出根）直接拒绝。**只在多根会话里列出**（`AGENT_DESKTOP_ROOTS` 多于一个），单目录会话继续用 pi 自带的工具，不重复造轮子。主进程在 `prepare()` 里把根清单写进 `AGENT_DESKTOP_ROOTS`、把解析到的 Git Bash 写进 `AGENT_DESKTOP_SHELL`（core server 没有修好的 PATH），扩展转给 core server；`<project>` 段会告诉模型优先用它们。
+- `run_bash` 的 `root` 只决定**工作目录**，shell 本身仍有完整文件系统权限（`cd ../别的仓库` 照样能跑）——要真正限制得靠沙箱，现在没有。
+- 实测（两目录项目）：模型全程只用 `mcp__desktop__*`，`root: "Git"` 读到/写入第二个目录，`run_bash` 在 `Git` 里跑 `ls | head -3` 拿到真实输出；`../beta/x`、`C:/Windows/win.ini`、未知 root 全部被拒绝并列出可用目录。
 - `index.ts` 里的 `status` 只是**镜像**：引擎通过 `onStatus` 推过来，`statusSnapshot()` 再加应用自己的字段（压缩百分比、档位、仓库）。写状态必须走 `engine.setStatus()`，不要直接赋值。
 - 新增 pi 调用时用 `engine.request('命令', payload)`；不要重新引入第二个 `PiRpcClient`（子代理进程有自己的，那是另一回事）。
 - `engine.prompt()` 承担「窗口和 pi 对忙碌判断不一致」的全部兜底（压缩中等空闲后重试、`already processing` 改发 `followUp` 并回 `queued: true`），所以它是唯一发送入口；不要在别处再包一层重试。

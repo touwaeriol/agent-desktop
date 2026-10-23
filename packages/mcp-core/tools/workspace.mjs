@@ -265,4 +265,161 @@ export const grepFiles = {
   }
 }
 
-export const workspaceTools = [workspaceRoots, readFile, grepFiles]
+export const writeFile = {
+  name: 'write_file',
+  title: 'Write a file in a workspace directory',
+  description:
+    'Create or overwrite a text file inside one workspace directory. `path` is relative to `root` ' +
+    '(omit `root` for the primary directory); parent directories are created. Anything that would ' +
+    'escape the directory is refused.',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      root: { type: 'string', description: 'Directory name; omit for the primary directory.' },
+      path: { type: 'string', description: 'Path relative to the directory.' },
+      content: { type: 'string', description: 'Full file content.' }
+    },
+    required: ['path', 'content'],
+    additionalProperties: false
+  },
+  async call(args) {
+    try {
+      const root = pickRoot(args?.root)
+      const target = inside(root, args?.path)
+      const content = typeof args?.content === 'string' ? args.content : String(args?.content ?? '')
+      let previous = null
+      try {
+        previous = await fs.readFile(target, 'utf8')
+      } catch {
+        // a new file is the normal case
+      }
+      await fs.mkdir(path.dirname(target), { recursive: true })
+      await fs.writeFile(target, content, 'utf8')
+      const lines = content.split('\n').length
+      const verb = previous === null ? '新建' : previous === content ? '未变' : '覆盖'
+      return text(`${verb} ${root.name}/${args?.path}（${lines} 行）`)
+    } catch (error) {
+      return failure(error)
+    }
+  }
+}
+
+export const editFile = {
+  name: 'edit_file',
+  title: 'Replace exact text in a file',
+  description:
+    'Apply exact-text replacements to a file inside one workspace directory. Each `oldText` must ' +
+    'match the original file exactly and uniquely; edits are applied to the original content, not ' +
+    'incrementally. `path` is relative to `root`.',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      root: { type: 'string', description: 'Directory name; omit for the primary directory.' },
+      path: { type: 'string', description: 'Path relative to the directory.' },
+      edits: {
+        type: 'array',
+        minItems: 1,
+        items: {
+          type: 'object',
+          properties: {
+            oldText: { type: 'string', description: 'Exact text to find.' },
+            newText: { type: 'string', description: 'Replacement text.' }
+          },
+          required: ['oldText', 'newText'],
+          additionalProperties: false
+        }
+      }
+    },
+    required: ['path', 'edits'],
+    additionalProperties: false
+  },
+  async call(args) {
+    try {
+      const root = pickRoot(args?.root)
+      const target = inside(root, args?.path)
+      const original = await fs.readFile(target, 'utf8')
+      let next = original
+      const edits = Array.isArray(args?.edits) ? args.edits : []
+      if (edits.length === 0) throw new Error('edits 不能为空')
+      for (const edit of edits) {
+        const oldText = String(edit?.oldText ?? '')
+        if (!oldText) throw new Error('oldText 不能为空')
+        const hits = next.split(oldText).length - 1
+        if (hits === 0) throw new Error(`没有找到要替换的文本：${oldText.slice(0, 80)}`)
+        if (hits > 1) throw new Error(`要替换的文本出现了 ${hits} 次，请写得更具体：${oldText.slice(0, 80)}`)
+        next = next.replace(oldText, String(edit?.newText ?? ''))
+      }
+      await fs.writeFile(target, next, 'utf8')
+      return text(`已修改 ${root.name}/${args?.path}（${edits.length} 处替换）`)
+    } catch (error) {
+      return failure(error)
+    }
+  }
+}
+
+export const runBash = {
+  name: 'run_bash',
+  title: 'Run a shell command in a workspace directory',
+  description:
+    'Run a bash command with the working directory set to one workspace directory (or a ' +
+    'subdirectory of it). Unlike pi\'s bash tool this one takes the directory explicitly, so a ' +
+    'command cannot accidentally run in the wrong repository.',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      root: { type: 'string', description: 'Directory name; omit for the primary directory.' },
+      cwd: { type: 'string', description: 'Subdirectory to run in, relative to root.' },
+      command: { type: 'string', description: 'Command to run.' },
+      timeout: { type: 'number', description: 'Seconds before the command is killed (default 120).' }
+    },
+    required: ['command'],
+    additionalProperties: false
+  },
+  async call(args) {
+    try {
+      const root = pickRoot(args?.root)
+      const cwd = inside(root, args?.cwd)
+      const command = String(args?.command ?? '')
+      if (!command.trim()) throw new Error('command 不能为空')
+      const seconds = Math.min(Math.max(Number(args?.timeout) || 120, 1), 1800)
+      // The app resolves Git Bash for us: this process does not inherit the fixed PATH.
+      const shell = process.env.AGENT_DESKTOP_SHELL || 'bash'
+      const result = await new Promise((resolve, reject) => {
+        execFile(
+          shell,
+          ['-lc', command],
+          { cwd, timeout: seconds * 1000, maxBuffer: 8 * 1024 * 1024, windowsHide: true },
+          (error, stdout, stderr) => {
+            if (error && error.killed) {
+              reject(new Error(`命令超时（${seconds} 秒）：${command.slice(0, 120)}`))
+              return
+            }
+            const code = typeof error?.code === 'number' ? error.code : error ? 1 : 0
+            const body = [stdout, stderr].filter(Boolean).join('\n').trim()
+            resolve({ code, body: body.slice(0, 20000), truncated: body.length > 20000 })
+          }
+        )
+      })
+      const header = `${root.name}/${args?.cwd ?? ''} $ ${command}`
+      const body = result.body || '（无输出）'
+      return {
+        content: [
+          { type: 'text', text: `${header}\n${body}${result.truncated ? '\n…输出过长已截断' : ''}` }
+        ],
+        ...(result.code === 0 ? {} : { isError: true })
+      }
+    } catch (error) {
+      return failure(error)
+    }
+  }
+}
+
+export const workspaceTools = [
+  workspaceRoots,
+  readFile,
+  grepFiles,
+  writeFile,
+  editFile,
+  runBash
+]
+

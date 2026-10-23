@@ -240,8 +240,9 @@ export default function desktopMcp(pi) {  const url = process.env.AGENT_DESKTOP_
         AGENT_DESKTOP_MCP_URL: url,
         AGENT_DESKTOP_MCP_TOKEN: token,
         AGENT_DESKTOP_SUBAGENTS: subagentsEnabled ? '1' : '0',
-        // Root-aware read/grep tools only exist for a session that covers several directories.
-        AGENT_DESKTOP_ROOTS: process.env.AGENT_DESKTOP_ROOTS ?? ''
+        // Root-aware file tools only exist for a session that covers several directories.
+        AGENT_DESKTOP_ROOTS: process.env.AGENT_DESKTOP_ROOTS ?? '',
+        AGENT_DESKTOP_SHELL: process.env.AGENT_DESKTOP_SHELL ?? ''
       },
       exposure: 'direct',
       // No timeout: pi skips arming its request timer when timeoutMs is not finite
