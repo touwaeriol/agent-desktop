@@ -144,7 +144,9 @@ function createEngine(): AgentEngine {
     onAssistantError: (message: string) => noteSpeedRejection(message),
     onExit: () => handleExit()
   }
-  if (desktopConfig.engine === 'own') return new OwnEngine(shared)
+  if (desktopConfig.engine === 'own') {
+    return new OwnEngine({ ...shared, toolModulePath: coreToolsModule() })
+  }
   return new PiEngine({
     ...shared,
     prepare: async (workspace) => {
@@ -464,6 +466,13 @@ function mcpServerScript(): string {
     searchUp(app.getAppPath(), path.join('packages', 'mcp-core', 'server.mjs')) ??
     path.join(app.getAppPath(), '..', '..', 'packages', 'mcp-core', 'server.mjs')
   )
+}
+
+/** The root-aware tool module the own engine loads: same file pi's MCP server serves. */
+function coreToolsModule(): string | undefined {
+  const script = mcpServerScript()
+  const candidate = path.join(path.dirname(script), 'tools', 'workspace.mjs')
+  return existsSync(candidate) ? candidate : undefined
 }
 
 function desktopToolAvailable(): boolean {

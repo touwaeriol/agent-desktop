@@ -129,7 +129,9 @@ npm run typecheck    # node + web 两个 tsconfig 分别检查
 - `index.ts` 里的 `status` 只是**镜像**：引擎通过 `onStatus` 推过来，`statusSnapshot()` 再加应用自己的字段（压缩百分比、档位、仓库）。写状态必须走 `engine.setStatus()`，不要直接赋值。
 - 新增 pi 调用时用引擎的**语义方法**（`setModel` / `thinkingLevels` / `stats` / `messages` / `compact` / `newSession` / `switchSession` / `clone` / `abort` / `send`），**不要**再写 `engine.request('set_model')` 这种命令名：那等于把 pi 的命令表写进窗口，第二个引擎就接不进来。`PiEngine` 里这些方法只是薄封装，`index.ts` 已无一处 `engine.request(`。
 - `engine.prompt()` 承担「窗口和 pi 对忙碌判断不一致」的全部兜底（压缩中等空闲后重试、`already processing` 改发 `followUp` 并回 `queued: true`），所以它是唯一发送入口；不要在别处再包一层重试。
-- **own 引擎（v1，实验）**：`agent/own-engine.ts`，`config.engine = 'own'` 才启用（默认 `pi`）。它自己调 `ModelRuntime.streamSimple` 跑一轮纯文本：发 `agent_start → message_start → message_update… → message_end → agent_end → agent_settled`，transcript 只在内存里。**没有工具、没有压缩、没有重试、没有会话持久化、没有子代理/`/btw`**——这些方法一律抛「own 引擎 v1 还不支持…」。引擎实例必须在 `loadConfig()` **之后**创建（`createEngine()` 在 `whenReady` 里调用），否则 `config.engine` 读不到，永远是 pi。
+- **own 引擎（v1，实验）**：`agent/own-engine.ts`，`config.engine = 'own'` 才启用（默认 `pi`）。它自己调 `ModelRuntime.streamSimple` 跑循环：一轮 = 一次模型回复，回复里有 `toolCall` 就执行、把 `toolResult` 塞回 transcript、再来一轮（上限 `MAX_ROUNDS = 16`），事件流和 pi 一致（`agent_start → message_start → message_update… → message_end → tool_execution_start/end → agent_end → agent_settled`）。transcript 只在内存里。
+- own 引擎的工具**复用 pi 那边同一份实现**：`agent/core-tools.ts` 按绝对路径 import `packages/mcp-core/tools/workspace.mjs`（打包后在 `resources/mcp/tools/`），不复制第二份；工具调用的 `root` 语义、越界拒绝、Git Bash 路径全部一致。
+- own 引擎还缺：会话持久化、压缩、自动重试、子代理、`/btw`、扩展钩子；以及**登录/模型横幅的语义**（横幅看 `status.model`，own 引擎在第一次发消息才确定模型，所以首屏会显示「未登录/无可用模型」）。这些方法一律抛「own 引擎 v1 还不支持…」。
 - 还没搬完的部分：`/btw` 的 clone/switch、压缩阈值同步、登录消息、MCP 启动参数装配（`prepare` 仍由 `index.ts` 提供，这是刻意的）。
 
 ## 会话存储（我们自己的）
