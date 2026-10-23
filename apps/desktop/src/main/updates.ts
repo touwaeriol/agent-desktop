@@ -1,3 +1,4 @@
+import { writeJsonAtomic } from './storage'
 import { app } from 'electron'
 import { promises as fs } from 'node:fs'
 import { readFileSync } from 'node:fs'
@@ -58,8 +59,7 @@ async function loadAutoCheck(): Promise<boolean> {
 }
 
 async function saveAutoCheck(value: boolean): Promise<void> {
-  await fs.mkdir(app.getPath('userData'), { recursive: true })
-  await fs.writeFile(configPath(), `${JSON.stringify({ autoCheck: value }, null, 2)}\n`)
+  await writeJsonAtomic(configPath(), { autoCheck: value })
 }
 
 function publish(patch: Partial<AppUpdateSnapshot>): AppUpdateSnapshot {

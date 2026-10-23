@@ -12,6 +12,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import type { McpEngineId } from '../shared/types'
 import { killTree } from './proc'
+import { createJsonLineDecoder } from './json-lines'
 import { callWebTool, WEB_TOOLS, WebError } from './web'
 import { WARPGREP_TOOL, WarpGrep, WarpGrepError } from './warpgrep'
 
@@ -44,7 +45,6 @@ const STDERR_TAIL = 20
 /** A stdio MCP client for one engine process (JSONL framing, same as pi uses). */
 class Upstream {
   private child: ChildProcessWithoutNullStreams | null = null
-  private buffer = ''
   private seq = 0
   private pending = new Map<number, PendingRequest>()
   private stderrTail: string[] = []
@@ -58,14 +58,7 @@ class Upstream {
     return this.failure
   }
 
-  private handleLine(line: string): void {
-    if (!line.trim()) return
-    let message: Record<string, unknown>
-    try {
-      message = JSON.parse(line) as Record<string, unknown>
-    } catch {
-      return
-    }
+  private handleMessage(message: Record<string, unknown>): void {
     if (typeof message.id !== 'number') return
     const entry = this.pending.get(message.id)
     if (!entry) return
@@ -88,11 +81,12 @@ class Upstream {
   }
 
   async start(): Promise<void> {
-    if (this.child) return
     if (this.starting) return this.starting
+    if (this.child) return
     const command = this.target.command
     const args = this.target.args ?? []
     if (!command) throw new Error('上游命令未配置')
+    this.stderrTail = []
     this.starting = new Promise<void>((resolve, reject) => {
       const child = spawn(command, args, {
         cwd: this.target.cwd,
@@ -102,17 +96,15 @@ class Upstream {
       })
       this.child = child
       child.stdout.setEncoding('utf8')
+      const decode = createJsonLineDecoder((message) => {
+        if (this.child === child) this.handleMessage(message)
+      })
       child.stdout.on('data', (chunk: string) => {
-        this.buffer += chunk
-        let index = this.buffer.indexOf('\n')
-        while (index >= 0) {
-          this.handleLine(this.buffer.slice(0, index).replace(/\r$/, ''))
-          this.buffer = this.buffer.slice(index + 1)
-          index = this.buffer.indexOf('\n')
-        }
+        if (this.child === child) decode(chunk)
       })
       child.stderr.setEncoding('utf8')
       child.stderr.on('data', (chunk: string) => {
+        if (this.child !== child) return
         for (const line of chunk.split('\n')) {
           const text = line.trim()
           if (!text) continue
@@ -120,13 +112,18 @@ class Upstream {
           if (this.stderrTail.length > STDERR_TAIL) this.stderrTail.shift()
         }
       })
-      child.on('error', (error) => {
+      const onError = (error: Error): void => {
+        if (this.child !== child) return
         this.child = null
+        killTree(child)
         this.failure = `上游启动失败：${error.message}`
         this.failAll(this.failure)
         reject(error)
-      })
+      }
+      child.on('error', onError)
+      child.stdin.on('error', onError)
       child.on('exit', (code) => {
+        if (this.child !== child) return
         this.child = null
         this.failure =
           `上游已退出（code ${code ?? 'null'}）` +
@@ -139,11 +136,19 @@ class Upstream {
         clientInfo: { name: 'agent-desktop-gateway', version: '0.2.0' }
       })
         .then(() => {
+          if (this.child !== child) {
+            reject(new Error('网关已停止'))
+            return
+          }
           this.failure = undefined
           this.notify('notifications/initialized')
           resolve()
         })
         .catch((error: unknown) => {
+          if (this.child !== child) {
+            reject(error)
+            return
+          }
           this.failure =
             `上游初始化失败：${error instanceof Error ? error.message : String(error)}` +
             (this.stderrTail.length > 0 ? `：${this.stderrTail.slice(-2).join(' ').slice(0, 300)}` : '')
@@ -158,7 +163,7 @@ class Upstream {
 
   request(method: string, params: unknown, timeoutMs = this.target.timeoutMs): Promise<unknown> {
     const child = this.child
-    if (!child || child.killed) return Promise.reject(new Error('上游未运行'))
+    if (!child || child.killed || child.stdin.destroyed) return Promise.reject(new Error('上游未运行'))
     const id = ++this.seq
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -166,13 +171,19 @@ class Upstream {
         reject(new Error(`${this.target.id} 在 ${Math.round(timeoutMs / 1000)}s 内没有响应`))
       }, timeoutMs)
       this.pending.set(id, { resolve, reject, timer })
-      child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id, method, params })}\n`)
+      try {
+        child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id, method, params })}\n`)
+      } catch (error) {
+        clearTimeout(timer)
+        this.pending.delete(id)
+        reject(error)
+      }
     })
   }
 
   notify(method: string, params?: unknown): void {
     const child = this.child
-    if (!child || child.killed) return
+    if (!child || child.killed || child.stdin.destroyed) return
     const message = params === undefined
       ? { jsonrpc: '2.0', method }
       : { jsonrpc: '2.0', method, params }
@@ -185,8 +196,9 @@ class Upstream {
 
   stop(sync = false): void {
     this.failAll('网关已停止')
-    if (this.child) killTree(this.child, sync)
+    const child = this.child
     this.child = null
+    if (child) killTree(child, sync)
   }
 }
 

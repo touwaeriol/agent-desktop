@@ -307,3 +307,11 @@ npm run typecheck    # node + web 两个 tsconfig 分别检查
 - **退出必须杀进程树**：`apps/desktop/src/main/proc.ts` 的 `killTree(child, sync)` 在 Windows 上走 `taskkill /pid <pid> /T /F`（`child.kill()` 只杀直接子进程，会留下 pi 拉起的 `mcp-core/server.mjs` 和 CodeGraph worker）。`window-all-closed` / `before-quit` 用 `rpc.killNow()` + `gateway.stopAll(true)` + `subagents.stopAll(true)`，因为退出时 `stop()` 里那个 1.5s 的兜底定时器根本来不及跑。MCP 设置变更仍走 `reloadPiConfig()` → `startPi()` → `mcpLaunch()`（重建引擎目标、`gateway.configure()` 差分启停），所以"改设置后 MCP 跟着重启"本来就是这条路，别另起一套。
 - 工具调用记录取自 `tool_execution_start` 的参数（`path` / `command` / `pattern`），不要用工具输出首行猜路径——`read` 的输出首行是内容，会把路径解析成 `{`。
 - 服务器连接是异步的，扩展在加载后 2.5s / 8s 各补报一次工具清单（`POST /tools`），否则设置页只会看到连接完成前的那部分工具。
+
+## 0.5.4 复用边界与回归
+
+- 同文件写入使用 `storage.ts`；读改写必须使用 `updateJsonFile`，不能先读再只锁写。Transcript 的读/删与写共用队列。队列仅覆盖本进程。
+- JSONL 分帧复用 `json-lines.ts`，协议处理留在适配器；每条记录和 stderr/exit/error 均检查子进程身份。
+- 主进程命令在 `engine-commands.ts`，压缩数值策略在 `compaction-policy.ts`。百分比在逻辑层保留小数，避免 1000/1M 被取整为 0%。
+- 渲染层纯数据转换放在 `lib/conversation-events.ts` / `lib/session-groups.ts`，IPC、副作用和运行计时仍由 App 管理。
+- `npm run test:smoke` 在 build 后运行，使用临时数据和真实 Electron，不能接入用户现有 profile；测试成功必须出现明确完成标记。

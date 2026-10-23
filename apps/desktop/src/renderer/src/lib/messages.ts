@@ -121,10 +121,7 @@ export function toChatItems(messages: RawMessage[]): ChatItem[] {
       })
     } else if (message.role === 'assistant') {
       const blocks = typeof message.content === 'string' ? [] : (message.content ?? [])
-      const text = blocks
-        .filter((block) => block.type === 'text')
-        .map((block) => block.text ?? '')
-        .join('')
+      const text = textFromBlocks(message.content)
       const thinking = blocks
         .filter((block) => block.type === 'thinking')
         .map((block) => block.thinking ?? '')

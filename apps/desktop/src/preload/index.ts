@@ -3,8 +3,6 @@ import type {
   AgentMessage,
   AppUpdateSnapshot,
   AskAnswer,
-  AskRequest,
-  LoginMessage,
   McpState,
   PiBridge,
   PiStatus,
@@ -13,9 +11,17 @@ import type {
   ProviderAuthType,
   RepoInfo,
   SessionSummary,
-  SpeedMode,
-  SubagentView
+  SpeedMode
 } from '../shared/types'
+/** Every subscription owns exactly one listener and returns its matching cleanup. */
+function subscribe<T>(channel: string, listener: (payload: T) => void): () => void {
+  const handler = (_event: Electron.IpcRendererEvent, payload: T): void => listener(payload)
+  ipcRenderer.on(channel, handler)
+  return () => {
+    ipcRenderer.removeListener(channel, handler)
+  }
+}
+
 const bridge: PiBridge = {
   getStatus: () => ipcRenderer.invoke('pi:get-status') as Promise<PiStatus>,
   listWorkspaceFiles: () => ipcRenderer.invoke('workspace:files') as Promise<string[]>,
@@ -56,12 +62,7 @@ const bridge: PiBridge = {
   cancelUpdateDownload: () => ipcRenderer.invoke('updates:cancel') as Promise<AppUpdateSnapshot>,
   setAutoUpdateCheck: (enabled: boolean) =>
     ipcRenderer.invoke('updates:auto', enabled) as Promise<AppUpdateSnapshot>,
-  onUpdate: (listener) => {
-    const handler = (_event: Electron.IpcRendererEvent, snapshot: AppUpdateSnapshot): void =>
-      listener(snapshot)
-    ipcRenderer.on('app-update', handler)
-    return () => ipcRenderer.removeListener('app-update', handler)
-  },
+  onUpdate: (listener) => subscribe('app-update', listener),
   getProxyInfo: () => ipcRenderer.invoke('app:proxy'),
   chooseWorkspace: () => ipcRenderer.invoke('pi:choose-workspace') as Promise<PiStatus | null>,
   prompt: (message: string, streamingBehavior?: 'steer' | 'followUp', images?: PromptImage[]) =>
@@ -95,12 +96,7 @@ const bridge: PiBridge = {
     ipcRenderer.invoke('providers:answer-login', loginId, promptId, value),
   cancelLogin: (loginId: string) => ipcRenderer.invoke('providers:cancel-login', loginId),
   logoutProvider: (providerId: string) => ipcRenderer.invoke('providers:logout', providerId),
-  onLoginMessage: (listener) => {
-    const handler = (_event: Electron.IpcRendererEvent, message: LoginMessage): void =>
-      listener(message)
-    ipcRenderer.on('providers:login-message', handler)
-    return () => ipcRenderer.removeListener('providers:login-message', handler)
-  },
+  onLoginMessage: (listener) => subscribe('providers:login-message', listener),
   getModelsJson: () => ipcRenderer.invoke('providers:models-json'),
   saveModelsJson: (content: string) => ipcRenderer.invoke('providers:save-models-json', content),
   openModelsJson: () => ipcRenderer.invoke('providers:open-models-json') as Promise<void>,
@@ -145,11 +141,7 @@ const bridge: PiBridge = {
   deleteAgentPreset: (id) => ipcRenderer.invoke('agents:delete-preset', id),
   chooseMcpEngineEntry: () =>
     ipcRenderer.invoke('mcp:choose-engine-entry') as Promise<string | null>,
-  onMcpState: (listener) => {
-    const handler = (_event: Electron.IpcRendererEvent, state: McpState): void => listener(state)
-    ipcRenderer.on('mcp:state', handler)
-    return () => ipcRenderer.removeListener('mcp:state', handler)
-  },
+  onMcpState: (listener) => subscribe('mcp:state', listener),
   setMcpServerEnabled: (name: string, enabled: boolean) =>
     ipcRenderer.invoke('mcp:set-server-enabled', name, enabled),
   removeMcpServer: (name: string) => ipcRenderer.invoke('mcp:remove-server', name),
@@ -157,44 +149,21 @@ const bridge: PiBridge = {
     ipcRenderer.invoke('mcp:add-server', name, config),
   openMcpConfig: (which: 'user' | 'project') =>
     ipcRenderer.invoke('mcp:open-config', which) as Promise<void>,
-  onAskRequest: (listener) => {
-    const handler = (_event: Electron.IpcRendererEvent, request: AskRequest): void =>
-      listener(request)
-    ipcRenderer.on('ask:request', handler)
-    return () => ipcRenderer.removeListener('ask:request', handler)
-  },
-  onAskCleared: (listener) => {
-    const handler = (): void => listener()
-    ipcRenderer.on('ask:cleared', handler)
-    return () => ipcRenderer.removeListener('ask:cleared', handler)
-  },
+  onAskRequest: (listener) => subscribe('ask:request', listener),
+  onAskCleared: (listener) => subscribe('ask:cleared', listener),
   answerQuestion: (id: string, answers: AskAnswer[]) =>
     ipcRenderer.invoke('ask:answer', id, answers) as Promise<void>,
   cancelQuestion: (id: string, reason?: string) =>
     ipcRenderer.invoke('ask:cancel', id, reason) as Promise<void>,
-  onEvent: (listener) => {
-    const handler = (_event: Electron.IpcRendererEvent, record: Record<string, unknown>): void =>
-      listener(record)
-    ipcRenderer.on('pi:event', handler)
-    return () => ipcRenderer.removeListener('pi:event', handler)
-  },
-  onStatus: (listener) => {
-    const handler = (_event: Electron.IpcRendererEvent, next: PiStatus): void => listener(next)
-    ipcRenderer.on('pi:status', handler)
-    return () => ipcRenderer.removeListener('pi:status', handler)
-  },
+  onEvent: (listener) => subscribe('pi:event', listener),
+  onStatus: (listener) => subscribe('pi:status', listener),
   listSubagents: () => ipcRenderer.invoke('subagents:list'),
   getSubagent: (id: string) => ipcRenderer.invoke('subagents:get', id),
   stopSubagent: (id: string) => ipcRenderer.invoke('subagents:stop', id),
   promptSubagent: (id: string, text: string, mode) =>
     ipcRenderer.invoke('subagents:prompt', id, text, mode),
   revealSubagentSession: (file: string) => ipcRenderer.invoke('subagents:reveal', file),
-  onSubagentUpdate: (listener) => {
-    const handler = (_event: Electron.IpcRendererEvent, record: SubagentView): void =>
-      listener(record)
-    ipcRenderer.on('subagents:update', handler)
-    return () => ipcRenderer.removeListener('subagents:update', handler)
-  }
+  onSubagentUpdate: (listener) => subscribe('subagents:update', listener)
 }
 
 contextBridge.exposeInMainWorld('pi', bridge)

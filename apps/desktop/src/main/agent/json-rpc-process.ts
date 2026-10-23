@@ -1,5 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { killTree } from '../proc'
+import { createJsonLineDecoder } from '../json-lines'
 export class JsonRpcProcess {
   private child?: ChildProcessWithoutNullStreams
   private nextId = 0
@@ -18,58 +19,57 @@ export class JsonRpcProcess {
     this.stderr = ''
     const child = spawn(command, args, { cwd, env, windowsHide: true, stdio: 'pipe' })
     this.child = child
-    let buffer = ''
+    const decode = createJsonLineDecoder((record) => {
+      if (this.child === child) this.onRecord(record, child)
+    })
     child.stdout.setEncoding('utf8')
     child.stdout.on('data', (chunk: string) => {
-      if (this.child !== child) return
-      buffer += chunk
-      let i: number
-      while ((i = buffer.indexOf('\n')) >= 0) {
-        const line = buffer.slice(0, i)
-        buffer = buffer.slice(i + 1)
-        let m: any
-        try {
-          m = JSON.parse(line)
-        } catch {
-          continue
-        }
-        if (!m || typeof m !== 'object') continue
-        if (m.method && m.id !== undefined) {
-          void this.requested(m.method, m.params).then(
-            (result) => this.write({ id: m.id, result }, child),
-            (error) =>
-              this.write({ id: m.id, error: { code: -32603, message: String(error) } }, child)
-          )
-        } else if (m.method) this.notify(m.method, m.params)
-        else {
-          const p = this.pending.get(m.id)
-          if (!p) continue
-          clearTimeout(p.timer)
-          this.pending.delete(m.id)
-          if (m.error) p.reject(new Error(m.error.message ?? JSON.stringify(m.error)))
-          else p.resolve(m.result)
-        }
-      }
+      if (this.child === child) decode(chunk)
     })
     child.stderr.on('data', (chunk) => {
+      if (this.child !== child) return
       this.stderr = (this.stderr + String(chunk)).slice(-4000)
     })
-    child.stdin.on('error', () => undefined)
     const fail = (message: string): void => {
       if (this.child !== child) return
       this.child = undefined
+      if (child.exitCode === null && child.signalCode === null) killTree(child)
       this.rejectAll(message)
       this.exited(message)
     }
+    child.stdin.on('error', (error) => fail(error.message))
     child.on('error', (error) => fail(error.message))
     child.on('close', (code) => fail('引擎连接关闭 (' + code + ') ' + this.stderr.slice(-300)))
+  }
+  private onRecord(message: Record<string, any>, child: ChildProcessWithoutNullStreams): void {
+    if (message.method) {
+      if (message.id === undefined) {
+        this.notify(message.method, message.params)
+        return
+      }
+      void Promise.resolve()
+        .then(() => child === this.child ? this.requested(message.method, message.params) : undefined)
+        .then(
+          (result) => this.write({ id: message.id, result }, child),
+          (error) =>
+            this.write({ id: message.id, error: { code: -32603, message: String(error) } }, child)
+        )
+      return
+    }
+    const pending = this.pending.get(message.id)
+    if (!pending) return
+    clearTimeout(pending.timer)
+    this.pending.delete(message.id)
+    if (message.error)
+      pending.reject(new Error(message.error.message ?? JSON.stringify(message.error)))
+    else pending.resolve(message.result)
   }
   private write(value: unknown, child = this.child): void {
     if (!child || child !== this.child || child.stdin.destroyed) return
     child.stdin.write(JSON.stringify(value) + '\n')
   }
   request<T = any>(method: string, params: unknown = {}, timeout = 30_000): Promise<T> {
-    if (!this.child) return Promise.reject(new Error('引擎未连接'))
+    if (!this.child || this.child.stdin.destroyed) return Promise.reject(new Error('引擎未连接'))
     const id = ++this.nextId
     return new Promise<T>((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -77,7 +77,13 @@ export class JsonRpcProcess {
         reject(new Error(method + ' 超时'))
       }, timeout)
       this.pending.set(id, { resolve, reject, timer })
-      this.write({ id, method, params })
+      try {
+        this.write({ id, method, params })
+      } catch (error) {
+        clearTimeout(timer)
+        this.pending.delete(id)
+        reject(error)
+      }
     })
   }
   notification(method: string, params?: unknown): void {

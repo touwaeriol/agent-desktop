@@ -1,3 +1,4 @@
+import { writeJsonAtomic } from './storage'
 import type { EngineId } from '../shared/engine'
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
@@ -74,6 +75,7 @@ export function toSummary(record: SessionRecord): SessionSummary {
 export class SessionStore {
   private readonly filePath: string
   private records: SessionRecord[] | undefined
+  private loading?: Promise<SessionRecord[]>
 
   constructor(filePath: string) {
     this.filePath = path.resolve(filePath)
@@ -81,6 +83,10 @@ export class SessionStore {
 
   async load(): Promise<SessionRecord[]> {
     if (this.records) return this.records
+    return (this.loading ??= this.read())
+  }
+
+  private async read(): Promise<SessionRecord[]> {
     try {
       const raw = JSON.parse(await fs.readFile(this.filePath, 'utf8')) as Partial<SessionFile>
       const list = Array.isArray(raw?.sessions) ? raw.sessions : []
@@ -165,10 +171,7 @@ export class SessionStore {
   private async commit(): Promise<void> {
     const payload: SessionFile = { sessions: this.records ?? [] }
     try {
-      await fs.mkdir(path.dirname(this.filePath), { recursive: true })
-      const tmp = `${this.filePath}.tmp`
-      await fs.writeFile(tmp, `${JSON.stringify(payload, null, 2)}\n`, 'utf8')
-      await fs.rename(tmp, this.filePath)
+      await writeJsonAtomic(this.filePath, payload)
     } catch {
       // Keeping the list in memory is still better than failing the window over a write.
     }

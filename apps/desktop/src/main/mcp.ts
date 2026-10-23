@@ -1,3 +1,4 @@
+import { updateJsonFile } from './storage'
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import { shell } from 'electron'
@@ -27,11 +28,6 @@ async function readConfig(file: string): Promise<RawMcpConfig> {
   } catch {
     return {}
   }
-}
-
-async function writeConfig(file: string, config: RawMcpConfig): Promise<void> {
-  await fs.mkdir(path.dirname(file), { recursive: true })
-  await fs.writeFile(file, `${JSON.stringify(config, null, 2)}\n`)
 }
 
 function summarize(entry: Record<string, unknown>): {
@@ -82,11 +78,11 @@ export async function listProjectServers(cwd: string): Promise<McpServerInfo[]> 
 async function updateServers(
   mutate: (servers: Record<string, unknown>) => void
 ): Promise<void> {
-  const config = await readConfig(userMcpPath())
-  const servers = { ...(config.mcpServers ?? {}) }
-  mutate(servers)
-  config.mcpServers = servers
-  await writeConfig(userMcpPath(), config)
+  await updateJsonFile<RawMcpConfig>(userMcpPath(), {}, (config) => {
+    const servers = { ...(config.mcpServers ?? {}) }
+    mutate(servers)
+    return { ...config, mcpServers: servers }
+  })
 }
 
 export async function setServerEnabled(name: string, enabled: boolean): Promise<void> {
@@ -134,7 +130,7 @@ export async function openConfig(cwd: string, which: 'user' | 'project'): Promis
   try {
     await fs.access(file)
   } catch {
-    await writeConfig(file, { mcpServers: {} })
+    await updateJsonFile<RawMcpConfig>(file, { mcpServers: {} }, (current) => current)
   }
   await shell.openPath(file)
 }

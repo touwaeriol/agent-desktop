@@ -317,13 +317,10 @@ ${text.trim()}`,
   async clone(): Promise<string | undefined> {
     const store = this.options.transcripts
     if (!store) this.unimplemented('会话克隆')
-    const original = this.sessionId
     const forkId = `s_${Math.random().toString(16).slice(2, 14)}`
     await store.save(forkId, this.roots, this.transcript)
     this.sessionId = forkId
     this.setStatus({ sessionFile: this.transcriptPath() })
-    // The original id is only needed by the app, which remembers it before cloning.
-    void original
     return this.transcriptPath()
   }
 
@@ -346,13 +343,23 @@ ${text.trim()}`,
     }
   }
 
+  async discardSession(sessionPath: string): Promise<void> {
+    const store = this.options.transcripts
+    if (!store) this.unimplemented('删除会话')
+    const id = sessionPath.split(/[\\/]/).pop()?.replace(/\.jsonl$/, '')
+    if (!id || store.pathFor(id) !== sessionPath) throw new Error('无法识别的会话：' + sessionPath)
+    if (id === this.sessionId) throw new Error('不能删除当前会话')
+    await store.remove(id)
+  }
+
   async abort(): Promise<void> {
     this.controller?.abort()
     await this.waitForSettle(15_000)
   }
 
   async send(message: string): Promise<void> {
-    await this.prompt(message)
+    const result = await this.prompt(message)
+    if (!result.ok) throw new Error(result.error ?? '发送失败')
   }
   // --- the turn --------------------------------------------------------------------------------
 
@@ -648,17 +655,7 @@ ${text.trim()}`,
     }
   }
 
-  private finishWithError(text: string): void {
-    this.isBusy = false
-    this.setStatus({ isStreaming: false })
-    this.options.onEvent({
-      type: 'message_end',
-      message: { role: 'assistant', content: [{ type: 'text', text }], stopReason: 'error' }
-    })
-    this.options.onEvent({ type: 'agent_end' })
-    this.options.onEvent({ type: 'agent_settled' })
-    this.options.onSettled()
-  }
+
 }
 
 /** Rough token count of the transcript; good enough for a meter and a compaction trigger. */

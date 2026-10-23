@@ -14,7 +14,9 @@ import {
   StopIcon
 } from './Icons'
 import { DraftImageStrip, ImageLightbox } from './ImageLightbox'
-import type { QueuedMessage } from '../App'
+import { insertFileMention } from '../lib/composer'
+import { useDismissable } from '../hooks/useDismissable'
+import type { QueuedMessage } from '../lib/chat-types'
 import { blobToDraftImage, clipboardImages, imageSrc, type DraftImage } from '../lib/images'
 
 function contextLabel(value?: number): string {
@@ -253,16 +255,12 @@ export function Composer({
   const insertContext = (file: string): void => {
     const node = ref.current
     const caret = node?.selectionStart ?? value.length
-    const before = value.slice(0, caret).replace(/@[^s@]*$/, '')
-    const after = value.slice(caret)
-    const mention = `@${file} `
-    const next = `${before}${mention}${after}`
+    const { text: next, caret: position } = insertFileMention(value, caret, file)
     onChange(next)
     setContextOpen(false)
     requestAnimationFrame(() => {
       const element = ref.current
       if (!element) return
-      const position = before.length + mention.length
       element.focus()
       element.setSelectionRange(position, position)
     })
@@ -287,59 +285,12 @@ export function Composer({
     ref.current?.focus()
   }, [])
 
-  useEffect(() => {
-    if (!modelOpen) return
-    const onMouseDown = (event: MouseEvent): void => {
-      if (!pickerRef.current?.contains(event.target as Node)) setModelOpen(false)
-    }
-    const onKeyDown = (event: KeyboardEvent): void => {
-      if (event.key === 'Escape') setModelOpen(false)
-    }
-    document.addEventListener('mousedown', onMouseDown)
-    document.addEventListener('keydown', onKeyDown)
-    return () => {
-      document.removeEventListener('mousedown', onMouseDown)
-      document.removeEventListener('keydown', onKeyDown)
-    }
-  }, [modelOpen])
-
-  useEffect(() => {
-    if (!contextOpen) return
-    const onMouseDown = (event: MouseEvent): void => {
-      if (!contextRef.current?.contains(event.target as Node)) setContextOpen(false)
-    }
-    const onKeyDown = (event: KeyboardEvent): void => {
-      if (event.key === 'Escape') setContextOpen(false)
-    }
-    document.addEventListener('mousedown', onMouseDown)
-    document.addEventListener('keydown', onKeyDown)
-    return () => {
-      document.removeEventListener('mousedown', onMouseDown)
-      document.removeEventListener('keydown', onKeyDown)
-    }
-  }, [contextOpen])
-
-  useEffect(() => {
-    if (!thinkingOpen && !speedOpen) return
-    const onMouseDown = (event: MouseEvent): void => {
-      if (!pickerRef.current?.contains(event.target as Node)) {
-        setThinkingOpen(false)
-        setSpeedOpen(false)
-      }
-    }
-    const onKeyDown = (event: KeyboardEvent): void => {
-      if (event.key === 'Escape') {
-        setThinkingOpen(false)
-        setSpeedOpen(false)
-      }
-    }
-    document.addEventListener('mousedown', onMouseDown)
-    document.addEventListener('keydown', onKeyDown)
-    return () => {
-      document.removeEventListener('mousedown', onMouseDown)
-      document.removeEventListener('keydown', onKeyDown)
-    }
-  }, [thinkingOpen, speedOpen])
+  useDismissable(modelOpen || thinkingOpen || speedOpen, pickerRef, () => {
+    setModelOpen(false)
+    setThinkingOpen(false)
+    setSpeedOpen(false)
+  })
+  useDismissable(contextOpen, contextRef, () => setContextOpen(false))
 
   const openModelPicker = async (): Promise<void> => {
     if (modelOpen) {

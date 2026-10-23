@@ -17,7 +17,7 @@ function failure(message) {
 }
 
 async function callBridge(context, method, path, payload) {
-  const response = await context.request(method, path, payload)
+  const response = await context.request(method, path, payload, context.signal)
   if (!response || response.ok !== true) {
     const code = response?.code ? `${response.code}: ` : ''
     throw new Error(`${code}${response?.message ?? '桥接返回了无效响应'}`)

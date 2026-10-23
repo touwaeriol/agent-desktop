@@ -100,32 +100,30 @@ export function bridgeContext(options: BridgeOptions): Record<string, unknown> {
   }
 }
 
+interface ModuleTool {
+  name: string
+  description?: string
+  inputSchema?: Record<string, unknown>
+  call(args?: Record<string, unknown>, context?: unknown): ReturnType<CoreTool['call']>
+}
+
+/** Preserve tool context and cancellation consistently for every shared desktop tool module. */
+function adaptModuleTool(tool: ModuleTool, context: Record<string, unknown> = {}): CoreTool {
+  return {
+    name: tool.name,
+    description: tool.description ?? tool.name,
+    parameters: tool.inputSchema ?? { type: 'object', properties: {} },
+    call: (args, signal) => tool.call(args ?? {}, { ...context, signal })
+  }
+}
+
 /** Import the subagent tools; they drive the app's subagent manager through the bridge. */
 export async function loadSubagentTools(
   modulePath: string,
   context: Record<string, unknown>
 ): Promise<CoreTool[]> {
-  const module = (await import(pathToFileURL(modulePath).href)) as {
-    subagentTools?: Array<{
-      name: string
-      description?: string
-      inputSchema?: Record<string, unknown>
-      call(
-        args?: Record<string, unknown>,
-        ctx?: unknown
-      ): Promise<{
-        content: Array<{ type: string; text?: string }>
-        isError?: boolean
-      }>
-    }>
-  }
-  const list = module.subagentTools ?? []
-  return list.map((tool) => ({
-    name: tool.name,
-    description: tool.description ?? tool.name,
-    parameters: tool.inputSchema ?? { type: 'object', properties: {} },
-    call: (args, signal) => tool.call(args ?? {}, { ...context, signal })
-  }))
+  const module = (await import(pathToFileURL(modulePath).href)) as { subagentTools?: ModuleTool[] }
+  return (module.subagentTools ?? []).map((tool) => adaptModuleTool(tool, context))
 }
 
 /** Import the desktop question tool: it shows a dialog in the window and waits for the answer. */
@@ -133,53 +131,12 @@ export async function loadAskTool(
   modulePath: string,
   context: Record<string, unknown>
 ): Promise<CoreTool[]> {
-  const module = (await import(pathToFileURL(modulePath).href)) as {
-    askUserQuestion?: {
-      name: string
-      description?: string
-      inputSchema?: Record<string, unknown>
-      call(
-        args?: Record<string, unknown>,
-        ctx?: unknown
-      ): Promise<{
-        content: Array<{ type: string; text?: string }>
-        isError?: boolean
-      }>
-    }
-  }
-  const tool = module.askUserQuestion
-  if (!tool) return []
-  return [
-    {
-      name: tool.name,
-      description: tool.description ?? tool.name,
-      parameters: tool.inputSchema ?? { type: 'object', properties: {} },
-      call: (args, signal) => tool.call(args ?? {}, { ...context, signal })
-    }
-  ]
+  const module = (await import(pathToFileURL(modulePath).href)) as { askUserQuestion?: ModuleTool }
+  return module.askUserQuestion ? [adaptModuleTool(module.askUserQuestion, context)] : []
 }
 
 /** Import the workspace tool module by absolute path (dev checkout or packaged resources). */
 export async function loadWorkspaceTools(modulePath: string): Promise<CoreTool[]> {
-  const module = (await import(pathToFileURL(modulePath).href)) as {
-    workspaceTools?: Array<{
-      name: string
-      description?: string
-      inputSchema?: Record<string, unknown>
-      call(
-        args?: Record<string, unknown>,
-        context?: unknown
-      ): Promise<{
-        content: Array<{ type: string; text?: string }>
-        isError?: boolean
-      }>
-    }>
-  }
-  const list = module.workspaceTools ?? []
-  return list.map((tool) => ({
-    name: tool.name,
-    description: tool.description ?? tool.name,
-    parameters: tool.inputSchema ?? { type: 'object', properties: {} },
-    call: (args, signal) => tool.call(args ?? {}, { signal })
-  }))
+  const module = (await import(pathToFileURL(modulePath).href)) as { workspaceTools?: ModuleTool[] }
+  return (module.workspaceTools ?? []).map((tool) => adaptModuleTool(tool))
 }

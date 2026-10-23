@@ -1,9 +1,9 @@
 # Prophey
 
-Electron + React desktop client for a coding agent. Prophey runs its own engine
-(`apps/desktop/src/main/agent/prophey-engine.ts`) and keeps the [pi coding agent](https://github.com/badlogic/pi-mono)
-as a swappable engine underneath (`pi --mode rpc`), so pi's sessions and credentials
-still work while the app owns the loop, the tools and the session model.
+Electron + React desktop client with four interchangeable engines: Prophey, pi,
+Claude Code and Codex. Shared capabilities describe each engine's commands,
+models, compaction, permissions and session ownership. Protocol details stay in
+adapters; the desktop owns projects, session navigation and UI.
 
 ## Features
 
@@ -15,7 +15,8 @@ still work while the app owns the loop, the tools and the session model.
 - Light and dark themes
 - Conversation outline and user-message timeline
 - Session storage shared with pi, or isolated to the desktop app
-- Own engine (`prophey`): provider call, tool loop over the root-aware tools, and the app's own session list
+- Four engines: Prophey provider loop, pi RPC, Claude Agent SDK and Codex app-server
+- Capability-driven slash commands, native compaction, model selection and approval dialogs
 - Multi-directory projects: one session can work across several folders, with `root`-scoped tools
 - MCP settings: master switch, server list, and a built-in desktop tool
 - `ask_user_question` tool: agents ask questions in a desktop dialog (single choice, multi-select, free text, answered in order)
@@ -30,8 +31,10 @@ Requires Node.js 24+.
 npm install
 npm run dev      # Electron + Vite HMR
 npm start        # build and run
+npm test         # contract and regression tests
 npm run typecheck
 npm run build
+npm run test:smoke # real Electron UI + IPC with an isolated temporary profile
 ```
 
 ## Packaging
@@ -53,11 +56,18 @@ Tagging `v*` runs `.github/workflows/release.yml`, which builds the Windows inst
 
 ## Images
 
-Paste a screenshot into the composer (Ctrl+V) or drop image files onto it. Images pasted at the very start of the message are collected in a strip above the input; images pasted in the middle are inserted at the caret as `[图片N]` markers with their thumbnails under the input. Click any thumbnail to open it full size, and click the × to remove it. Sent images are stored in the session and render in the transcript, where clicking one opens the same preview.
+Paste or drop images into the composer. Images remain attachments in a thumbnail strip; no filename or marker is inserted into the message text. Click a thumbnail to preview it or remove it before sending. Sent images are retained by the selected engine and displayed in the transcript.
 
 ## Sessions
 
-By default the app uses pi's session directory (`~/.pi/agent/sessions`). You can switch to an isolated directory in Settings → General. Both modes use pi's JSONL format.
+The default Prophey engine stores transcripts under the desktop user-data directory.
+pi can use its CLI session directory or an isolated desktop profile. Claude Code and
+Codex own their native sessions; the desktop keeps an engine-aware index for navigation.
+Switching engines preserves each engine's last durable session.
+
+See [engine compatibility](docs/engine-compatibility.md) for native capabilities and
+known upstream limitations, and [the 0.5.4 audit](docs/code-review-0.5.4.md) for the
+refactoring scope and validation evidence.
 
 ## MCP and the desktop question tool
 

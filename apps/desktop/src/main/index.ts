@@ -1,4 +1,7 @@
-import { engineCommands, isNativeSessionReference, type EngineId } from '../shared/engine'
+import { writeJsonAtomic } from './storage'
+import { listEngineCommands, executeEngineCommand } from './engine-commands'
+import { compactionRatio, compactionPercent, reserveFor, ratioFromPercent, ratioFromTokens } from './compaction-policy'
+import { isNativeSessionReference, type EngineId } from '../shared/engine'
 import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron'
 import { randomUUID } from 'node:crypto'
 import { existsSync, promises as fs, unlinkSync } from 'node:fs'
@@ -99,6 +102,8 @@ async function rememberSession(extra: { title?: string } = {}): Promise<void> {
   const snapshot = { ...status }
   const file = snapshot.sessionFile
   if (!file) return
+  // Engines can assign a path before the first durable turn; never persist a missing transcript.
+  if (!isNativeSessionReference(file) && !existsSync(file)) return
   // Native IDs can exist before a durable session is materialized. Do not save an empty ID.
   if (isNativeSessionReference(file) && (await owner.messages()).length === 0) return
   const engineId = owner.id as EngineId
@@ -211,8 +216,12 @@ function createEngine(): AgentEngine {
       configPending = false
       void startPi(status.cwd, sessionArgs())
     },
-    onAssistantError: (message: string) => noteSpeedRejection(message),
-    onExit: () => handleExit()
+    onAssistantError: (message: string) => {
+      if (generation === engineGeneration) noteSpeedRejection(message)
+    },
+    onExit: () => {
+      if (generation === engineGeneration) handleExit()
+    }
   }
   if (desktopConfig.engine === 'claude') {
     return new ClaudeCodeEngine({
@@ -249,7 +258,7 @@ function createEngine(): AgentEngine {
       // The same setting the window's threshold dropdown writes.
       autoCompact: () => ({
         enabled: autoCompactEnabled,
-        percent: Math.round((desktopConfig.autoCompact?.ratio ?? 0.5) * 100)
+        percent: compactionPercent(autoCompactRatio())
       }),
       // Subagent tools reach the app's manager through the same bridge pi uses.
       bridge: () => {
@@ -399,7 +408,7 @@ async function loadConfig(): Promise<DesktopConfig> {
   try {
     const raw = await fs.readFile(configPath(), 'utf8')
     const parsed = JSON.parse(raw) as DesktopConfig
-    return parsed && typeof parsed === 'object' ? parsed : {}
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {}
   } catch {
     return {}
   }
@@ -407,8 +416,7 @@ async function loadConfig(): Promise<DesktopConfig> {
 
 async function saveConfig(patch: Partial<DesktopConfig>): Promise<void> {
   desktopConfig = { ...desktopConfig, ...patch }
-  await fs.mkdir(app.getPath('userData'), { recursive: true })
-  await fs.writeFile(configPath(), JSON.stringify(desktopConfig, null, 2))
+  await writeJsonAtomic(configPath(), desktopConfig)
 }
 
 function currentSessionMode(): SessionMode {
@@ -430,25 +438,8 @@ function applyProfile(): void {
   providers.invalidateCache()
 }
 
-/** Auto-compaction starts at this fraction of the model's context window. */
-const AUTO_COMPACT_RATIO = 0.9
-
 function autoCompactRatio(): number {
-  const ratio = desktopConfig.autoCompact?.ratio
-  // An explicit `/autocompact <tokens>` is stored as a ratio, so the accepted range has to cover
-  // small thresholds too: rejecting them made the settings row claim 90% right after the user asked
-  // for something else, and the next restart silently moved the trigger point back.
-  return typeof ratio === 'number' && ratio > 0.005 && ratio < 0.995 ? ratio : AUTO_COMPACT_RATIO
-}
-
-/**
- * Free context pi keeps below the window, i.e. the number that makes it compact at `ratio`.
- *
- * pi compacts when `contextTokens > contextWindow - reserveTokens`, so 90% of a 1M window is a
- * 100K reserve.
- */
-function reserveFor(window: number, ratio: number): number {
-  return Math.max(1000, Math.round(window * (1 - ratio)))
+  return compactionRatio(desktopConfig.autoCompact?.ratio)
 }
 
 /**
@@ -459,14 +450,16 @@ function reserveFor(window: number, ratio: number): number {
  * settled on, or undefined when auto-compaction is off or the model has no window.
  */
 async function syncAutoCompact(options: { restart?: boolean } = {}): Promise<number | undefined> {
-  if (currentEngine.id !== 'pi') return undefined
+  const owner = currentEngine
+  const model = status.model
+  if (owner.id !== 'pi') return undefined
   const settings = await providers.getAppSettings().catch(() => undefined)
-  if (!settings?.compaction?.enabled) return undefined
-  const window = status.model?.contextWindow
-  if (!window) return undefined
-  const reserve = reserveFor(window, autoCompactRatio())
+  if (owner !== currentEngine || model !== status.model) return undefined
+  if (!settings?.compaction?.enabled || !model?.contextWindow) return undefined
+  const reserve = reserveFor(model.contextWindow, autoCompactRatio())
   if (settings.compaction.reserveTokens === reserve) return reserve
   await providers.setCompactionSettings({ enabled: true, reserveTokens: reserve })
+  if (owner !== currentEngine || model !== status.model) return undefined
   if (options.restart) await reloadPiConfig()
   return reserve
 }
@@ -840,8 +833,7 @@ async function loadToolCache(): Promise<void> {
 async function saveToolCache(next: ToolCache): Promise<void> {
   toolCache = next
   try {
-    await fs.mkdir(app.getPath('userData'), { recursive: true })
-    await fs.writeFile(toolCachePath(), JSON.stringify(next, null, 2))
+    await writeJsonAtomic(toolCachePath(), next)
   } catch {
     // cache only
   }
@@ -1119,7 +1111,7 @@ function statusSnapshot(): PiStatus {
     capabilities: currentEngine.capabilities(),
     autoCompactPercent:
       currentEngine.capabilities().autoCompaction === 'configurable' && autoCompactEnabled
-        ? Math.round(autoCompactRatio() * 100)
+        ? compactionPercent(autoCompactRatio())
         : undefined,
     speed: currentEngine.capabilities().speed
       ? speed.speedState(status.model, currentSpeedMode())
@@ -1913,12 +1905,7 @@ function registerIpc(): void {
     return buildMcpState()
   })
 
-  ipcMain.handle('engine:commands', async () =>
-    engineCommands(
-      currentEngine.capabilities(),
-      (await currentEngine.nativeCommands?.().catch(() => [])) ?? []
-    )
-  )
+  ipcMain.handle('engine:commands', () => listEngineCommands(currentEngine))
   ipcMain.handle('engine:sandbox', async (_event, mode: string) => {
     if (!['default', 'read-only', 'workspace-write'].includes(mode))
       return { ok: false, error: '无效的沙箱模式' }
@@ -1928,52 +1915,11 @@ function registerIpc(): void {
     if (currentEngineId() === 'codex') await reloadPiConfig()
     return { ok: true }
   })
-  ipcMain.handle('engine:command', async (_event, name: string, args: string) => {
-    try {
-      const commands = engineCommands(
-        currentEngine.capabilities(),
-        (await currentEngine.nativeCommands?.()) ?? []
-      )
-      const command = commands.find((c) => c.name === name)
-      if (!command) throw new Error('当前引擎不支持命令 ' + name)
-      if (currentEngine.busy()) throw new Error('请等当前回合结束')
-      if (command.action === 'native' && currentEngine.executeCommand)
-        return { ok: true, ...(await currentEngine.executeCommand(name, args)) }
-      if (command.action === 'model') {
-        if (!args)
-          return {
-            ok: true,
-            text: (await currentEngine.models())
-              .map((m) => String(m.provider) + '/' + String(m.id))
-              .join('\n')
-          }
-        const models = await currentEngine.models()
-        const model = models.find(
-          (m) => m.id === args || String(m.provider) + '/' + String(m.id) === args
-        )
-        if (!model) throw new Error('当前引擎模型目录中没有 ' + args)
-        await currentEngine.setModel(String(model.provider), String(model.id))
-        await syncAutoCompact({ restart: true })
-        return { ok: true, text: '模型已切换为 ' + String(model.id) }
-      }
-      if (command.action === 'thinking') {
-        if (!args) return { ok: true, text: (await currentEngine.thinkingLevels()).join(' / ') }
-        await currentEngine.setThinkingLevel(args)
-        return { ok: true, text: '思考等级：' + args }
-      }
-      if (command.action === 'status')
-        return {
-          ok: true,
-          text: JSON.stringify(
-            { engine: currentEngineId(), model: status.model, ...(await currentEngine.stats()) },
-            null,
-            2
-          )
-        }
-      throw new Error('此命令须从对应桌面入口执行')
-    } catch (error) {
-      return { ok: false, error: String(error) }
-    }
+  ipcMain.handle('engine:command', (_event, name: string, args: string) => {
+    const owner = currentEngine
+    return executeEngineCommand(owner, name, args, async () => {
+      if (owner === currentEngine) await syncAutoCompact({ restart: true })
+    })
   })
 
   ipcMain.handle('pi:compact', async (_event, instructions?: string) => {
@@ -1990,7 +1936,7 @@ function registerIpc(): void {
 
   /**
    * Auto-compaction toggle. Turning it on also writes the reserve that makes pi compact at
-   * `AUTO_COMPACT_RATIO` of the current model's window, then restarts pi so it reads that value.
+   * `autoCompactRatio()` of the current model's window, then restarts pi so it reads that value.
    */
   ipcMain.handle('pi:set-auto-compact', async (_event, enabled: boolean) => {
     if (currentEngine.capabilities().autoCompaction !== 'configurable')
@@ -2006,10 +1952,10 @@ function registerIpc(): void {
       if (currentEngine.id === 'prophey')
         return {
           ok: true,
-          percent: Math.round(autoCompactRatio() * 100),
+          percent: compactionPercent(autoCompactRatio()),
           contextWindow: status.model?.contextWindow
         }
-      const percent = Math.round(autoCompactRatio() * 100)
+      const percent = compactionPercent(autoCompactRatio())
       if (reserveTokens === undefined) {
         return {
           ok: true,
@@ -2036,14 +1982,10 @@ function registerIpc(): void {
       return { ok: false, error: '自动压缩由当前引擎原生管理' }
     try {
       const contextWindow = status.model?.contextWindow
-      if (!contextWindow) {
-        return { ok: false, error: '当前模型没有上下文窗口信息，无法换算阈值' }
-      }
-      const target = Math.max(1000, Math.round(tokens))
-      const reserveTokens = Math.max(0, contextWindow - target)
+      const ratio = ratioFromTokens(tokens, contextWindow)
+      const reserveTokens = reserveFor(contextWindow!, ratio)
       if (currentEngine.id === 'pi')
         await providers.setCompactionSettings({ enabled: true, reserveTokens })
-      const ratio = Math.min(0.99, target / contextWindow)
       await saveConfig({ autoCompact: { ratio, enabled: true } })
       autoCompactEnabled = true
       await currentEngine.setAutoCompaction({ enabled: true, reserveTokens })
@@ -2054,7 +1996,7 @@ function registerIpc(): void {
         ok: true,
         contextWindow,
         reserveTokens,
-        percent: Math.round(autoCompactRatio() * 100)
+        percent: compactionPercent(autoCompactRatio())
       }
     } catch (error) {
       return { ok: false, error: error instanceof Error ? error.message : String(error) }
@@ -2071,12 +2013,10 @@ function registerIpc(): void {
   ipcMain.handle('pi:set-auto-compact-ratio', async (_event, percent: number) => {
     if (currentEngine.capabilities().autoCompaction !== 'configurable')
       return { ok: false, error: '自动压缩由当前引擎原生管理' }
-    const value = Math.round(Number(percent))
-    if (!Number.isFinite(value) || value < 10 || value > 99) {
-      return { ok: false, error: '自动压缩阈值要在 10% 和 99% 之间' }
-    }
     try {
-      await saveConfig({ autoCompact: { ratio: value / 100, enabled: true } })
+      const ratio = ratioFromPercent(percent)
+      const value = Math.round(ratio * 100)
+      await saveConfig({ autoCompact: { ratio, enabled: true } })
       autoCompactEnabled = true
       if (currentEngine.id === 'pi') await providers.setCompactionSettings({ enabled: true })
       // `syncAutoCompact` only restarts when the reserve changes, so make the switch effective for
@@ -2086,6 +2026,8 @@ function registerIpc(): void {
       }
       broadcastStatus()
       const reserveTokens = await syncAutoCompact({ restart: true })
+      if (currentEngine.id === 'prophey')
+        return { ok: true, percent: value, contextWindow: status.model?.contextWindow }
       if (reserveTokens === undefined) {
         return {
           ok: true,

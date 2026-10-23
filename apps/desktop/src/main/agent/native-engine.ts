@@ -33,6 +33,13 @@ export abstract class NativeEngine implements AgentEngine {
       Promise.resolve({ cancelled: true, reason: '没有交互界面' })
     )
   }
+  protected async requestApproval(question: string, tool: string): Promise<boolean> {
+    const answer = await this.ask(
+      [{ question, options: [{ label: '拒绝' }, { label: '允许本次' }] }],
+      tool
+    )
+    return !answer.cancelled && !!answer.answers[0]?.selected.includes('允许本次')
+  }
   state(): PiStatus {
     return this.snapshot
   }

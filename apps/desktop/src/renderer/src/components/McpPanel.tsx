@@ -17,6 +17,7 @@ import {
   TrashIcon
 } from './Icons'
 import { Toggle } from './Toggle'
+import { runAction } from '../lib/actions'
 
 const TEMPLATE_STDIO = `{
   "command": "npx",
@@ -375,20 +376,14 @@ export function McpPanel({
 
   const run = useCallback(
     async (task: () => Promise<McpState | { ok: boolean; error?: string } | void>, message?: string) => {
-      setBusy(true)
-      try {
-        const result = await task()
-        if (result && 'ok' in result && !result.ok) {
-          onError(result.error ?? '操作失败')
-          return
+      return runAction(task, {
+        setBusy,
+        onError,
+        onSuccess: async () => {
+          setState(await window.pi.getMcpState())
+          if (message) onNotice(message)
         }
-        if (message) onNotice(message)
-        setState(await window.pi.getMcpState())
-      } catch (cause) {
-        onError(cause instanceof Error ? cause.message : String(cause))
-      } finally {
-        setBusy(false)
-      }
+      })
     },
     [onError, onNotice]
   )
@@ -414,7 +409,8 @@ export function McpPanel({
       onError('请填写服务器名称')
       return
     }
-    void run(() => window.pi.addMcpServer(name.trim(), json), `已添加 ${name.trim()}`).then(() => {
+    void run(() => window.pi.addMcpServer(name.trim(), json), `已添加 ${name.trim()}`).then((ok) => {
+      if (!ok) return
       setAddOpen(false)
       setName('')
       setJson(TEMPLATE_STDIO)

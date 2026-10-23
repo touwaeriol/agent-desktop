@@ -1,14 +1,7 @@
 import { useEffect, useState } from 'react'
 import type { SubagentView } from '@shared/types'
 import { ChevronIcon, SparkIcon } from './Icons'
-
-const STATUS_LABEL: Record<SubagentView['status'], string> = {
-  starting: '启动中',
-  streaming: '运行中',
-  idle: '已完成',
-  error: '出错',
-  stopped: '已停止'
-}
+import { SUBAGENT_STATUS_LABELS, isSubagentRunning } from '../lib/subagents'
 
 function formatElapsed(ms: number): string {
   const total = Math.max(0, Math.round(ms / 1000))
@@ -45,9 +38,7 @@ export function RunStatusBar({
   onOpenSubagent: (id?: string) => void
 }) {
   const [, setTick] = useState(0)
-  const running = subagents.filter(
-    (record) => record.status === 'starting' || record.status === 'streaming'
-  )
+  const running = subagents.filter(isSubagentRunning)
 
   useEffect(() => {
     if (running.length === 0) return
@@ -90,7 +81,7 @@ export function RunStatusBar({
               <button
                 key={record.id}
                 className={`run-task ${record.status}`}
-                title={`${record.id} · ${STATUS_LABEL[record.status]} · 点击查看详细进程`}
+                title={`${record.id} · ${SUBAGENT_STATUS_LABELS[record.status]} · 点击查看详细进程`}
                 onClick={() => onOpenSubagent(record.id)}
               >
                 <span className="run-task-icon">

@@ -2,14 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import type { SubagentView } from '@shared/types'
 import { ChevronIcon, RefreshIcon, SparkIcon, StopIcon } from './Icons'
 import { Markdown } from './Markdown'
-
-const STATUS_LABEL: Record<SubagentView['status'], string> = {
-  starting: '启动中',
-  idle: '已完成',
-  streaming: '运行中',
-  error: '出错',
-  stopped: '已停止'
-}
+import { SUBAGENT_STATUS_LABELS, isSubagentRunning } from '../lib/subagents'
 
 function span(ms: number | undefined): string {
   if (typeof ms !== 'number') return ''
@@ -30,10 +23,6 @@ function changedFiles(record: SubagentView): string[] {
     if (call.summary) seen.add(call.summary)
   }
   return [...seen]
-}
-
-function isRunning(record: SubagentView): boolean {
-  return record.status === 'starting' || record.status === 'streaming'
 }
 
 /**
@@ -150,7 +139,7 @@ export function SubagentsDrawer({
                     {record.restored && <span className="subagent-tag">历史</span>}
                   </span>
                   <span className="subagent-row-sub">
-                    {STATUS_LABEL[record.status]}
+                    {SUBAGENT_STATUS_LABELS[record.status]}
                     {record.mode === 'background' ? ' · 后台' : ' · 同步'}
                     {span(record.runtimeMs) ? ` · ${span(record.runtimeMs)}` : ''}
                     {tokenLabel(record.tokens) ? ` · ${tokenLabel(record.tokens)} tokens` : ''}
@@ -171,7 +160,7 @@ export function SubagentsDrawer({
         <div className="subagent-detail">
           <div className="subagent-meta">
             <span className={`subagent-status ${selected.status}`}>
-              {STATUS_LABEL[selected.status]}
+              {SUBAGENT_STATUS_LABELS[selected.status]}
             </span>
             <span>{selected.id}</span>
             {selected.agent && <span>{selected.agent}</span>}
@@ -213,7 +202,7 @@ export function SubagentsDrawer({
               </div>
             ) : (
               <div className="subagent-empty">
-                {isRunning(selected) ? '还在运行，暂无结论。' : '（没有结论）'}
+                {isSubagentRunning(selected) ? '还在运行，暂无结论。' : '（没有结论）'}
               </div>
             )}
           </div>
@@ -312,7 +301,7 @@ export function SubagentsDrawer({
                   <button
                     className="ghost danger"
                     onClick={() => void stop()}
-                    disabled={busy || !isRunning(selected)}
+                    disabled={busy || !isSubagentRunning(selected)}
                     title="停止子代理"
                   >
                     <StopIcon size={13} /> 停止

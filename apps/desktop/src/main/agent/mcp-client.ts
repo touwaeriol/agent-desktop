@@ -1,5 +1,3 @@
-import { pathToFileURL } from 'node:url'
-import type { Tool } from '@earendil-works/pi-ai'
 import type { CoreTool } from './core-tools'
 
 /**
@@ -134,17 +132,3 @@ export async function loadMcpTools(endpoints: McpEndpoint[]): Promise<CoreTool[]
   }
   return tools
 }
-
-/** Kept for symmetry with the other loaders; tools are declared the same way. */
-export function mcpToolDeclarations(tools: CoreTool[]): Tool[] {
-  return tools.map(
-    (tool) =>
-      ({
-        name: tool.name,
-        description: tool.description,
-        parameters: tool.parameters as never
-      }) as Tool
-  )
-}
-
-export { pathToFileURL }

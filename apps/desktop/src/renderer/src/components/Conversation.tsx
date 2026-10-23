@@ -4,14 +4,7 @@ import type { ChatItem, ToolCallView } from '../lib/messages'
 import { Markdown } from './Markdown'
 import { MessageImages } from './ImageLightbox'
 import { ChevronIcon, SparkIcon, ToolIcon } from './Icons'
-
-const SUBAGENT_STATUS: Record<SubagentView['status'], string> = {
-  starting: '启动中',
-  streaming: '运行中',
-  idle: '已完成',
-  error: '出错',
-  stopped: '已停止'
-}
+import { SUBAGENT_STATUS_LABELS, isSubagentRunning } from '../lib/subagents'
 
 /** The desktop tool that starts a run: these get a card of their own instead of a generic row. */
 function isSubagentStart(name: string): boolean {
@@ -164,7 +157,7 @@ function SubagentCard({
   const [open, setOpen] = useState(false)
   const label = record?.label ?? hint.label ?? record?.agent ?? hint.agent ?? '子代理'
   const lastMessage = record?.messages?.[record.messages.length - 1]?.text
-  const running = status === 'starting' || status === 'streaming'
+  const running = isSubagentRunning({ status })
 
   return (
     <div className={`subagent-card ${status}`}>
@@ -176,7 +169,7 @@ function SubagentCard({
         {record?.agent && record.agent !== label && (
           <span className="subagent-card-agent">{record.agent}</span>
         )}
-        <span className={`subagent-card-state ${status}`}>{SUBAGENT_STATUS[status]}</span>
+        <span className={`subagent-card-state ${status}`}>{SUBAGENT_STATUS_LABELS[status]}</span>
         {id && <span className="subagent-card-id">{id}</span>}
         <span className="subagent-card-spacer" />
         {record?.runtimeMs !== undefined && (

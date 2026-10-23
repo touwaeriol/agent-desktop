@@ -1,3 +1,4 @@
+import { version } from '../../../package.json'
 import type { EngineStartOptions } from './engine'
 import type { PiStatus, PiModel, PromptImage, PromptResult } from '../../shared/types'
 import type { EngineCommand } from '../../shared/engine'
@@ -75,7 +76,7 @@ export class CodexEngine extends NativeEngine {
           this.options.script ? { ...process.env, ELECTRON_RUN_AS_NODE: '1' } : process.env
         )
         await this.rpc.request('initialize', {
-          clientInfo: { name: 'prophey', title: 'Prophey', version: '0.5.3' },
+          clientInfo: { name: 'prophey', title: 'Prophey', version },
           capabilities: { experimentalApi: false }
         })
         this.rpc.notification('initialized')
@@ -498,24 +499,11 @@ export class CodexEngine extends NativeEngine {
       method === 'item/commandExecution/requestApproval' ||
       method === 'item/fileChange/requestApproval'
     ) {
-      const result = await this.ask(
-        [
-          {
-            question:
-              (p.reason ?? 'Codex 请求执行操作') +
-              '\n' +
-              (p.command ?? JSON.stringify(p.changes ?? p)),
-            options: [{ label: '拒绝' }, { label: '允许本次' }]
-          }
-        ],
+      const allowed = await this.requestApproval(
+        (p.reason ?? 'Codex 请求执行操作') + '\n' + (p.command ?? JSON.stringify(p.changes ?? p)),
         'Codex'
       )
-      return {
-        decision:
-          !result.cancelled && result.answers[0]?.selected.includes('允许本次')
-            ? 'accept'
-            : 'decline'
-      }
+      return { decision: allowed ? 'accept' : 'decline' }
     }
     throw new Error('尚不支持的 Codex 请求：' + method)
   }

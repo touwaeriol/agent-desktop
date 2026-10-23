@@ -1,3 +1,4 @@
+import { updateJsonFile } from './storage'
 /**
  * Subagent presets: built-in defaults plus the user's `agents.json`.
  *
@@ -143,7 +144,7 @@ export async function loadAgents(userData: string): Promise<AgentSettings> {
       id,
       name: raw.name ?? base?.name ?? id,
       description: raw.description ?? base?.description ?? '',
-      source: base ? 'user' : 'user'
+      source: 'user'
     })
   }
   return { exposure, promptLimit, presets: [...merged.values()] }
@@ -173,8 +174,7 @@ export async function ensureAgentsFile(userData: string): Promise<void> {
       }
     }
   }
-  await fs.mkdir(userData, { recursive: true })
-  await fs.writeFile(file, `${JSON.stringify(skeleton, null, 2)}\n`, 'utf8')
+  await updateJsonFile<AgentsFile>(file, skeleton as AgentsFile, (current) => current)
 }
 
 /** Tools a preset can whitelist; anything else is left to pi's defaults. */
@@ -201,72 +201,46 @@ export interface PresetDraft {
   timeoutMs?: number
 }
 
-async function readAgentsFile(userData: string): Promise<AgentsFile> {
-  try {
-    return JSON.parse(await fs.readFile(agentsFilePath(userData), 'utf8')) as AgentsFile
-  } catch {
-    return {}
-  }
-}
-
 /** Create or update one preset. `tools: null` means "no allowlist" (full tool set). */
 export async function savePreset(userData: string, draft: PresetDraft): Promise<void> {
   const id = draft.id.trim()
   if (!/^[a-z0-9][a-z0-9_-]*$/i.test(id)) {
     throw new Error('预设 id 只能包含字母、数字、_ 和 -')
   }
-  const parsed = await readAgentsFile(userData)
-  const presets = { ...(parsed.agents?.presets ?? {}) }
-  const entry: Partial<AgentPreset> = {
-    ...(presets[id] ?? {}),
-    name: draft.name?.trim() || id,
-    description: draft.description?.trim() ?? '',
-    mode: draft.mode ?? 'background',
-    appendSystemPrompt: draft.appendSystemPrompt?.trim() || undefined,
-    visible: draft.visible !== false,
-    timeoutMs: draft.timeoutMs
-  }
-  if (draft.tools === null) delete entry.tools
-  else if (Array.isArray(draft.tools)) entry.tools = draft.tools
-  if (draft.model === null || draft.model === 'inherit' || !draft.model) entry.model = 'inherit'
-  else entry.model = draft.model
-  presets[id] = entry
-  await fs.mkdir(userData, { recursive: true })
-  await fs.writeFile(
-    agentsFilePath(userData),
-    `${JSON.stringify({ ...parsed, agents: { ...(parsed.agents ?? {}), presets } }, null, 2)}\n`,
-    'utf8'
-  )
+  await updateJsonFile<AgentsFile>(agentsFilePath(userData), {}, (parsed) => {
+    const presets = { ...(parsed.agents?.presets ?? {}) }
+    const entry: Partial<AgentPreset> = {
+      ...(presets[id] ?? {}),
+      name: draft.name?.trim() || id,
+      description: draft.description?.trim() ?? '',
+      mode: draft.mode ?? 'background',
+      appendSystemPrompt: draft.appendSystemPrompt?.trim() || undefined,
+      visible: draft.visible !== false,
+      timeoutMs: draft.timeoutMs
+    }
+    if (draft.tools === null) delete entry.tools
+    else if (Array.isArray(draft.tools)) entry.tools = draft.tools
+    if (draft.model === null || draft.model === 'inherit' || !draft.model) entry.model = 'inherit'
+    else entry.model = draft.model
+    presets[id] = entry
+    return { ...parsed, agents: { ...(parsed.agents ?? {}), presets } }
+  })
 }
 
 /** Drop a user preset; built-in presets reappear with their defaults. */
 export async function deletePreset(userData: string, id: string): Promise<void> {
-  const parsed = await readAgentsFile(userData)
-  const presets = { ...(parsed.agents?.presets ?? {}) }
-  delete presets[id]
-  await fs.mkdir(userData, { recursive: true })
-  await fs.writeFile(
-    agentsFilePath(userData),
-    `${JSON.stringify({ ...parsed, agents: { ...(parsed.agents ?? {}), presets } }, null, 2)}\n`,
-    'utf8'
-  )
+  await updateJsonFile<AgentsFile>(agentsFilePath(userData), {}, (parsed) => {
+    const presets = { ...(parsed.agents?.presets ?? {}) }
+    delete presets[id]
+    return { ...parsed, agents: { ...(parsed.agents ?? {}), presets } }
+  })
 }
 
 /** Persist only the exposure setting, keeping the presets the user wrote. */
 export async function saveExposure(userData: string, exposure: AgentExposure): Promise<void> {
-  const file = agentsFilePath(userData)
-  let parsed: AgentsFile = {}
-  try {
-    parsed = JSON.parse(await fs.readFile(file, 'utf8')) as AgentsFile
-  } catch {
-    parsed = {}
-  }
-  const next: AgentsFile = {
-    ...parsed,
-    agents: { ...(parsed.agents ?? {}), exposure }
-  }
-  await fs.mkdir(userData, { recursive: true })
-  await fs.writeFile(file, `${JSON.stringify(next, null, 2)}\n`, 'utf8')
+  await updateJsonFile<AgentsFile>(agentsFilePath(userData), {}, (parsed) => ({
+    ...parsed, agents: { ...(parsed.agents ?? {}), exposure }
+  }))
 }
 
 function tokenize(text: string): string[] {

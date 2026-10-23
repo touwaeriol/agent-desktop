@@ -47,7 +47,7 @@ export class PiEngine implements AgentEngine {
   private roots: AgentWorkspace = { primary: process.cwd(), additional: [] }
   private starting_ = false
   private startPromise: Promise<PiStatus> | undefined
-  private settleWaiters: Array<() => void> = []
+  private settleWaiters = new Set<() => void>()
   /** Busy from `agent_start`/`compaction_start` until `agent_settled`. */
   private isBusy = false
   private isCompacting = false
@@ -288,14 +288,14 @@ export class PiEngine implements AgentEngine {
 
   waitForSettle(timeoutMs: number): Promise<boolean> {
     return new Promise((resolve) => {
-      let done = false
       const finish = (settled: boolean): void => {
-        if (done) return
-        done = true
+        clearTimeout(timer)
+        this.settleWaiters.delete(onSettled)
         resolve(settled)
       }
-      this.settleWaiters.push(() => finish(true))
-      setTimeout(() => finish(false), timeoutMs)
+      const onSettled = (): void => finish(true)
+      const timer = setTimeout(() => finish(false), timeoutMs)
+      this.settleWaiters.add(onSettled)
     })
   }
 
@@ -380,7 +380,7 @@ export class PiEngine implements AgentEngine {
   }
 
   private resolveSettled(): void {
-    for (const waiter of this.settleWaiters.splice(0)) waiter()
+    for (const waiter of this.settleWaiters) waiter()
   }
 
   // --- session and model operations -------------------------------------------------------------

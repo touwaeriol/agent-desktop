@@ -83,11 +83,7 @@ async function handleEvents(
   request: http.IncomingMessage,
   response: http.ServerResponse
 ): Promise<void> {
-  const presented =
-    typeof request.headers.authorization === 'string'
-      ? request.headers.authorization.replace(/^Bearer\s+/i, '')
-      : String(request.headers['x-agent-desktop-token'] ?? '')
-  if (token && presented !== token) {
+  if (!isAuthorized(request)) {
     respond(response, 401, { events: [], error: '桥接令牌无效' })
     return
   }
@@ -100,14 +96,15 @@ async function handleEvents(
       const done = (): void => {
         clearTimeout(timer)
         eventWaiters.delete(done)
+        response.removeListener('close', done)
         resolve()
       }
       const timer = setTimeout(done, wait)
       eventWaiters.add(done)
-      request.once('close', done)
+      response.once('close', done)
     })
   }
-  respond(response, 200, { events: takeEvents() })
+  if (!response.destroyed) respond(response, 200, { events: takeEvents() })
 }
 
 export function setAskListener(listener: ((request: AskRequest) => void) | null): void {
@@ -182,6 +179,20 @@ function normalizeQuestions(raw: unknown): AskQuestion[] {
   return questions
 }
 
+function isAuthorized(request: http.IncomingMessage): boolean {
+  const presented = typeof request.headers.authorization === 'string'
+    ? request.headers.authorization.replace(/^Bearer\s+/i, '')
+    : String(request.headers['x-agent-desktop-token'] ?? '')
+  return !token || presented === token
+}
+
+async function readJsonBody(request: http.IncomingMessage, allowEmpty = false): Promise<Record<string, unknown>> {
+  const text = await readBody(request)
+  const value: unknown = allowEmpty && !text.trim() ? {} : JSON.parse(text)
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('请求体必须是 JSON 对象')
+  return value as Record<string, unknown>
+}
+
 function readBody(request: http.IncomingMessage): Promise<string> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = []
@@ -201,6 +212,7 @@ function readBody(request: http.IncomingMessage): Promise<string> {
 }
 
 function respond(response: http.ServerResponse, status: number, payload: unknown): void {
+  if (response.destroyed || response.writableEnded) return
   const body = JSON.stringify(payload)
   response.writeHead(status, {
     'content-type': 'application/json; charset=utf-8',
@@ -223,7 +235,7 @@ async function handleAsk(
   request: http.IncomingMessage,
   response: http.ServerResponse
 ): Promise<void> {
-  if (token && request.headers['x-agent-desktop-token'] !== token) {
+  if (!isAuthorized(request)) {
     respond(response, 401, { cancelled: true, reason: '桥接令牌无效' })
     return
   }
@@ -233,7 +245,7 @@ async function handleAsk(
   }
   let payload: Record<string, unknown>
   try {
-    payload = JSON.parse(await readBody(request)) as Record<string, unknown>
+    payload = await readJsonBody(request)
   } catch (error) {
     respond(response, 400, {
       cancelled: true,
@@ -256,10 +268,14 @@ async function handleAsk(
   }
 
   // No timeout: the tool waits until the user answers, the run is aborted, or the app closes.
+  const disconnected = (): void => cancelAsk(id, '请求已取消')
+  response.once('close', disconnected)
   const result = await new Promise<AskResult>((resolve) => {
     pending.set(id, { resolve })
-    askListener?.(ask)
+    if (response.destroyed) disconnected()
+    else askListener?.(ask)
   })
+  response.removeListener('close', disconnected)
 
   if (result.cancelled) respond(response, 200, { cancelled: true, reason: result.reason })
   else respond(response, 200, { answers: result.answers })
@@ -269,13 +285,13 @@ async function handleTools(
   request: http.IncomingMessage,
   response: http.ServerResponse
 ): Promise<void> {
-  if (token && request.headers['x-agent-desktop-token'] !== token) {
+  if (!isAuthorized(request)) {
     respond(response, 401, { ok: false, error: '桥接令牌无效' })
     return
   }
   let payload: Record<string, unknown>
   try {
-    payload = JSON.parse(await readBody(request)) as Record<string, unknown>
+    payload = await readJsonBody(request)
   } catch (error) {
     respond(response, 400, {
       ok: false,
@@ -335,11 +351,7 @@ async function handleApi(
   request: http.IncomingMessage,
   response: http.ServerResponse
 ): Promise<void> {
-  const presented =
-    typeof request.headers.authorization === 'string'
-      ? request.headers.authorization.replace(/^Bearer\s+/i, '')
-      : String(request.headers['x-agent-desktop-token'] ?? '')
-  if (token && presented !== token) {
+  if (!isAuthorized(request)) {
     respond(response, 401, { ok: false, code: 'UNAUTHORIZED', message: '桥接令牌无效' })
     return
   }
@@ -351,8 +363,7 @@ async function handleApi(
   let body: Record<string, unknown> = {}
   if (request.method === 'POST' || request.method === 'PUT') {
     try {
-      const raw = await readBody(request)
-      body = raw.trim() ? (JSON.parse(raw) as Record<string, unknown>) : {}
+      body = await readJsonBody(request, true)
     } catch (error) {
       respond(response, 400, {
         ok: false,
@@ -384,11 +395,7 @@ async function handleMcp(
   request: http.IncomingMessage,
   response: http.ServerResponse
 ): Promise<void> {
-  const presented =
-    typeof request.headers.authorization === 'string'
-      ? request.headers.authorization.replace(/^Bearer\s+/i, '')
-      : String(request.headers['x-agent-desktop-token'] ?? '')
-  if (token && presented !== token) {
+  if (!isAuthorized(request)) {
     respond(response, 401, { error: '桥接令牌无效' })
     return
   }
@@ -398,7 +405,7 @@ async function handleMcp(
   }
   let message: Record<string, unknown>
   try {
-    message = JSON.parse(await readBody(request)) as Record<string, unknown>
+    message = await readJsonBody(request)
   } catch (error) {
     respond(response, 400, {
       jsonrpc: '2.0',
@@ -560,6 +567,7 @@ export async function startBridge(options: {
 
 export function stopBridge(): void {
   cancelAllAsks('桌面端已关闭')
+  for (const wake of [...eventWaiters]) wake()
   server?.close()
   server = null
   port = 0

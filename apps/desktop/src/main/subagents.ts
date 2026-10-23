@@ -1,3 +1,4 @@
+import { writeJsonAtomic } from './storage'
 /**
  * Subagent runtime: one `pi --mode rpc` child process per subagent.
  *
@@ -196,13 +197,9 @@ export class SubagentManager {
     const records = [...this.items.values()]
       .map((item) => item.record)
       .sort((a, b) => b.createdAt - a.createdAt)
-    try {
-      void fs.mkdir(this.options.userData, { recursive: true }).then(() =>
-        fs.writeFile(this.storePath(), JSON.stringify({ version: STORE_VERSION, records }, null, 1))
-      )
-    } catch {
-      // a lost record is not worth breaking a run over
-    }
+    void writeJsonAtomic(this.storePath(), { version: STORE_VERSION, records }).catch(() => {
+      // A lost record is not worth breaking a run over.
+    })
   }
 
   setMaxConcurrent(value: number): void {

@@ -1,3 +1,4 @@
+import { updateJsonFile, writeJsonAtomic } from './storage'
 import { promises as fs } from 'node:fs'
 import { randomUUID } from 'node:crypto'
 import path from 'node:path'
@@ -264,8 +265,7 @@ export async function saveModelsJson(content: string): Promise<void> {
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
     throw new Error('models.json 顶层必须是 JSON 对象')
   }
-  await fs.mkdir(agentDir(), { recursive: true })
-  await fs.writeFile(modelsPath(), `${JSON.stringify(parsed, null, 2)}\n`)
+  await writeJsonAtomic(modelsPath(), parsed)
   resetRuntime()
 }
 
@@ -385,16 +385,16 @@ export async function setProviderBaseUrl(providerId: string, baseUrl: string | n
   if (!BASE_URL_PROVIDERS.includes(providerId)) throw new Error(`不支持修改 ${providerId} 的地址`)
   const trimmed = baseUrl?.trim() ?? ''
   if (trimmed && !/^https?:\/\//i.test(trimmed)) throw new Error('地址必须以 http:// 或 https:// 开头')
-  const file = await readModelsJsonObject()
-  const providers = providersOf(file)
-  const current = { ...(providers[providerId] ?? {}) }
-  if (trimmed) current.baseUrl = trimmed
-  else delete current.baseUrl
-  if (Object.keys(current).length === 0) delete providers[providerId]
-  else providers[providerId] = current
-  file.providers = providers
-  await fs.mkdir(agentDir(), { recursive: true })
-  await fs.writeFile(modelsPath(), `${JSON.stringify(file, null, 2)}\n`)
+  await updateJsonFile<Record<string, unknown>>(modelsPath(), {}, (file) => {
+    const providers = providersOf(file)
+    const current = { ...(providers[providerId] ?? {}) }
+    if (trimmed) current.baseUrl = trimmed
+    else delete current.baseUrl
+    if (Object.keys(current).length === 0) delete providers[providerId]
+    else providers[providerId] = current
+    file.providers = providers
+    return file
+  })
   resetRuntime()
 }
 
@@ -485,16 +485,15 @@ export async function setCompactionSettings(next: {
   enabled?: boolean
   reserveTokens?: number
 }): Promise<void> {
-  const raw = (await readRawSettings()) as Record<string, unknown>
-  const compaction = { ...((raw.compaction as Record<string, unknown>) ?? {}) }
-  if (typeof next.enabled === 'boolean') compaction.enabled = next.enabled
-  if (typeof next.reserveTokens === 'number') {
-    compaction.reserveTokens = Math.max(0, Math.round(next.reserveTokens))
-  }
-  raw.compaction = compaction
-  await fs.mkdir(path.dirname(settingsPath()), { recursive: true })
-  await fs.writeFile(settingsPath(), `${JSON.stringify(raw, null, 2)}
-`, 'utf8')
+  await updateJsonFile<RawSettings>(settingsPath(), {}, (raw) => {
+    const compaction = { ...((raw.compaction as Record<string, unknown>) ?? {}) }
+    if (typeof next.enabled === 'boolean') compaction.enabled = next.enabled
+    if (typeof next.reserveTokens === 'number') {
+      compaction.reserveTokens = Math.max(0, Math.round(next.reserveTokens))
+    }
+    raw.compaction = compaction
+    return raw
+  })
   invalidateCache()
 }
 
@@ -527,19 +526,19 @@ export async function saveAppSettings(
     >
   >
 ): Promise<void> {
-  const raw = await readRawSettings()
-  for (const key of ['defaultProvider', 'defaultModel', 'defaultThinkingLevel'] as const) {
-    const value = patch[key]
-    if (value === undefined) continue
-    if (value === '') delete raw[key]
-    else raw[key] = value
-  }
-  if (patch.enabledModels !== undefined) {
-    if (patch.enabledModels.length === 0) delete raw.enabledModels
-    else raw.enabledModels = [...new Set(patch.enabledModels)]
-  }
-  await fs.mkdir(agentDir(), { recursive: true })
-  await fs.writeFile(settingsPath(), `${JSON.stringify(raw, null, 2)}\n`)
+  await updateJsonFile<RawSettings>(settingsPath(), {}, (raw) => {
+    for (const key of ['defaultProvider', 'defaultModel', 'defaultThinkingLevel'] as const) {
+      const value = patch[key]
+      if (value === undefined) continue
+      if (value === '') delete raw[key]
+      else raw[key] = value
+    }
+    if (patch.enabledModels !== undefined) {
+      if (patch.enabledModels.length === 0) delete raw.enabledModels
+      else raw.enabledModels = [...new Set(patch.enabledModels)]
+    }
+    return raw
+  })
   invalidateCache()
 }
 
@@ -564,48 +563,48 @@ export async function setProviderModels(
 ): Promise<void> {
   const runtime = await getRuntime()
   const allModels = runtime.getModels()
-  const raw = await readRawSettings()
-  const patterns = readEnabledModels(raw)
-  const enabled = new Set(
-    allModels
-      .filter((model) => isModelEnabled(model, patterns))
-      .map((model) => `${model.provider}/${model.id}`)
-  )
-  const prefix = `${providerId}/`
-  for (const id of [...enabled]) {
-    if (id.startsWith(prefix)) enabled.delete(id)
-  }
-  for (const id of enabledIds) {
-    if (id.startsWith(prefix)) enabled.add(id)
-  }
-  const allIds = allModels.map((model) => `${model.provider}/${model.id}`)
-  const allEnabled = allIds.length > 0 && allIds.every((id) => enabled.has(id))
-  if (allEnabled) delete raw.enabledModels
-  else {
-    // Keep the allowlist small: a fully enabled provider becomes "provider/*".
-    const byProvider = new Map<string, { total: number; on: number }>()
-    for (const id of allIds) {
-      const provider = id.slice(0, id.indexOf('/'))
-      const entry = byProvider.get(provider) ?? { total: 0, on: 0 }
-      entry.total += 1
-      if (enabled.has(id)) entry.on += 1
-      byProvider.set(provider, entry)
+  await updateJsonFile<RawSettings>(settingsPath(), {}, (raw) => {
+    const patterns = readEnabledModels(raw)
+    const enabled = new Set(
+      allModels
+        .filter((model) => isModelEnabled(model, patterns))
+        .map((model) => `${model.provider}/${model.id}`)
+    )
+    const prefix = `${providerId}/`
+    for (const id of [...enabled]) {
+      if (id.startsWith(prefix)) enabled.delete(id)
     }
-    const patterns: string[] = []
-    for (const id of [...enabled].sort()) {
-      const provider = id.slice(0, id.indexOf('/'))
-      const entry = byProvider.get(provider)
-      if (entry && entry.on === entry.total) {
-        const wildcard = `${provider}/*`
-        if (!patterns.includes(wildcard)) patterns.push(wildcard)
-        continue
+    for (const id of enabledIds) {
+      if (id.startsWith(prefix)) enabled.add(id)
+    }
+    const allIds = allModels.map((model) => `${model.provider}/${model.id}`)
+    const allEnabled = allIds.length > 0 && allIds.every((id) => enabled.has(id))
+    if (allEnabled) delete raw.enabledModels
+    else {
+      // Keep the allowlist small: a fully enabled provider becomes "provider/*".
+      const byProvider = new Map<string, { total: number; on: number }>()
+      for (const id of allIds) {
+        const provider = id.slice(0, id.indexOf('/'))
+        const entry = byProvider.get(provider) ?? { total: 0, on: 0 }
+        entry.total += 1
+        if (enabled.has(id)) entry.on += 1
+        byProvider.set(provider, entry)
       }
-      patterns.push(id)
+      const patterns: string[] = []
+      for (const id of [...enabled].sort()) {
+        const provider = id.slice(0, id.indexOf('/'))
+        const entry = byProvider.get(provider)
+        if (entry && entry.on === entry.total) {
+          const wildcard = `${provider}/*`
+          if (!patterns.includes(wildcard)) patterns.push(wildcard)
+          continue
+        }
+        patterns.push(id)
+      }
+      raw.enabledModels = patterns
     }
-    raw.enabledModels = patterns
-  }
-  await fs.mkdir(agentDir(), { recursive: true })
-  await fs.writeFile(settingsPath(), `${JSON.stringify(raw, null, 2)}\n`)
+    return raw
+  })
   invalidateCache()
 }
 

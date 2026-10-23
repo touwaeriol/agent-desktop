@@ -123,16 +123,11 @@ export class ClaudeCodeEngine extends NativeEngine {
               )
               return { behavior: 'allow', updatedInput: { ...input, answers } }
             }
-            const answer = await this.ask(
-              [
-                {
-                  question: '允许 Claude Code 执行 ' + name + '？\n' + JSON.stringify(input),
-                  options: [{ label: '拒绝' }, { label: '允许本次' }]
-                }
-              ],
+            const allowed = await this.requestApproval(
+              '允许 Claude Code 执行 ' + name + '？\n' + JSON.stringify(input),
               name
             )
-            return !answer.cancelled && answer.answers[0]?.selected.includes('允许本次')
+            return allowed
               ? { behavior: 'allow', updatedInput: input }
               : { behavior: 'deny', message: '用户拒绝或取消' }
           }

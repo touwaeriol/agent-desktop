@@ -660,29 +660,11 @@ async function fetchPage(
   } catch {
     throw new WebError('BAD_URL', `不是合法的 URL：${raw}`)
   }
-  if (target.protocol !== 'http:' && target.protocol !== 'https:') {
-    throw new WebError('BAD_URL', `只支持 http/https：${target.href}`)
-  }
-  if (isPrivateHost(target.hostname)) {
-    throw new WebError(
-      'BLOCKED_HOST',
-      `拒绝抓取本机 / 内网地址（${target.hostname}）。需要本地内容时用 read 或 bash。`
-    )
-  }
   const config = normalize(runtime.config())
   const maxChars = clamp(numberArg(args.maxChars) ?? config.maxChars, 1000, 30_000)
   const asText = stringArg(args.format) === 'text'
 
-  const response = await fetch(target, {
-    redirect: 'follow',
-    headers: {
-      'user-agent': USER_AGENT,
-      accept:
-        'text/html,application/xhtml+xml,application/json;q=0.9,text/plain;q=0.9,*/*;q=0.5',
-      'accept-language': 'zh-CN,zh;q=0.9,en;q=0.8'
-    },
-    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS)
-  })
+  const response = await fetchPublicPage(target)
   if (!response.ok) {
     throw new WebError('HTTP_ERROR', `HTTP ${response.status} ${response.statusText} — ${target.href}`)
   }
@@ -717,6 +699,38 @@ async function fetchPage(
     text: `${head}\n\n${meta}\n\n---\n\n${clipped || '（页面没有可读正文）'}`,
     structured: { url: resolved, title, contentType, truncated: clipped.length < body.length }
   }
+}
+
+/** Validate every redirect before opening it, and use one deadline for the chain. */
+async function fetchPublicPage(initial: URL): Promise<Response> {
+  let target = initial
+  const signal = AbortSignal.timeout(FETCH_TIMEOUT_MS)
+  for (let redirects = 0; redirects <= 5; redirects += 1) {
+    if (target.protocol !== 'http:' && target.protocol !== 'https:') {
+      throw new WebError('BAD_URL', `只支持 http/https：${target.href}`)
+    }
+    if (isPrivateHost(target.hostname)) {
+      throw new WebError(
+        'BLOCKED_HOST',
+        `拒绝抓取本机 / 内网地址（${target.hostname}）。需要本地内容时用 read 或 bash。`
+      )
+    }
+
+    const response = await fetch(target, {
+      redirect: 'manual',
+      headers: {
+        'user-agent': USER_AGENT,
+        accept: 'text/html,application/xhtml+xml,application/json;q=0.9,text/plain;q=0.9,*/*;q=0.5',
+        'accept-language': 'zh-CN,zh;q=0.9,en;q=0.8'
+      },
+      signal
+    })
+    const location = response.headers.get('location')
+    if (![301, 302, 303, 307, 308].includes(response.status) || !location) return response
+    await response.body?.cancel()
+    target = new URL(location, target)
+  }
+  throw new WebError('TOO_MANY_REDIRECTS', '页面重定向次数过多')
 }
 
 function isPrivateHost(hostname: string): boolean {

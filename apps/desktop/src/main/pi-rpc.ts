@@ -3,6 +3,7 @@ import { EventEmitter } from 'node:events'
 import { existsSync } from 'node:fs'
 import path from 'node:path'
 import { killTree } from './proc'
+import { createJsonLineDecoder } from './json-lines'
 
 const PI_RELATIVE = path.join(
   'node_modules',
@@ -60,7 +61,6 @@ interface Pending {
 
 export class PiRpcClient extends EventEmitter {
   private child: ChildProcessWithoutNullStreams | null = null
-  private buffer = ''
   private pending = new Map<string, Pending>()
   private seq = 0
   private stderr = ''
@@ -84,7 +84,6 @@ export class PiRpcClient extends EventEmitter {
       cwd
     )
     this.stderr = ''
-    this.buffer = ''
     const child = spawn(pi.command, [...pi.args, '--mode', 'rpc', ...extraArgs], {
       cwd,
       env: { ...process.env, ...pi.env, ...extraEnv },
@@ -93,21 +92,30 @@ export class PiRpcClient extends EventEmitter {
     })
     this.child = child
     child.stdout.setEncoding('utf8')
-    child.stdout.on('data', (chunk: string) => this.onStdout(chunk))
+    const decode = createJsonLineDecoder((record) => {
+      if (this.child === child) this.onRecord(record)
+    })
+    child.stdout.on('data', (chunk: string) => {
+      if (this.child === child) decode(chunk)
+    })
     child.stderr.setEncoding('utf8')
     child.stderr.on('data', (chunk: string) => {
+      if (this.child !== child) return
       this.stderr += chunk
       if (this.stderr.length > 20000) this.stderr = this.stderr.slice(-10000)
       process.stderr.write(`[pi] ${chunk}`)
       this.emit('stderr', chunk)
     })
-    child.on('error', (error) => {
+    const fail = (error: Error): void => {
       if (this.child !== child) return
-      console.error('[pi-rpc] spawn failed:', error.message)
+      console.error('[pi-rpc] connection failed:', error.message)
       this.child = null
+      if (child.exitCode === null && child.signalCode === null) killTree(child)
       this.failAll(error)
       this.emit('exit', { error: error.message })
-    })
+    }
+    child.stdin.on('error', fail)
+    child.on('error', fail)
     child.on('exit', (code, signal) => {
       if (this.child !== child) return
       console.warn(`[pi-rpc] exited code=${code} signal=${signal}`)
@@ -151,7 +159,8 @@ export class PiRpcClient extends EventEmitter {
   }
 
   notify(record: Record<string, unknown>): void {
-    this.child?.stdin.write(JSON.stringify(record) + '\n')
+    const child = this.child
+    if (child && !child.stdin.destroyed) child.stdin.write(JSON.stringify(record) + '\n')
   }
 
   request<T = Record<string, unknown>>(
@@ -160,7 +169,7 @@ export class PiRpcClient extends EventEmitter {
     timeoutMs = 60000
   ): Promise<T> {
     const child = this.child
-    if (!child) return Promise.reject(new Error('pi is not running'))
+    if (!child || child.stdin.destroyed) return Promise.reject(new Error('pi is not running'))
     const id = `req-${++this.seq}`
     return new Promise<T>((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -172,28 +181,17 @@ export class PiRpcClient extends EventEmitter {
         reject,
         timer
       })
-      child.stdin.write(`${JSON.stringify({ id, type, ...payload })}\n`)
+      try {
+        child.stdin.write(`${JSON.stringify({ id, type, ...payload })}\n`)
+      } catch (error) {
+        clearTimeout(timer)
+        this.pending.delete(id)
+        reject(error)
+      }
     })
   }
 
-  private onStdout(chunk: string): void {
-    this.buffer += chunk
-    let index = this.buffer.indexOf('\n')
-    while (index !== -1) {
-      const line = this.buffer.slice(0, index).replace(/\r$/, '')
-      this.buffer = this.buffer.slice(index + 1)
-      if (line.trim()) this.onRecord(line)
-      index = this.buffer.indexOf('\n')
-    }
-  }
-
-  private onRecord(line: string): void {
-    let record: Record<string, unknown>
-    try {
-      record = JSON.parse(line)
-    } catch {
-      return
-    }
+  private onRecord(record: Record<string, unknown>): void {
     const id = typeof record.id === 'string' ? record.id : undefined
     if (record.type === 'response' && id && this.pending.has(id)) {
       const pending = this.pending.get(id)!

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { AgentPresetDraft, McpState, SubagentPresetInfo } from '@shared/types'
 import { CheckIcon, CloseIcon, PencilIcon, PlusIcon, TrashIcon } from './Icons'
 import { Toggle } from './Toggle'
+import { runAction } from '../lib/actions'
 
 const TOOL_OPTIONS = ['read', 'write', 'edit', 'bash', 'powershell', 'grep', 'find', 'ls']
 
@@ -66,20 +67,14 @@ export function AgentsPanel({
 
   const run = useCallback(
     async (task: () => Promise<{ ok: boolean; error?: string; state?: McpState }>, message: string) => {
-      setBusy(true)
-      try {
-        const result = await task()
-        if (!result.ok) {
-          onError(result.error ?? '操作失败')
-          return
+      return runAction(task, {
+        setBusy,
+        onError,
+        onSuccess: (result) => {
+          if (result.state) setState(result.state)
+          onNotice(message)
         }
-        if (result.state) setState(result.state)
-        onNotice(message)
-      } catch (error) {
-        onError(error instanceof Error ? error.message : String(error))
-      } finally {
-        setBusy(false)
-      }
+      })
     },
     [onError, onNotice]
   )
@@ -112,7 +107,9 @@ export function AgentsPanel({
           timeoutMs: draft.timeoutMs
         }),
       '预设已保存，pi 正在重启'
-    ).then(() => setDraft(undefined))
+    ).then((ok) => {
+      if (ok) setDraft(undefined)
+    })
   }
 
   if (!subagents) {

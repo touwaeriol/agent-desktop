@@ -1,3 +1,4 @@
+import { SerialQueue, writeJsonAtomic } from './storage'
 /**
  * Projects: several repositories behind one conversation.
  *
@@ -141,6 +142,8 @@ function readProject(value: unknown): Project | undefined {
 export class ProjectStore {
   private readonly filePath: string
   private projects: Project[] | undefined
+  private loading?: Promise<Project[]>
+  private readonly mutations = new SerialQueue()
 
   constructor(filePath: string) {
     this.filePath = path.resolve(filePath)
@@ -149,9 +152,10 @@ export class ProjectStore {
   /** Reads the file once and caches it; missing/corrupt file means "no projects". */
   async load(): Promise<Project[]> {
     if (this.projects) return this.projects
-    const projects = await this.read()
-    this.projects = projects
-    return projects
+    return (this.loading ??= this.read().then((projects) => {
+      this.projects = projects
+      return projects
+    }))
   }
 
   list(): Project[] {
@@ -163,53 +167,59 @@ export class ProjectStore {
   }
 
   async create(input: { name: string; roots: string[]; primary?: string }): Promise<Project> {
-    await this.load()
-    const roots = normaliseRoots(input.roots, input.primary, [])
-    if (roots.length === 0) throw new Error(EMPTY_ROOTS)
+    return this.mutations.run(async () => {
+      await this.load()
+      const roots = normaliseRoots(input.roots, input.primary, [])
+      if (roots.length === 0) throw new Error(EMPTY_ROOTS)
 
-    const now = Date.now()
-    const project: Project = {
-      id: `p_${randomBytes(6).toString('hex')}`,
-      // The primary root's entry name is its basename, which is the default project name.
-      name: input.name.trim() || (primaryOf(roots)?.name ?? ''),
-      roots,
-      createdAt: now,
-      updatedAt: now
-    }
-    await this.commit([...(this.projects ?? []), project])
-    return project
+      const now = Date.now()
+      const project: Project = {
+        id: `p_${randomBytes(6).toString('hex')}`,
+        // The primary root's entry name is its basename, which is the default project name.
+        name: input.name.trim() || (primaryOf(roots)?.name ?? ''),
+        roots,
+        createdAt: now,
+        updatedAt: now
+      }
+      await this.commit([...(this.projects ?? []), project])
+      return project
+    })
   }
 
   async update(
     id: string,
     patch: { name?: string; roots?: string[]; primary?: string }
   ): Promise<Project | undefined> {
-    await this.load()
-    const all = this.projects ?? []
-    const current = all.find((project) => project.id === id)
-    if (!current) return undefined
+    return this.mutations.run(async () => {
+      await this.load()
+      const all = this.projects ?? []
+      const current = all.find((project) => project.id === id)
+      if (!current) return undefined
 
-    let roots = current.roots
-    if (patch.roots) roots = normaliseRoots(patch.roots, patch.primary, current.roots)
-    else if (patch.primary) roots = movePrimary(current.roots, patch.primary)
-    if (roots.length === 0) throw new Error(EMPTY_ROOTS)
+      let roots = current.roots
+      if (patch.roots) roots = normaliseRoots(patch.roots, patch.primary, current.roots)
+      else if (patch.primary) roots = movePrimary(current.roots, patch.primary)
+      if (roots.length === 0) throw new Error(EMPTY_ROOTS)
 
-    const next: Project = {
-      ...current,
-      name: patch.name?.trim() || current.name,
-      roots,
-      updatedAt: Date.now()
-    }
-    await this.commit(all.map((project) => (project.id === id ? next : project)))
-    return next
+      const next: Project = {
+        ...current,
+        name: patch.name?.trim() || current.name,
+        roots,
+        updatedAt: Date.now()
+      }
+      await this.commit(all.map((project) => (project.id === id ? next : project)))
+      return next
+    })
   }
 
   async remove(id: string): Promise<void> {
-    await this.load()
-    const all = this.projects ?? []
-    const rest = all.filter((project) => project.id !== id)
-    if (rest.length === all.length) return
-    await this.commit(rest)
+    return this.mutations.run(async () => {
+      await this.load()
+      const all = this.projects ?? []
+      const rest = all.filter((project) => project.id !== id)
+      if (rest.length === all.length) return
+      await this.commit(rest)
+    })
   }
 
   /** The project a directory belongs to; longest matching root wins. Case-insensitive on win32. */
@@ -258,13 +268,10 @@ export class ProjectStore {
     this.projects = projects
   }
 
-  /** Write `<file>.tmp` then rename, so a crash mid-write cannot truncate the real file. */
+  /** Atomically replace the file, sharing serialization with other storage writers. */
   private async write(projects: Project[]): Promise<void> {
     const payload: ProjectFile = { projects }
-    await fs.mkdir(path.dirname(this.filePath), { recursive: true })
-    const tmp = `${this.filePath}.tmp`
-    await fs.writeFile(tmp, `${JSON.stringify(payload, null, 2)}\n`, 'utf8')
-    await fs.rename(tmp, this.filePath)
+    await writeJsonAtomic(this.filePath, payload)
   }
 }
 

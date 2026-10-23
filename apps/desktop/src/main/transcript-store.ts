@@ -1,4 +1,4 @@
-import { promises as fs } from 'node:fs'
+import { readTextFile, removeStoredFile, writeTextAtomic } from './storage'
 import path from 'node:path'
 
 /**
@@ -27,10 +27,14 @@ export class TranscriptStore {
     return path.join(this.dir, `${sessionId.replace(/[^a-zA-Z0-9_-]/g, '_')}.jsonl`)
   }
 
+  async remove(sessionId: string): Promise<void> {
+    await removeStoredFile(this.fileFor(sessionId))
+  }
+
   async load(sessionId: string): Promise<StoredTranscript | undefined> {
     let raw: string
     try {
-      raw = await fs.readFile(this.fileFor(sessionId), 'utf8')
+      raw = await readTextFile(this.fileFor(sessionId))
     } catch {
       return undefined
     }
@@ -60,7 +64,7 @@ export class TranscriptStore {
     }
   }
 
-  /** Rewrite the whole file: the transcript is small, and a full write cannot interleave. */
+  /** Snapshot and serialize full rewrites, so concurrent saves cannot interleave. */
   async save(
     sessionId: string,
     workspace: { primary: string; additional: string[] },
@@ -71,11 +75,7 @@ export class TranscriptStore {
       ...messages.map((message) => JSON.stringify({ message }))
     ].join('\n')
     try {
-      await fs.mkdir(this.dir, { recursive: true })
-      const target = this.fileFor(sessionId)
-      const tmp = `${target}.tmp`
-      await fs.writeFile(tmp, `${body}\n`, 'utf8')
-      await fs.rename(tmp, target)
+      await writeTextAtomic(this.fileFor(sessionId), `${body}\n`)
     } catch {
       // Losing persistence is bad, losing the conversation in memory is worse: stay quiet here.
     }

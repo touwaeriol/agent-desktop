@@ -26,115 +26,12 @@ import { SubagentsDrawer } from './components/SubagentsDrawer'
 import { RunStatusBar } from './components/RunStatusBar'
 import { Markdown } from './components/Markdown'
 import type { DraftImage } from './lib/images'
+import { isSubagentRunning } from './lib/subagents'
 
-export interface BtwTurn {
-  question: string
-  answer?: string
-  error?: string
-}
-
-/** The `/btw` panel: several turns on one fork, thrown away when the panel closes. */
-export interface BtwChat {
-  turns: BtwTurn[]
-  busy: boolean
-}
-
-function isSubagentRunning(record: SubagentView): boolean {
-  return record.status === 'starting' || record.status === 'streaming'
-}
-
-export interface QueuedMessage {
-  id: string
-  text: string
-  images: DraftImage[]
-  /** A slash command waiting for the run to end, not a message for pi. */
-  command?: boolean
-}
+import type { BtwChat, QueuedMessage } from './lib/chat-types'
 import { updateStatusText } from './lib/updates'
-import {
-  imagesFromBlocks,
-  NOTICE_TYPE,
-  noticeText,
-  textFromBlocks,
-  thinkingFromBlocks,
-  toChatItems,
-  toolCallsFromBlocks,
-  type ChatItem,
-  type ToolCallView
-} from './lib/messages'
-
-interface ToolCallPayload {
-  id?: string
-  toolCallId?: string
-  name?: string
-  toolName?: string
-  arguments?: unknown
-  args?: unknown
-}
-
-function partialToolCall(payload: ToolCallPayload, patch: Partial<ToolCallView>): ToolCallView {
-  const args = payload.arguments ?? payload.args
-  return {
-    id: String(payload.id ?? payload.toolCallId ?? 'tool'),
-    name: String(payload.name ?? payload.toolName ?? 'tool'),
-    args: typeof args === 'string' ? args : args ? JSON.stringify(args, null, 2) : '',
-    status: 'running',
-    ...patch
-  }
-}
-
-function mergeCall(current: ToolCallView, next: ToolCallView): ToolCallView {
-  return {
-    id: current.id,
-    name: next.name && next.name !== 'tool' ? next.name : current.name,
-    args: next.args || current.args,
-    status: next.status || current.status,
-    result: next.result ?? current.result,
-    durationMs: next.durationMs ?? current.durationMs
-  }
-}
-
-function resultText(result: unknown): string | undefined {
-  if (typeof result === 'string') return result
-  if (result && typeof result === 'object' && 'content' in result) {
-    return textFromBlocks((result as { content?: unknown }).content)
-  }
-  return undefined
-}
-
-function patchLastAssistant(items: ChatItem[], patch: (item: ChatItem) => ChatItem): ChatItem[] {
-  for (let index = items.length - 1; index >= 0; index -= 1) {
-    if (items[index].role === 'assistant') {
-      const next = items.slice()
-      next[index] = patch(next[index])
-      return next
-    }
-  }
-  return items
-}
-
-function upsertTool(items: ChatItem[], call: ToolCallView): ChatItem[] {
-  let found = false
-  const next = items.map((item) => {
-    if (item.role !== 'assistant') return item
-    const index = item.toolCalls.findIndex((existing) => existing.id === call.id)
-    if (index === -1) return item
-    found = true
-    const toolCalls = item.toolCalls.slice()
-    toolCalls[index] = mergeCall(toolCalls[index], call)
-    return { ...item, toolCalls }
-  })
-  if (found) return next
-  return patchLastAssistant(next, (item) => ({
-    ...item,
-    toolCalls: [...item.toolCalls, call]
-  }))
-}
-
-function appendDelta(items: ChatItem[], field: 'text' | 'thinking', delta: string): ChatItem[] {
-  if (!delta) return items
-  return patchLastAssistant(items, (item) => ({ ...item, [field]: (item[field] ?? '') + delta }))
-}
+import { toChatItems, type ChatItem } from './lib/messages'
+import { applyConversationEvent } from './lib/conversation-events'
 
 export default function App(): React.JSX.Element {
   const [status, setStatus] = useState<PiStatus>({ phase: 'starting', cwd: '' })
@@ -440,141 +337,19 @@ export default function App(): React.JSX.Element {
   const handleEvent = useCallback(
     (record: Record<string, unknown>) => {
       const type = String(record.type ?? '')
+      const now = Date.now()
+      setItems((prev) => applyConversationEvent(prev, record, now))
       switch (type) {
         case 'agent_start':
           setRun({ startedAt: Date.now(), runningTools: 0 })
           break
-        case 'message_start': {
-          const message = record.message as { role?: string } | undefined
-          if (message?.role === 'user') {
-            setItems((prev) => {
-              const index = prev
-                .map((item) => item.role === 'user' && item.pending)
-                .lastIndexOf(true)
-              if (index === -1) return prev
-              const next = prev.slice()
-              next[index] = { ...next[index], pending: false }
-              return next
-            })
-          } else if (message?.role === 'assistant') {
-            setItems((prev) => [
-              ...prev,
-              {
-                id: `assistant-${Date.now()}-${prev.length}`,
-                role: 'assistant',
-                text: '',
-                thinking: '',
-                toolCalls: [],
-                streaming: true
-              }
-            ])
-          }
-          break
-        }
-        case 'message_update': {
-          const event = record.assistantMessageEvent as
-            | { type?: string; delta?: string; toolCall?: ToolCallPayload }
-            | undefined
-          if (!event) break
-          if (event.type === 'text_delta' && event.delta) {
-            setItems((prev) => appendDelta(prev, 'text', event.delta!))
-          } else if (event.type === 'thinking_delta' && event.delta) {
-            setItems((prev) => appendDelta(prev, 'thinking', event.delta!))
-          } else if (event.type === 'toolcall_end' && event.toolCall) {
-            const call = partialToolCall(event.toolCall, { status: 'running' })
-            setItems((prev) => upsertTool(prev, call))
-          }
-          break
-        }
-        case 'message_end': {
-          const message = record.message as
-            | { role?: string; content?: unknown; customType?: string }
-            | undefined
-          if (message?.role === 'custom') {
-            if (message.customType !== NOTICE_TYPE) break
-            const text = noticeText(textFromBlocks(message.content))
-            if (!text) break
-            setItems((prev) => [
-              ...prev,
-              {
-                id: `notice-${Date.now()}-${prev.length}`,
-                role: 'system',
-                text,
-                toolCalls: []
-              }
-            ])
-            break
-          }
-          if (message?.role === 'assistant') {
-            setItems((prev) =>
-              patchLastAssistant(prev, (item) => {
-                const calls = toolCallsFromBlocks(message.content)
-                return {
-                  ...item,
-                  text: textFromBlocks(message.content) || item.text,
-                  thinking: thinkingFromBlocks(message.content) || item.thinking,
-                  toolCalls:
-                    calls.length > 0
-                      ? calls.map((call) => {
-                          const existing = item.toolCalls.find((entry) => entry.id === call.id)
-                          return existing ? mergeCall(call, existing) : call
-                        })
-                      : item.toolCalls,
-                  streaming: false
-                }
-              })
-            )
-          } else if (message?.role === 'user') {
-            setItems((prev) => {
-              const index = prev
-                .map((item) => item.role === 'user' && item.pending)
-                .lastIndexOf(true)
-              if (index === -1) return prev
-              const next = prev.slice()
-              const images = imagesFromBlocks(message.content)
-              next[index] = {
-                ...next[index],
-                text: textFromBlocks(message.content) || next[index].text,
-                images: images.length > 0 ? images : next[index].images,
-                pending: false
-              }
-              return next
-            })
-          }
-          break
-        }
-        case 'tool_execution_start': {
+        case 'tool_execution_start':
           setRun((prev) => ({ ...prev, runningTools: prev.runningTools + 1 }))
-          const call = partialToolCall(record as ToolCallPayload, { status: 'running' })
-          setItems((prev) => upsertTool(prev, call))
           break
-        }
-        case 'tool_execution_update': {
-          const payload = record as ToolCallPayload & { partialResult?: unknown }
-          const call = partialToolCall(payload, {
-            status: 'running',
-            result: typeof payload.partialResult === 'string' ? payload.partialResult : undefined
-          })
-          setItems((prev) => upsertTool(prev, call))
-          break
-        }
-        case 'tool_execution_end': {
+        case 'tool_execution_end':
           setRun((prev) => ({ ...prev, runningTools: Math.max(0, prev.runningTools - 1) }))
-          const payload = record as ToolCallPayload & {
-            result?: unknown
-            isError?: boolean
-            durationMs?: number
-          }
-          const call = partialToolCall(payload, {
-            status: payload.isError ? 'error' : 'done',
-            result: resultText(payload.result),
-            durationMs: payload.durationMs
-          })
-          setItems((prev) => upsertTool(prev, call))
           break
-        }
         case 'agent_settled':
-          setItems((prev) => prev.map((item) => ({ ...item, streaming: false })))
           setRun((prev) => ({ ...prev, endedAt: Date.now(), runningTools: 0 }))
           void window.pi
             .getSessionStats()
