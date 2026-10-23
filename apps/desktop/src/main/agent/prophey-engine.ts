@@ -2,7 +2,13 @@ import type { Model } from '@earendil-works/pi-ai'
 import type { PiModel, PiStatus, PromptImage, PromptResult } from '@shared/types'
 import * as providers from '../providers'
 import type { TranscriptStore } from '../transcript-store'
-import { loadWorkspaceTools, toolDeclarations, type CoreTool } from './core-tools'
+import {
+  bridgeContext,
+  loadSubagentTools,
+  loadWorkspaceTools,
+  toolDeclarations,
+  type CoreTool
+} from './core-tools'
 import type { AgentEngine, AgentWorkspace } from './engine'
 
 /**
@@ -46,6 +52,10 @@ export class PropheyEngine implements AgentEngine {
       sessionId?: () => string | undefined
       /** The app's auto-compaction setting (same value the threshold dropdown writes). */
       autoCompact?: () => { enabled: boolean; percent: number }
+      /** Bridge URL/token: how the subagent tools reach the app's manager. */
+      bridge?: () => { url: string; token: string } | undefined
+      /** Directory holding `subagent.mjs`; absent when subagents are off. */
+      subagentModulePath?: string
     }
   ) {}
 
@@ -91,6 +101,7 @@ export class PropheyEngine implements AgentEngine {
     const compaction = this.options.autoCompact?.()
     if (compaction) this.autoCompact = compaction
     await this.resume()
+    this.setStatus({ sessionFile: this.transcriptPath() })
     return this.snapshot
   }
 
@@ -263,12 +274,37 @@ ${text.trim()}`,
     return Promise.resolve({ cancelled: false })
   }
 
-  switchSession(): Promise<void> {
-    this.unimplemented('切换会话')
+  /**
+   * Fork the conversation for `/btw`: a copy of the transcript under a new id.
+   *
+   * The side chat then talks to that copy, and closing it switches back to the original, so the
+   * real session never sees the throwaway branch.
+   */
+  async clone(): Promise<string | undefined> {
+    const store = this.options.transcripts
+    if (!store) this.unimplemented('会话克隆')
+    const original = this.sessionId
+    const forkId = `s_${Math.random().toString(16).slice(2, 14)}`
+    await store.save(forkId, this.roots, this.transcript)
+    this.sessionId = forkId
+    this.setStatus({ sessionFile: this.transcriptPath() })
+    // The original id is only needed by the app, which remembers it before cloning.
+    void original
+    return this.transcriptPath()
   }
 
-  clone(): Promise<string | undefined> {
-    this.unimplemented('会话克隆')
+  async switchSession(sessionPath: string): Promise<void> {
+    const store = this.options.transcripts
+    if (!store) this.unimplemented('切换会话')
+    const id = sessionPath.split(/[\\/]/).pop()?.replace(/\.jsonl$/, '')
+    if (!id) throw new Error(`无法识别的会话：${sessionPath}`)
+    const stored = await store.load(id)
+    this.sessionId = id
+    this.transcript = stored?.messages ?? []
+    this.setStatus({ sessionFile: this.transcriptPath() })
+    for (const message of this.transcript) {
+      this.options.onEvent({ type: 'message_end', message })
+    }
   }
 
   abort(): Promise<void> {
@@ -319,6 +355,13 @@ ${text.trim()}`,
     }
   }
 
+  /** Where this session lives; the window and `/btw` treat it as the session file. */
+  private transcriptPath(): string | undefined {
+    const store = this.options.transcripts
+    if (!store || !this.sessionId) return undefined
+    return store.pathFor(this.sessionId)
+  }
+
   private persist(): void {
     const store = this.options.transcripts
     if (!store || !this.sessionId) return
@@ -335,7 +378,15 @@ ${text.trim()}`,
       { name: basename(this.roots.primary), path: this.roots.primary, primary: true },
       ...this.roots.additional.map((root) => ({ name: basename(root), path: root }))
     ])
-    this.tools = await loadWorkspaceTools(modulePath).catch(() => [])
+    const workspace = await loadWorkspaceTools(modulePath).catch(() => [])
+    // Subagents are app-level (they spawn their own processes); the tools just call the bridge.
+    const bridge = this.options.bridge?.()
+    const subagentPath = this.options.subagentModulePath
+    const subagents =
+      bridge && subagentPath
+        ? await loadSubagentTools(subagentPath, bridgeContext(bridge)).catch(() => [])
+        : []
+    this.tools = [...workspace, ...subagents]
     return this.tools
   }
 
@@ -597,7 +648,7 @@ function modelInfo(model: Model<string>): PiModel {
 }
 
 function basename(dir: string): string {
-  const parts = dir.split(/[\/]/).filter(Boolean)
+  const parts = dir.split(/[\\/]/).filter(Boolean)
   return parts[parts.length - 1] ?? dir
 }
 

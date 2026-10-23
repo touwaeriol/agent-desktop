@@ -155,7 +155,14 @@ function createEngine(): AgentEngine {
       autoCompact: () => ({
         enabled: autoCompactEnabled,
         percent: Math.round((desktopConfig.autoCompact?.ratio ?? 0.5) * 100)
-      })
+      }),
+      // Subagent tools reach the app's manager through the same bridge pi uses.
+      bridge: () => {
+        const port = desktopConfig.mcp?.bridgePort
+        const token = desktopConfig.mcp?.bridgeToken
+        return port && token ? { url: `http://127.0.0.1:${port}`, token } : undefined
+      },
+      subagentModulePath: coreToolModule('subagent.mjs')
     })
   }
   return new PiEngine({
@@ -481,11 +488,15 @@ function mcpServerScript(): string {
   )
 }
 
-/** The root-aware tool module the own engine loads: same file pi's MCP server serves. */
-function coreToolsModule(): string | undefined {
+/** A tool module the Prophey engine loads: the same files pi's MCP server serves. */
+function coreToolModule(name: string): string | undefined {
   const script = mcpServerScript()
-  const candidate = path.join(path.dirname(script), 'tools', 'workspace.mjs')
+  const candidate = path.join(path.dirname(script), 'tools', name)
   return existsSync(candidate) ? candidate : undefined
+}
+
+function coreToolsModule(): string | undefined {
+  return coreToolModule('workspace.mjs')
 }
 
 function desktopToolAvailable(): boolean {
@@ -1802,6 +1813,11 @@ function registerIpc(): void {
   ipcMain.handle('pi:btw-start', async (_event, question: string) => {
     const trimmed = question.trim()
     if (!trimmed) return { ok: false, error: '缺少问题' }
+    // The side chat forks the engine's session file and switches back to it on close; the Prophey
+    // engine keeps transcripts, not session files, so the branch bookkeeping does not hold yet.
+    if (currentEngine instanceof PropheyEngine) {
+      return { ok: false, error: 'Prophey 引擎还不支持侧边提问（/btw），可以在设置 → 引擎切回 pi' }
+    }
     if (!currentEngine.running()) return { ok: false, error: 'pi 未运行' }
     if (btwActive) await closeSideChat()
     const generation = ++btwGeneration
