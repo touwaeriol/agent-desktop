@@ -44,6 +44,8 @@ npm run typecheck    # node + web 两个 tsconfig 分别检查
 - 会话前进后退由 `App.tsx` 的 `historyRef`（stack + index，上限 50）驱动：`selectSession(session, { remember: false })` 用于历史跳转，避免再次入栈。
 - 置顶存在 localStorage `pi-pinned-sessions`（路径数组），会话悬停时的第一个 `.session-archive` 按钮是置顶、第二个是归档。**置顶的会话只在 `.pinned-block` 里出现，必须从项目分组里过滤掉**（`groups` 用 `visible = sessions.filter(!pinned)`）——否则同一个会话在两处重复，用户会以为有两条。
 - 侧栏：按 `session.cwd` 分项目，默认每个项目显示 10 条，超出显示“显示其余 N 个”；折叠/展开状态在 `Sidebar` 内部。项目标题右侧 `+` 通过 `pi:new-project-session` 切换 cwd 并开新会话。
+- **一个会话 = 一个 git 仓库**（单仓库会话模式；多仓库 project 是后面一层）。`src/main/repo.ts` 用 `git -C <dir> rev-parse --show-toplevel` 把目录归一化到仓库根，`pi:new-project-session` / `pi:choose-workspace` 都会先归一化，所以 `session.cwd` 就是仓库根、侧栏分组天然按仓库走。仓库信息（分支 / remote / 未提交数）5 秒缓存，`PiStatus.repo` 给输入框的 workspace chip 用，`pi:repos` 给侧栏每组头部的 `⎇ main 8` 徽标用；**不要在渲染层直接跑 git**。
+- 目录不是仓库时 `isRepo: false`，此时不显示分支徽标、行为退回“普通文件夹会话”，不要报错——用户可能就想在非仓库目录里跑。
 - `PiRpcClient` 的 `exit` / `error` 回调必须确认 `this.child === child` 再处理，否则重启时旧进程的退出事件会把新进程引用置空并误报“pi 进程已退出”。
 
 ## Conversation layout

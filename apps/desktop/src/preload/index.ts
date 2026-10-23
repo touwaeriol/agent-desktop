@@ -10,6 +10,7 @@ import type {
   PiStatus,
   PromptImage,
   ProviderAuthType,
+  RepoInfo,
   SessionSummary,
   SpeedMode,
   SubagentView
@@ -20,6 +21,9 @@ const bridge: PiBridge = {
   restart: (cwd?: string) => ipcRenderer.invoke('pi:restart', cwd) as Promise<PiStatus>,
   newProjectSession: (cwd: string) =>
     ipcRenderer.invoke('pi:new-project-session', cwd) as Promise<PiStatus>,
+  repoInfo: (dir?: string) => ipcRenderer.invoke('pi:repo-info', dir) as Promise<RepoInfo>,
+  listRepos: (dirs: string[]) =>
+    ipcRenderer.invoke('pi:repos', dirs) as Promise<Record<string, RepoInfo>>,
   openSession: (sessionPath: string, cwd: string) =>
     ipcRenderer.invoke('pi:open-session', sessionPath, cwd) as Promise<PiStatus>,
   getDesktopConfig: () => ipcRenderer.invoke('desktop:config'),

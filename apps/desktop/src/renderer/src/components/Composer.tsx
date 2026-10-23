@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import type { ModelOption, PiStatus, SpeedMode } from '@shared/types'
 import {
+  BranchIcon,
   CheckIcon,
   ChevronIcon,
   CloseIcon,
@@ -662,10 +663,16 @@ export function Composer({
             <button
               className="chip"
               onClick={onChooseWorkspace}
-              title={`${status.cwd}（切换目录并新建会话）`}
+              title={`${status.cwd}（切换 git 仓库并新建会话）`}
             >
               <FolderIcon size={12} />
               <span>{workspace}</span>
+              {status.repo?.isRepo && status.repo.branch && (
+                <span className="chip-branch">
+                  <BranchIcon size={10} />
+                  {status.repo.branch}
+                </span>
+              )}
             </button>
           </div>
           <div className="composer-right">

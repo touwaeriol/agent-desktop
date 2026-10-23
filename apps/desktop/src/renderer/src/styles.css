@@ -1702,6 +1702,19 @@ button:disabled {
   white-space: nowrap;
 }
 
+/* Branch of the repo the session is scoped to, inside the workspace chip. */
+.chip-branch {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  overflow: hidden;
+  padding-left: 5px;
+  border-left: 1px solid var(--border-strong);
+  color: var(--text-faint);
+  font-size: 10.6px;
+  text-overflow: ellipsis;
+}
+
 .chip span {
   overflow: hidden;
   text-overflow: ellipsis;
@@ -3274,6 +3287,38 @@ button:disabled {
   text-overflow: ellipsis;
   white-space: nowrap;
   font-weight: 600;
+}
+
+/* Repository branch of the group: a session belongs to one repo, so this is the grouping label's
+   second half rather than a separate row. */
+.project-branch {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 110px;
+  overflow: hidden;
+  padding: 1px 5px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--text-faint);
+  font-size: 10.5px;
+  font-weight: 500;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.project-branch.dirty {
+  color: var(--warn-text, var(--text-faint));
+  border-color: var(--border-strong);
+}
+
+.project-branch-dirty {
+  padding: 0 3px;
+  border-radius: 999px;
+  background: var(--bg-hover);
+  font-variant-numeric: tabular-nums;
 }
 
 .project-add {

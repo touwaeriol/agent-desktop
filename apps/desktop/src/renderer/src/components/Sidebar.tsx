@@ -1,10 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import type { PiStatus, SessionSummary } from '@shared/types'
+import type { PiStatus, RepoInfo, SessionSummary } from '@shared/types'
 import {
   ArrowLeftIcon,
   ArrowRightIcon,
   BriefcaseIcon,
   CheckIcon,
+  ArchiveIcon,
+  BranchIcon,
   ChevronIcon,
   CloseIcon,
   EllipsisIcon,
@@ -158,6 +160,7 @@ interface SessionGroup {
 
 export function Sidebar({
   sessions,
+  repos,
   activePath,
   status,
   canGoBack,
@@ -174,6 +177,8 @@ export function Sidebar({
   onCollapse
 }: {
   sessions: SessionSummary[]
+  /** Repository facts per working directory, used for the branch badge in each group head. */
+  repos: Record<string, RepoInfo>
   activePath?: string
   status: PiStatus
   canGoBack: boolean
@@ -728,11 +733,33 @@ export function Sidebar({
                   <button
                     className="project-toggle"
                     onClick={() => toggleCollapsed(group.key)}
-                    title={group.cwd ?? group.label}
+                    title={
+                      group.cwd
+                        ? `${repos[group.cwd]?.root ?? group.cwd}${
+                            repos[group.cwd]?.remote ? `\n${repos[group.cwd]?.remote}` : ''
+                          }`
+                        : group.label
+                    }
                   >
                     <ChevronIcon size={11} className={isCollapsed ? '' : 'open'} />
                     {group.cwd && <FolderIcon size={13} />}
                     <span className="project-name">{group.label}</span>
+                    {group.cwd && repos[group.cwd]?.isRepo && repos[group.cwd]?.branch && (
+                      <span
+                        className={`project-branch ${
+                          (repos[group.cwd]?.dirty ?? 0) > 0 ? 'dirty' : ''
+                        }`}
+                        title={`${repos[group.cwd]?.branch} · ${
+                          repos[group.cwd]?.dirty ?? 0
+                        } 个未提交改动`}
+                      >
+                        <BranchIcon size={10} />
+                        {repos[group.cwd]?.branch}
+                        {(repos[group.cwd]?.dirty ?? 0) > 0 && (
+                          <span className="project-branch-dirty">{repos[group.cwd]?.dirty}</span>
+                        )}
+                      </span>
+                    )}
                   </button>
                   <div className="project-actions">
                     {group.cwd && (

@@ -17,6 +17,7 @@ import { createApiHandler } from './api'
 import * as bridge from './bridge'
 import { applySystemProxy, getProxyInfo } from './proxy'
 import * as profile from './profile'
+import * as repo from './repo'
 import { withRealBash } from './shell'
 import * as speed from './speed'
 import type {
@@ -731,8 +732,25 @@ function statusSnapshot(): PiStatus {
   return {
     ...status,
     autoCompactPercent: autoCompactEnabled ? Math.round(autoCompactRatio() * 100) : undefined,
-    speed: speed.speedState(status.model, currentSpeedMode())
+    speed: speed.speedState(status.model, currentSpeedMode()),
+    repo: currentRepo
   }
+}
+
+/**
+ * Repository of the active session.
+ *
+ * Kept next to the status instead of being fetched per render: `git` is a process launch, and the
+ * composer plus the sidebar both want the branch. Refreshed when pi starts on a directory and when
+ * the window asks for it explicitly.
+ */
+let currentRepo: repo.RepoInfo | undefined
+
+async function refreshRepo(dir: string): Promise<void> {
+  const info = await repo.repoInfo(dir)
+  if (status.cwd !== dir) return
+  currentRepo = info
+  broadcastStatus()
 }
 
 /** Tier saved in the config; the model still decides whether it can be used (see `speed.ts`). */
@@ -859,6 +877,7 @@ async function runStart(cwd?: string, extraArgs: string[] = []): Promise<PiStatu
     const data = await waitForReady()
     status = { phase: 'ready', cwd: workspace }
     applyState(data)
+    void refreshRepo(workspace)
     startCodegraphIndex(workspace)
     return status
   } catch (error) {
@@ -1164,9 +1183,25 @@ function registerIpc(): void {
 
   ipcMain.handle('pi:new-project-session', async (_event, cwd: string) => {
     if (btwActive) await closeSideChat()
-    await saveConfig({ cwd })
-    return startPi(cwd)
+    // A session belongs to one repository: a subdirectory lands on the repo root instead, so the
+    // sidebar groups by repository and the agent's cwd is the repo it is working on.
+    const workspace = await repo.repoRoot(cwd).then((root) => root ?? cwd)
+    await saveConfig({ cwd: workspace })
+    return startPi(workspace)
   })
+
+  ipcMain.handle('pi:repo-info', async (_event, dir?: string) => {
+    const target = dir ?? status.cwd
+    const info = await repo.repoInfo(target)
+    // The window's own lookup doubles as a refresh of the active repository (branch/dirty move).
+    if (path.resolve(target) === path.resolve(status.cwd)) {
+      currentRepo = info
+      broadcastStatus()
+    }
+    return info
+  })
+
+  ipcMain.handle('pi:repos', (_event, dirs: string[]) => repo.repoInfos(dirs))
 
   ipcMain.handle('pi:open-session', async (_event, sessionPath: string, cwd: string) => {
     if (btwActive) await closeSideChat()
@@ -1226,12 +1261,14 @@ function registerIpc(): void {
 
   ipcMain.handle('pi:choose-workspace', async () => {
     const result = await dialog.showOpenDialog(mainWindow!, {
-      title: '选择目录（将在该目录新建会话）',
+      title: '选择一个 git 仓库（将在该仓库新建会话）',
       defaultPath: status.cwd,
       properties: ['openDirectory', 'createDirectory']
     })
     if (result.canceled || result.filePaths.length === 0) return null
-    const cwd = result.filePaths[0]
+    // Picking a subdirectory is normal (people browse to `src/`); the session still belongs to the
+    // repository, so start at its root and keep the grouping honest.
+    const cwd = (await repo.repoRoot(result.filePaths[0])) ?? result.filePaths[0]
     await saveConfig({ cwd })
     return startPi(cwd)
   })

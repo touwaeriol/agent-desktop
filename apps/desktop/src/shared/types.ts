@@ -38,6 +38,8 @@ export interface PiStatus {
   compacting?: boolean
   /** Percentage of the window at which auto-compaction starts; absent when it is off. */
   autoCompactPercent?: number
+  /** The repository the active session works on (a session is scoped to one repo). */
+  repo?: RepoInfo
   /** Processing tier of the next request, plus what the active model supports. */
   speed?: PiSpeedState
   error?: string
@@ -50,6 +52,20 @@ export interface SessionSummary {
   cwd: string
   createdAt: number
   updatedAt: number
+}
+
+/**
+ * The repository a session belongs to. A session is scoped to one git repository (multi-repo
+ * "projects" are a later layer), so this is what the sidebar groups by and what the header shows.
+ */
+export interface RepoInfo {
+  /** Absolute git toplevel, and the session's working directory. */
+  root: string
+  name: string
+  isRepo: boolean
+  branch?: string
+  remote?: string
+  dirty?: number
 }
 
 export interface ContentBlock {
@@ -441,6 +457,10 @@ export interface PiBridge {
   listWorkspaceFiles(): Promise<string[]>
   restart(cwd?: string): Promise<PiStatus>
   newProjectSession(cwd: string): Promise<PiStatus>
+  /** Repository facts for one directory (toplevel, branch, remote, dirty count). */
+  repoInfo(dir?: string): Promise<RepoInfo>
+  /** Same lookup for several directories at once; keys are the resolved paths that were asked for. */
+  listRepos(dirs: string[]): Promise<Record<string, RepoInfo>>
   openSession(sessionPath: string, cwd: string): Promise<PiStatus>
   getDesktopConfig(): Promise<DesktopConfig>
   setSessionMode(mode: 'shared' | 'isolated'): Promise<PiStatus>

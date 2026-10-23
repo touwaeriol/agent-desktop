@@ -5,6 +5,7 @@ import type {
   AskRequest,
   McpState,
   PiStatus,
+  RepoInfo,
   SessionSummary,
   SideChatResult,
   SubagentView
@@ -295,6 +296,31 @@ export default function App(): React.JSX.Element {
       setSessions([])
     }
   }, [])
+
+  /**
+   * Repository facts for every directory that appears in the list, plus the active one.
+   *
+   * A session is scoped to one repository, so this is what the sidebar groups by and what the
+   * header shows (`main · 3 改动`). Refreshed whenever the session list or the working directory
+   * changes; the main process caches each lookup for a few seconds.
+   */
+  const [repos, setRepos] = useState<Record<string, RepoInfo>>({})
+  useEffect(() => {
+    const dirs = [...new Set([status.cwd, ...sessions.map((session) => session.cwd)])].filter(
+      Boolean
+    )
+    if (dirs.length === 0) return
+    let cancelled = false
+    void window.pi
+      .listRepos(dirs)
+      .then((next) => {
+        if (!cancelled) setRepos(next)
+      })
+      .catch(() => undefined)
+    return () => {
+      cancelled = true
+    }
+  }, [sessions, status.cwd])
   const loadMessages = useCallback(async () => {
     try {
       const messages = await window.pi.getMessages()
@@ -1009,6 +1035,7 @@ export default function App(): React.JSX.Element {
       {sidebarOpen && (
         <Sidebar
           sessions={sessions}
+          repos={repos}
           activePath={activePath}
           status={status}
           canGoBack={historyNav.canBack}
