@@ -1,6 +1,6 @@
 {
   "name": "@prophey/mcp-core",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "private": true,
   "description": "Prophey core interaction MCP server (desktop tools such as ask_user_question)",
   "type": "module",
