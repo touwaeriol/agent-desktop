@@ -1,5 +1,5 @@
 /**
- * Registers the Agent Desktop built-in MCP servers for the current pi session.
+ * Registers the Prophey built-in MCP servers for the current pi session.
  *
  * Loaded with `--extension <this file>` by the desktop app only. Everything comes from the
  * environment the desktop passes to the pi child process, so nothing is written to
@@ -55,7 +55,7 @@ const EXTRA_GUIDELINES = [...BATCH_GUIDELINES, ...SEARCH_GUIDELINES]
  * tool is actually declared to the model (see below).
  */
 const GUIDANCE = [
-  '`mcp__desktop__ask_user_question` shows questions in the Agent Desktop window and waits for the user.',
+  '`mcp__desktop__ask_user_question` shows questions in the Prophey window and waits for the user.',
   'It never times out, so the user can answer whenever they like.',
   '',
   'Use it when the answer changes what you build: ambiguous requirements, a real tradeoff between',
@@ -250,7 +250,7 @@ export default function desktopMcp(pi) {  const url = process.env.AGENT_DESKTOP_
       timeout: Number.POSITIVE_INFINITY,
       toolExposure: hiddenTools(toggles, CORE_SERVER),
       description:
-        'Desktop interaction tools for the Agent Desktop window (ask_user_question: ' +
+        'Desktop interaction tools for the Prophey window (ask_user_question: ' +
         'single choice, multi-select, or free-form input).'
     })
   }

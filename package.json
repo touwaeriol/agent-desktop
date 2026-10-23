@@ -1,19 +1,19 @@
 {
-  "name": "agent-desktop",
+  "name": "prophey",
   "private": true,
   "version": "0.3.24",
-  "description": "Agent desktop client",
+  "description": "Prophey — a coding agent desktop client",
   "author": "eriol touwa",
   "workspaces": [
     "apps/*",
     "packages/*"
   ],
   "scripts": {
-    "dev": "npm run dev -w @agent-desktop/desktop",
-    "start": "npm run start -w @agent-desktop/desktop",
-    "build": "npm run build -w @agent-desktop/desktop",
-    "dist": "npm run dist -w @agent-desktop/desktop",
-    "release": "npm run release -w @agent-desktop/desktop",
-    "typecheck": "npm run typecheck -w @agent-desktop/desktop"
+    "dev": "npm run dev -w @prophey/desktop",
+    "start": "npm run start -w @prophey/desktop",
+    "build": "npm run build -w @prophey/desktop",
+    "dist": "npm run dist -w @prophey/desktop",
+    "release": "npm run release -w @prophey/desktop",
+    "typecheck": "npm run typecheck -w @prophey/desktop"
   }
 }

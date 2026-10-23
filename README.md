@@ -1,6 +1,9 @@
-# Agent Desktop
+# Prophey
 
-Electron + React desktop client for the [pi coding agent](https://github.com/badlogic/pi-mono). It connects to a real `pi --mode rpc` process, shares pi's sessions and credentials, and adds a multi-project desktop UI.
+Electron + React desktop client for a coding agent. Prophey runs its own engine
+(`apps/desktop/src/main/agent/prophey-engine.ts`) and keeps the [pi coding agent](https://github.com/badlogic/pi-mono)
+as a swappable engine underneath (`pi --mode rpc`), so pi's sessions and credentials
+still work while the app owns the loop, the tools and the session model.
 
 ## Features
 
@@ -12,6 +15,8 @@ Electron + React desktop client for the [pi coding agent](https://github.com/bad
 - Light and dark themes
 - Conversation outline and user-message timeline
 - Session storage shared with pi, or isolated to the desktop app
+- Own engine (`prophey`): provider call, tool loop over the root-aware tools, and the app's own session list
+- Multi-directory projects: one session can work across several folders, with `root`-scoped tools
 - MCP settings: master switch, server list, and a built-in desktop tool
 - `ask_user_question` tool: agents ask questions in a desktop dialog (single choice, multi-select, free text, answered in order)
 - System proxy support (OAuth, updates, and the pi child process)
@@ -36,7 +41,7 @@ npm run dist     # NSIS installer in release/
 npm run release  # build and publish to GitHub Releases (needs GH_TOKEN)
 ```
 
-The update feed defaults to `touwaeriol/agent-desktop`. Override it with:
+The update feed defaults to `touwaeriol/prophey`. Override it with:
 
 ```bash
 PI_DESKTOP_UPDATE_REPO=owner/repo

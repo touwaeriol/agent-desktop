@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto'
 import { existsSync, promises as fs, unlinkSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { OwnEngine } from './agent/own-engine'
+import { PropheyEngine } from './agent/prophey-engine'
 import { PiEngine } from './agent/pi-engine'
 import { listSessions, readSummary } from './sessions'
 import { SessionStore, toSummary } from './session-store'
@@ -121,7 +121,7 @@ function activeProject(): projects.Project | undefined {
 
 let desktopConfig: DesktopConfig = {}
 
-/** Engine factory: pi stays the default; `own` is the text-only v1. */
+/** Engine factory: pi stays the default; `prophey` is ours. */
 function createEngine(): AgentEngine {
   const shared = {
     onStatus: (next: PiStatus) => {
@@ -144,8 +144,8 @@ function createEngine(): AgentEngine {
     onAssistantError: (message: string) => noteSpeedRejection(message),
     onExit: () => handleExit()
   }
-  if (desktopConfig.engine === 'own') {
-    return new OwnEngine({ ...shared, toolModulePath: coreToolsModule() })
+  if (desktopConfig.engine === 'prophey') {
+    return new PropheyEngine({ ...shared, toolModulePath: coreToolsModule() })
   }
   return new PiEngine({
     ...shared,
@@ -256,8 +256,8 @@ interface DesktopConfig {
   speed?: { mode?: SpeedMode }
   /** Project the window is working in; sessions still start on its primary repository. */
   activeProject?: string
-  /** Which engine runs the turn: `pi` (default) or `own` (text-only v1). */
-  engine?: 'pi' | 'own'
+  /** Which engine runs the turn: `pi` (default) or `prophey` (ours). */
+  engine?: 'pi' | 'prophey'
   /** Repositories the user worked in, most recent first (sidebar "切换仓库" menu). */
   recentRepos?: string[]
   /** Per-repository defaults applied to a new session in that repository. */
@@ -802,7 +802,7 @@ async function buildMcpState(): Promise<McpState> {
     builtin.push({
       name: 'desktop',
       transport: 'stdio',
-      summary: 'Agent Desktop 内置：ask_user_question',
+      summary: 'Prophey 内置：ask_user_question',
       enabled: true,
       exposure: 'direct',
       description: '在桌面窗口弹窗向用户提问（单选 / 多选 / 手动输入）',

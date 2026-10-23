@@ -5,7 +5,7 @@ import { loadWorkspaceTools, toolDeclarations, type CoreTool } from './core-tool
 import type { AgentEngine, AgentWorkspace } from './engine'
 
 /**
- * Our own engine — v1, text only.
+ * Prophey — our own engine, v1.
  *
  * This is the first step of replacing pi's loop: the same contract, driven by our own call to the
  * provider layer (`ModelRuntime.streamSimple`) instead of a child process speaking JSONL. It exists
@@ -18,8 +18,8 @@ import type { AgentEngine, AgentWorkspace } from './engine'
  * Everything it cannot do throws a clear "not implemented" instead of pretending, and it is only
  * selected when `config.engine` is `own`. The default engine stays pi.
  */
-export class OwnEngine implements AgentEngine {
-  readonly id = 'own'
+export class PropheyEngine implements AgentEngine {
+  readonly id = 'prophey'
 
   private snapshot: PiStatus = { phase: 'stopped', cwd: process.cwd() }
   private roots: AgentWorkspace = { primary: process.cwd(), additional: [] }
@@ -112,7 +112,7 @@ export class OwnEngine implements AgentEngine {
   // Each of these is a real gap, not an oversight: they are what pi still provides.
 
   private unimplemented(what: string): never {
-    throw new Error(`own 引擎 v1 还不支持${what}（请切回 pi 引擎）`)
+    throw new Error(`Prophey 引擎 v1 还不支持${what}（请切回 pi 引擎）`)
   }
 
   request<T = Record<string, unknown>>(): Promise<T> {
@@ -210,7 +210,7 @@ export class OwnEngine implements AgentEngine {
       ...this.roots.additional.map((root) => `附加目录：${root}`)
     ]
     return [
-      '你是 Agent Desktop 内置引擎的助手。',
+      '你是 Prophey 内置引擎的助手。',
       '工具都带 `root` 参数（目录名），路径相对该目录；越界会被拒绝。用 workspace_roots 查目录名。',
       '改文件前先读，改完再读回确认；命令用 run_bash 并指明目录。',
       ...roots

@@ -11,10 +11,10 @@ const INITIAL_DELAY = 5000
 
 const repoSetting = process.env.PI_DESKTOP_UPDATE_REPO
 const defaultOwner = process.env.PI_DESKTOP_UPDATE_OWNER ?? 'touwaeriol'
-const [owner = defaultOwner, repo = 'agent-desktop'] =
+const [owner = defaultOwner, repo = 'prophey'] =
   repoSetting && repoSetting.includes('/')
     ? repoSetting.split('/').slice(0, 2)
-    : [defaultOwner, repoSetting ?? 'agent-desktop']
+    : [defaultOwner, repoSetting ?? 'prophey']
 const genericUrl = process.env.PI_DESKTOP_UPDATE_URL
 const releasesUrl =
   process.env.PI_DESKTOP_RELEASES_URL ??

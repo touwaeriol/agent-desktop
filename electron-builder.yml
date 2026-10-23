@@ -1,5 +1,5 @@
 appId: dev.agent.desktop
-productName: Agent Desktop
+productName: Prophey
 directories:
   app: apps/desktop
   output: release
@@ -24,7 +24,7 @@ asarUnpack:
 win:
   target:
     - nsis
-  artifactName: Agent-Desktop-${version}-Setup.${ext}
+  artifactName: Prophey-${version}-Setup.${ext}
 nsis:
   oneClick: false
   allowToChangeInstallationDirectory: true
@@ -33,4 +33,4 @@ nsis:
 publish:
   provider: github
   owner: touwaeriol
-  repo: agent-desktop
+  repo: prophey

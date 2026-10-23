@@ -34,7 +34,7 @@ jobs:
             release/*.exe \
             release/latest.yml \
             release/*.blockmap \
-            --title "Agent Desktop ${GITHUB_REF_NAME}" \
+            --title "Prophey ${GITHUB_REF_NAME}" \
             --generate-notes
       - name: Upload installer artifact
         uses: actions/upload-artifact@v4
