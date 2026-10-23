@@ -1813,11 +1813,6 @@ function registerIpc(): void {
   ipcMain.handle('pi:btw-start', async (_event, question: string) => {
     const trimmed = question.trim()
     if (!trimmed) return { ok: false, error: '缺少问题' }
-    // The side chat forks the engine's session file and switches back to it on close; the Prophey
-    // engine keeps transcripts, not session files, so the branch bookkeeping does not hold yet.
-    if (currentEngine instanceof PropheyEngine) {
-      return { ok: false, error: 'Prophey 引擎还不支持侧边提问（/btw），可以在设置 → 引擎切回 pi' }
-    }
     if (!currentEngine.running()) return { ok: false, error: 'pi 未运行' }
     if (btwActive) await closeSideChat()
     const generation = ++btwGeneration
