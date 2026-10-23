@@ -1,6 +1,7 @@
 import type { Model } from '@earendil-works/pi-ai'
 import type { PiModel, PiStatus, PromptImage, PromptResult } from '@shared/types'
 import * as providers from '../providers'
+import * as speed from '../speed'
 import type { TranscriptStore } from '../transcript-store'
 import { loadMcpTools } from './mcp-client'
 import {
@@ -57,6 +58,8 @@ export class PropheyEngine implements AgentEngine {
       bridge?: () => { url: string; token: string } | undefined
       /** Directory holding `subagent.mjs`; absent when subagents are off. */
       subagentModulePath?: string
+      /** The processing tier the window selected; resolved per model. */
+      speedMode?: () => 'standard' | 'fast' | 'ultrafast'
       /** The app's MCP endpoints (`/mcp/<key>` on the bridge), configured for this workspace. */
       mcpEndpoints?: (
         workspace: AgentWorkspace
@@ -387,10 +390,9 @@ ${text.trim()}`,
     // Subagents are app-level (they spawn their own processes); the tools just call the bridge.
     const bridge = this.options.bridge?.()
     const subagentPath = this.options.subagentModulePath
+    const context = bridge ? bridgeContext(bridge) : undefined
     const subagents =
-      bridge && subagentPath
-        ? await loadSubagentTools(subagentPath, bridgeContext(bridge)).catch(() => [])
-        : []
+      context && subagentPath ? await loadSubagentTools(subagentPath, context).catch(() => []) : []
     // MCP servers (codegraph / warpgrep / web) over the same bridge endpoints pi connects to.
     const endpoints = await this.options.mcpEndpoints?.(this.workspace()).catch(() => [])
     const mcp = endpoints && endpoints.length > 0 ? await loadMcpTools(endpoints).catch(() => []) : []
@@ -525,6 +527,7 @@ ${text.trim()}`,
     model: Model<string>,
     tools: CoreTool[]
   ): Promise<{ ok: true; message: Record<string, unknown> } | { ok: false; error: string }> {
+    const tier = speed.resolveSpeedMode(modelInfo(model), this.options.speedMode?.() ?? 'standard')
     const stream = runtime.streamSimple(
       model,
       {
@@ -532,7 +535,10 @@ ${text.trim()}`,
         messages: this.transcript as never,
         tools: toolDeclarations(tools)
       },
-      {}
+      // `samplingParams` is merged into the request body as-is by the OpenAI adapters, which is how
+      // `service_tier` reaches the provider. Anthropic's fast mode also needs a body field the SDK
+      // does not expose, so it stays on the pi engine.
+      tier === 'standard' ? {} : { samplingParams: { service_tier: tier } }
     )
     let partial: Record<string, unknown> | undefined
     for await (const event of stream as AsyncIterable<Record<string, unknown>>) {

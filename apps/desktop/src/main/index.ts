@@ -163,7 +163,8 @@ function createEngine(): AgentEngine {
         return port && token ? { url: `http://127.0.0.1:${port}`, token } : undefined
       },
       subagentModulePath: coreToolModule('subagent.mjs'),
-      mcpEndpoints: (workspace) => mcpEndpointsFor(workspace)
+      mcpEndpoints: (workspace) => mcpEndpointsFor(workspace),
+      speedMode: () => currentSpeedMode()
     })
   }
   return new PiEngine({
