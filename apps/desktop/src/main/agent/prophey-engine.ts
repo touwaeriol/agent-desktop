@@ -29,6 +29,8 @@ export class PropheyEngine implements AgentEngine {
   private transcript: Array<Record<string, unknown>> = []
   private tools: CoreTool[] | undefined
   private sessionId: string | undefined
+  /** Auto-compaction: enabled plus the percentage of the window that triggers it. */
+  private autoCompact: { enabled: boolean; percent: number } = { enabled: false, percent: 50 }
   private loaded = false
 
   constructor(
@@ -42,6 +44,8 @@ export class PropheyEngine implements AgentEngine {
       transcripts?: TranscriptStore
       /** Current session id; the app allocates and rotates it. */
       sessionId?: () => string | undefined
+      /** The app's auto-compaction setting (same value the threshold dropdown writes). */
+      autoCompact?: () => { enabled: boolean; percent: number }
     }
   ) {}
 
@@ -84,6 +88,8 @@ export class PropheyEngine implements AgentEngine {
     // Pick a model up front: the window reads it from the status, and an unset model shows as
     // "未登录 / 无可用模型" even though the engine is perfectly able to run.
     if (!this.model) await this.pickModel().catch(() => undefined)
+    const compaction = this.options.autoCompact?.()
+    if (compaction) this.autoCompact = compaction
     await this.resume()
     return this.snapshot
   }
@@ -152,8 +158,27 @@ export class PropheyEngine implements AgentEngine {
     this.unimplemented('思考等级')
   }
 
-  stats(): Promise<{ tokens?: { input?: number; output?: number; total?: number } }> {
-    this.unimplemented('用量统计')
+  /**
+   * Usage as far as we can tell it.
+   *
+   * The provider reports usage per response, but the transcript is what fills the window, so the
+   * number that matters for the meter is an estimate of the whole conversation (~4 characters per
+   * token, which is close enough for a percentage and never blocks on a round trip).
+   */
+  async stats(): Promise<{
+    tokens?: { input?: number; output?: number; total?: number }
+    contextUsage?: { tokens?: number | null; contextWindow?: number; percent?: number | null }
+  }> {
+    const tokens = estimateTokens(this.transcript)
+    const contextWindow = this.model?.contextWindow
+    return {
+      tokens: { input: tokens, output: 0, total: tokens },
+      contextUsage: {
+        tokens,
+        contextWindow,
+        percent: contextWindow ? Math.min(100, (tokens / contextWindow) * 100) : null
+      }
+    }
   }
 
   async messages(): Promise<unknown[]> {
@@ -169,12 +194,65 @@ export class PropheyEngine implements AgentEngine {
     return Promise.resolve(text || null)
   }
 
-  compact(): Promise<{ summary?: string }> {
-    this.unimplemented('上下文压缩')
+  async setAutoCompaction(options: { enabled: boolean; reserveTokens?: number }): Promise<void> {
+    // Nothing to configure in the engine: the limit comes from the model window and the app's ratio.
+    this.autoCompact = { ...this.autoCompact, enabled: options.enabled }
+    this.setStatus({ autoCompactPercent: options.enabled ? this.autoCompact.percent : undefined })
   }
 
-  setAutoCompaction(): Promise<void> {
-    this.unimplemented('自动压缩')
+  /**
+   * Rewrite the context: the model summarizes the conversation, and the summary replaces it.
+   *
+   * Same idea as pi's compaction — the transcript becomes a single "here is what happened" message,
+   * so the next turn starts with room to work instead of replaying everything.
+   */
+  async compact(instructions?: string): Promise<{ summary?: string }> {
+    const model = this.model ?? (await this.pickModel())
+    if (!model) throw new Error('没有可用的模型，无法压缩')
+    if (this.transcript.length === 0) return {}
+    const runtime = await providers.getRuntime()
+    this.setStatus({ compacting: true })
+    this.options.onEvent({ type: 'compaction_start', reason: 'manual' })
+    try {
+      const stream = runtime.streamSimple(
+        model,
+        {
+          systemPrompt:
+            '你在压缩一段编码会话的上下文。输出一段中文摘要，保留：用户的目标、已做出的决定、' +
+            '改过/读过的文件与其作用、未完成的工作、以及继续工作需要的具体事实（路径、命令、' +
+            '错误信息）。不要寒暄，不要复述工具输出全文。' +
+            (instructions?.trim() ? `
+
+用户额外要求：${instructions.trim()}` : ''),
+          messages: this.transcript as never
+        },
+        {}
+      )
+      let text = ''
+      let partial: Record<string, unknown> | undefined
+      for await (const event of stream as AsyncIterable<Record<string, unknown>>) {
+        if (event.type === 'text_delta') {
+          partial = event.partial as Record<string, unknown>
+        }
+        if (event.type === 'text_end') text = String((event as { content?: unknown }).content ?? text)
+        if (event.type === 'error') throw new Error(describeError(event.error))
+      }
+      if (!text.trim() && partial) text = textOf(partial)
+      if (!text.trim()) throw new Error('压缩没有返回内容')
+      this.transcript = [
+        {
+          role: 'user',
+          content: `【此前对话摘要】
+${text.trim()}`,
+          timestamp: Date.now()
+        }
+      ]
+      this.persist()
+      this.options.onEvent({ type: 'compaction_end', summary: text.trim() })
+      return { summary: text.trim() }
+    } finally {
+      this.setStatus({ compacting: false })
+    }
   }
 
   newSession(): Promise<{ cancelled?: boolean }> {
@@ -203,6 +281,13 @@ export class PropheyEngine implements AgentEngine {
     await this.prompt(message)
   }
   // --- the turn --------------------------------------------------------------------------------
+
+  /** True when auto-compaction is on and the transcript is past the trigger point. */
+  private shouldCompact(): boolean {
+    const window = this.model?.contextWindow
+    if (!this.autoCompact.enabled || !window || this.transcript.length === 0) return false
+    return estimateTokens(this.transcript) >= (window * this.autoCompact.percent) / 100
+  }
 
   /** First configured model, published to the status so the window shows it. */
   private async pickModel(): Promise<Model<string> | undefined> {
@@ -290,6 +375,11 @@ export class PropheyEngine implements AgentEngine {
     }
     if (!model) return { ok: false, error: '没有可用的模型' }
     const tools = await this.toolSet()
+    // Auto-compaction happens before the turn, never in the middle of one: a summary request in the
+    // middle of a tool loop would throw away the results the model is about to use.
+    if (this.shouldCompact()) {
+      await this.compact().catch(() => undefined)
+    }
 
     const user: Record<string, unknown> = {
       role: 'user',
@@ -461,6 +551,25 @@ export class PropheyEngine implements AgentEngine {
     this.options.onEvent({ type: 'agent_settled' })
     this.options.onSettled()
   }
+}
+
+/** Rough token count of the transcript; good enough for a meter and a compaction trigger. */
+function estimateTokens(messages: Array<Record<string, unknown>>): number {
+  let characters = 0
+  for (const message of messages) {
+    characters += JSON.stringify(message).length
+  }
+  return Math.ceil(characters / 4)
+}
+
+/** Concatenated text blocks of a message. */
+function textOf(message: Record<string, unknown>): string {
+  const content = Array.isArray(message.content) ? message.content : []
+  return content
+    .map((block) =>
+      block && typeof block === 'object' && 'text' in block ? String((block as { text: unknown }).text) : ''
+    )
+    .join('')
 }
 
 /** Rounds per turn: a tool-using answer rarely needs more, and it bounds a runaway loop. */

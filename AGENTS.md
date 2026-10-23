@@ -133,7 +133,8 @@ npm run typecheck    # node + web 两个 tsconfig 分别检查
 - Prophey 引擎的工具**复用 pi 那边同一份实现**：`agent/core-tools.ts` 按绝对路径 import `packages/mcp-core/tools/workspace.mjs`（打包后在 `resources/mcp/tools/`），不复制第二份；工具调用的 `root` 语义、越界拒绝、Git Bash 路径全部一致。
 - **会话持久化**：`transcript-store.ts` 把 transcript 写 `userData/transcripts/<sessionId>.jsonl`（头行 + 每条消息一行，全量重写、原子 rename）；`start()` 时 resume 一次并把历史按 `message_end` 重放给窗口，所以刷新/重启后对话还在。sessionId 存在 `config.propheySessionId`，新建会话时轮换。
 - **重试**：`streamRoundWithRetry` 对瞬时错误（429/5xx/timeout/ECONNRESET/流提前关闭）退避重试 3 次，发 `auto_retry_start/end`；鉴权/参数错误不重试。
-- Prophey 引擎还缺：上下文压缩、子代理、`/btw`、扩展钩子。这些方法一律抛「Prophey 引擎 v1 还不支持…」。切换引擎是热替换（`desktop:set-engine` 重建引擎对象并重启会话），不需要退出应用。
+- **压缩**：`compact()` 让模型把对话压成一段结构化中文摘要（目标/决定/改过的文件/未完成/继续所需事实），摘要作为唯一一条 user 消息替换 transcript；`shouldCompact()` 在**每轮开始前**按 `contextWindow × 比例` 判断是否自动压缩（配置来自窗口同一个阈值设置，不重启），并发 `compaction_start/end`。`stats()` 用 transcript 估算 token（~4 字符/token）填 `contextUsage`，所以用量环和自动压缩阈值在 Prophey 引擎下也工作。
+- Prophey 引擎还缺：子代理、`/btw`、扩展钩子。这些方法一律抛「Prophey 引擎 v1 还不支持…」。切换引擎是热替换（`desktop:set-engine` 重建引擎对象并重启会话），不需要退出应用。
 - 改名说明：产品名是 Prophey，但 `app.setName('agent-desktop')` **故意保留**——它决定 `%APPDATA%/agent-desktop`，改了等于丢失用户的配置、会话、项目和凭据。
 - 还没搬完的部分：`/btw` 的 clone/switch、压缩阈值同步、登录消息、MCP 启动参数装配（`prepare` 仍由 `index.ts` 提供，这是刻意的）。
 

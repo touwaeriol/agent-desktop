@@ -150,7 +150,12 @@ function createEngine(): AgentEngine {
       ...shared,
       toolModulePath: coreToolsModule(),
       transcripts: new TranscriptStore(path.join(app.getPath('userData'), 'transcripts')),
-      sessionId: () => desktopConfig.propheySessionId
+      sessionId: () => desktopConfig.propheySessionId,
+      // The same setting the window's threshold dropdown writes.
+      autoCompact: () => ({
+        enabled: autoCompactEnabled,
+        percent: Math.round((desktopConfig.autoCompact?.ratio ?? 0.5) * 100)
+      })
     })
   }
   return new PiEngine({
