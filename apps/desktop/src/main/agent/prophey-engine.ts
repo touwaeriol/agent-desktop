@@ -51,8 +51,10 @@ export class PropheyEngine implements AgentEngine {
       toolModulePath?: string
       /** Where our own transcripts live; without it the conversation stays in memory. */
       transcripts?: TranscriptStore
-      /** Current session id; the app allocates and rotates it. */
+      /** Current session id; the app allocates it. */
       sessionId?: () => string | undefined
+      /** Ask the app for a fresh session id (it also persists it). */
+      newSessionId?: () => Promise<string | undefined>
       /** The app's auto-compaction setting (same value the threshold dropdown writes). */
       autoCompact?: () => { enabled: boolean; percent: number }
       /** Bridge URL/token: how the subagent tools reach the app's manager. */
@@ -129,6 +131,10 @@ export class PropheyEngine implements AgentEngine {
   setStatus(patch: Partial<PiStatus>): void {
     this.snapshot = { ...this.snapshot, ...patch }
     this.options.onStatus(this.snapshot)
+  }
+
+  poll(): void {
+    // Nothing to poll: this engine owns the state it reports.
   }
 
   async refresh(): Promise<void> {
@@ -273,12 +279,15 @@ ${text.trim()}`,
     }
   }
 
-  newSession(): Promise<{ cancelled?: boolean }> {
+  async newSession(): Promise<{ cancelled?: boolean }> {
     this.transcript = []
-    // A new session means a new transcript file: ask the app for the id it just allocated.
-    this.sessionId = this.options.sessionId?.() ?? this.sessionId
+    // A new session means a new transcript file; the app owns the id so it can persist it.
+    this.sessionId =
+      (await this.options.newSessionId?.()) ?? this.options.sessionId?.() ?? this.sessionId
+    // The window and the side chat read the session from the status, so publish the new file.
+    this.setStatus({ sessionFile: this.transcriptPath() })
     this.persist()
-    return Promise.resolve({ cancelled: false })
+    return { cancelled: false }
   }
 
   /**
@@ -556,7 +565,9 @@ ${text.trim()}`,
       model,
       {
         systemPrompt: this.systemPrompt(),
-        messages: this.transcript as never,
+        // A copy: the SDK normalizes the array in place, and a system message must not end up in
+        // our transcript (it would be replayed and persisted on every turn).
+        messages: [...this.transcript] as never,
         tools: toolDeclarations(tools)
       },
       fastOptions

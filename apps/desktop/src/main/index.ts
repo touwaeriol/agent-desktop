@@ -151,6 +151,12 @@ function createEngine(): AgentEngine {
       toolModulePath: coreToolsModule(),
       transcripts: new TranscriptStore(path.join(app.getPath('userData'), 'transcripts')),
       sessionId: () => desktopConfig.propheySessionId,
+      // The app owns the id, so it is saved before the engine starts writing the new transcript.
+      newSessionId: async () => {
+        const id = `s_${Math.random().toString(16).slice(2, 14)}`
+        await saveConfig({ propheySessionId: id })
+        return id
+      },
       // The same setting the window's threshold dropdown writes.
       autoCompact: () => ({
         enabled: autoCompactEnabled,
@@ -1494,10 +1500,6 @@ function registerIpc(): void {
     if (!currentEngine.running()) return { ok: false, error: 'pi 未运行' }
     if (btwActive) await closeSideChat()
     try {
-      // Our engine keeps its own transcript, so a new session is a new file.
-      if (currentEngine instanceof PropheyEngine) {
-        await saveConfig({ propheySessionId: `s_${Math.random().toString(16).slice(2, 14)}` })
-      }
       const response = await currentEngine.newSession()
       return { ok: true, cancelled: response.cancelled }
     } catch (error) {
@@ -2249,7 +2251,7 @@ app.whenReady().then(async () => {
     await saveConfig({ propheySessionId: `s_${Math.random().toString(16).slice(2, 14)}` })
   }
   currentEngine = createEngine()
-  if (currentEngine instanceof PiEngine) currentEngine.watch()
+  currentEngine.poll()
   // Before anything reads a provider, model list or MCP config: point the modules at the profile.
   applyProfile()
   await loadToolCache()

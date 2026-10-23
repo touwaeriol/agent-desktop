@@ -85,6 +85,13 @@ export interface AgentEngine {
   clone(): Promise<string | undefined>
   abort(): Promise<void>
 
+  /**
+   * Start whatever background polling the engine needs.
+   *
+   * pi has to poll `get_state` because its event stream is not authoritative about `busy`; an
+   * engine that owns its own state has nothing to poll. Called once, after the engine is created.
+   */
+  poll(): void
   /** Re-read the run state from the engine (authoritative `busy`). */
   refresh(): Promise<void>
   /** Merge a patch into the state the window sees. */

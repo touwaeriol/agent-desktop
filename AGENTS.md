@@ -139,6 +139,8 @@ npm run typecheck    # node + web 两个 tsconfig 分别检查
 - **MCP 也通了**：`agent/mcp-client.ts` 直接连桥接的 `/mcp/<key>`（streamable HTTP，`initialize` + `tools/list` + `tools/call`），工具名保持 `mcp__<server>__<tool>`，和 pi 完全一致。端点由 `mcpEndpointsFor(workspace)` 生成（同一套 `buildEngineTargets` / `buildEngineRegistrations`，所以多根仓库的 `codegraph__<repo>` 也在）。实测：Prophey 引擎下调 `mcp__codegraph__codegraph_search` 拿到了真实路径。
 - **速度档位（两家都支持）**：用 SDK 的 `onPayload`（改请求体）+ `transformHeaders`（加 beta 头）两个钩子，不要去 patch 全局 fetch。OpenAI 写 `service_tier: fast|ultrafast`；Anthropic 写 `speed: "fast"` 并把 `fast-mode-2026-02-01` 合并进已有的 `anthropic-beta`（不重复、不覆盖别的 beta）。档位由 `speed.resolveSpeedMode` 按 provider 判断，非目标服务商不会发。**注意：两家都没有在真实付费账号上验证过**（当前账号不支持该档位），只验证了生成的 payload/header 形状。
 - **`ask_user_question` 也通了**：工具直接调桥接 `/ask`（走 `node:http`，**不要用 fetch**——主进程装了全局 undici proxy dispatcher，loopback 请求会 `fetch failed`，而且 undici 有 300s headers 超时，等待用户回答必然超时）。实测：引擎调工具 → 窗口弹窗 → 回答后模型拿到选择。
+- **契约里没有 `instanceof`**：`poll()` 取代了 `PiEngine.watch()`（pi 需要轮询 `get_state`，Prophey 无事可做），新会话的 id 由 `newSessionId()` 回调交给引擎（应用负责持久化），所以 `index.ts` 里不再有引擎类型判断。
+- **已知小瑕疵**：Prophey 的 transcript 里会出现一条内容为空的 `system` 消息（provider 侧归一化时混进来的），不影响对话与持久化，但会让 `getMessages()` 多一条。原因还没定位。
 - **默认引擎是 Prophey**（`config.engine` 不设或不是 `'pi'` 时都走它）；`pi` 仍是可切换的另一套实现。
 - **MCP 工具名不带 `mcp__` 前缀**：那个前缀是 pi 为了给 MCP 工具分命名空间才有的，我们自己的循环不需要——工具名就是 `<server>__<tool>`（如 `codegraph__codegraph_search`、`codegraph__git__codegraph_search`）。pi 引擎那边仍然是 `mcp__…`，所以两边的工具名不同，提示词不要写死名字。
 - **系统提示词由引擎自己拼**（`systemPrompt()`）：角色、`<workspace>`（主目录 + 附加目录）、`<tools>`（root 语义、先读后改、run_bash 指目录）、多根时再加 `<project>`（绝对路径、每条 bash 是新 shell、按目录选工具集）。没有扩展钩子参与。

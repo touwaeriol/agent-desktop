@@ -245,7 +245,7 @@ export class PiEngine implements AgentEngine {
    * clear it, and the window would keep showing a finished run as running with every queued message
    * stranded behind it. `get_state` is cheap, so ask the engine and let the answer win.
    */
-  watch(): void {
+  poll(): void {
     setInterval(() => {
       if (!this.isBusy || !this.rpc.running) return
       void this.refresh()
