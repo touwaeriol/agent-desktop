@@ -130,6 +130,13 @@ npm run typecheck    # node + web 两个 tsconfig 分别检查
 - `engine.prompt()` 承担「窗口和 pi 对忙碌判断不一致」的全部兜底（压缩中等空闲后重试、`already processing` 改发 `followUp` 并回 `queued: true`），所以它是唯一发送入口；不要在别处再包一层重试。
 - 还没搬完的部分：`/btw` 的 clone/switch、压缩阈值同步、登录消息、MCP 启动参数装配（`prepare` 仍由 `index.ts` 提供，这是刻意的）。
 
+## 会话存储（我们自己的）
+
+- `src/main/session-store.ts`：`SessionStore` 拥有会话列表（`%APPDATA%/agent-desktop/sessions.json`：`id / path / cwd / additional / projectId / title / createdAt / updatedAt`）。**窗口只读这个 store**，pi 的 JSONL 只是 `path` 这个引擎私有字段，换引擎时列表、排序、分组都不用动。
+- 首次启动 `importPiSessions()` 把已有 pi 会话导入一次（走 `sessions.ts` 的 `listSessions`/`readSummary`）；之后 `rememberSession()` 在 `sessionFile` 变化、`session_info_changed`、`agent_settled` 时 upsert。新会话还没有名字时用 `readSummary` 读文件头取第一条用户消息当标题——否则侧栏会显示文件名。
+- `pi:list-sessions` 先 `prune()` 掉文件已不存在的记录，再返回 `toSummary()`（形状和以前一样，渲染层不用改）。
+- 别在渲染层或别处再扫 pi 的 session 目录：那等于把引擎的存储格式当数据模型，正是这层要解掉的耦合。
+
 ## 项目（多仓库）
 
 - `src/main/projects.ts`：`ProjectStore`（`projects.json`，原子写、坏文件静默当空）+ `renderProjectSection()`。一个 project = 多个仓库根，**恰好一个 primary**，它是 pi 的 cwd。

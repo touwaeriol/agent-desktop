@@ -39,7 +39,8 @@ function textOfContent(content: unknown): string {
   return ''
 }
 
-async function readSummary(file: string): Promise<SessionSummary | null> {
+/** Read the head of one session file: cwd, title (or first user message) and timestamps. */
+export async function readSummary(file: string): Promise<SessionSummary | null> {
   let handle
   try {
     const stat = await fs.stat(file)

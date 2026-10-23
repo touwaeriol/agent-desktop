@@ -4,7 +4,8 @@ import { existsSync, promises as fs, unlinkSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { PiEngine, modelFromState } from './agent/pi-engine'
-import { listSessions } from './sessions'
+import { listSessions, readSummary } from './sessions'
+import { SessionStore, toSummary } from './session-store'
 import * as providers from './providers'
 import * as updates from './updates'
 import * as mcp from './mcp'
@@ -59,6 +60,58 @@ let configPending = false
  */
 let projectStore: projects.ProjectStore | undefined
 
+/**
+ * The app's own session list.
+ *
+ * pi's JSONL files are the engine's storage; the window reads this store instead, so swapping the
+ * engine will not change how sessions are listed, sorted or grouped.
+ */
+let sessionStore: SessionStore | undefined
+
+/** One-time import of the sessions that predate the store. */
+async function importPiSessions(): Promise<void> {
+  if (!sessionStore) return
+  const existing = sessionStore.list()
+  if (existing.length > 0) return
+  const summaries = await listSessions(currentSessionDir()).catch(() => [])
+  for (const summary of summaries) {
+    await sessionStore
+      .upsert({
+        path: summary.path,
+        cwd: summary.cwd,
+        title: summary.title,
+        createdAt: summary.createdAt,
+        updatedAt: summary.updatedAt
+      })
+      .catch(() => undefined)
+  }
+}
+
+/** Record (or refresh) the session the engine is currently running. */
+async function rememberSession(extra: { title?: string } = {}): Promise<void> {
+  if (!sessionStore) return
+  const file = status.sessionFile
+  if (!file) return
+  let title = status.sessionName ?? extra.title
+  // A brand-new session has no name yet; the first user message is what the sidebar shows, and the
+  // engine's file head is the cheapest place to find it.
+  const known = sessionStore.byPath(file)
+  if (!title && (!known || !known.title)) {
+    const summary = await readSummary(file).catch(() => null)
+    if (summary) title = summary.title
+  }
+  await sessionStore
+    .upsert({
+      path: file,
+      cwd: status.cwd,
+      ...(title ? { title } : {}),
+      additional: engine.workspace().additional,
+      ...(desktopConfig.activeProject ? { projectId: desktopConfig.activeProject } : {}),
+      updatedAt: Date.now()
+    })
+    .catch(() => undefined)
+}
+
 /** The project the window is working in, when one is selected. */
 function activeProject(): projects.Project | undefined {
   const id = desktopConfig.activeProject
@@ -101,7 +154,11 @@ const engine = new PiEngine({
   sessionArgs: () => sessionArgs(),
   sessionDirArgs: () => sessionDirArgs(),
   onStatus: (next) => {
+    const previous = status
     status = next
+    // A new or renamed session should show up in the list without waiting for a run to settle.
+    if (next.sessionFile && next.sessionFile !== previous.sessionFile) void rememberSession()
+    else if (next.sessionName && next.sessionName !== previous.sessionName) void rememberSession()
   },
   onEvent: (record) => {
     // While the `/btw` panel is open the window must not see the fork's transcript.
@@ -109,6 +166,7 @@ const engine = new PiEngine({
     mainWindow?.webContents.send('pi:event', record)
   },
   onSettled: () => {
+    void rememberSession()
     if (!configPending) return
     // The run is over, so the deferred MCP/agent restart can finally happen.
     configPending = false
@@ -1366,7 +1424,14 @@ function registerIpc(): void {
     return response.data?.messages ?? []
   })
 
-  ipcMain.handle('pi:list-sessions', () => listSessions(currentSessionDir()))
+  ipcMain.handle('pi:list-sessions', async () => {
+    if (!sessionStore) return listSessions(currentSessionDir())
+    await sessionStore.load()
+    await importPiSessions()
+    // A session deleted from disk (or by another window) must not stay in the list.
+    await sessionStore.prune((file) => !existsSync(file)).catch(() => undefined)
+    return sessionStore.list().map(toSummary)
+  })
 
   ipcMain.handle('pi:session-stats', async () => {
     if (!engine.running()) return {}
@@ -2104,6 +2169,9 @@ app.whenReady().then(async () => {
   // Projects live beside the config, in userData; the store reads the file on first use.
   projectStore = new projects.ProjectStore(path.join(app.getPath('userData'), 'projects.json'))
   await projectStore.load().catch(() => undefined)
+  // The window's session list: ids, titles and workspaces we own; pi's files are engine storage.
+  sessionStore = new SessionStore(path.join(app.getPath('userData'), 'sessions.json'))
+  await sessionStore.load().catch(() => undefined)
   // Before anything reads a provider, model list or MCP config: point the modules at the profile.
   applyProfile()
   await loadToolCache()
