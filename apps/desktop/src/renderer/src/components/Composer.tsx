@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
-import type { ModelOption, PiStatus } from '@shared/types'
+import type { ModelOption, PiStatus, SpeedMode } from '@shared/types'
 import {
   CheckIcon,
   ChevronIcon,
@@ -41,6 +41,19 @@ const THINKING_LABELS: Record<string, string> = {
   xhigh: '极高',
   max: '最大'
 }
+
+/** Request-level processing tiers; the labels match what each vendor sells them as. */
+const SPEED_LABELS: Record<SpeedMode, string> = {
+  standard: '标准',
+  fast: '快速',
+  ultrafast: '极速'
+}
+
+const SPEED_OPTIONS: Array<{ mode: SpeedMode; label: string; hint: string }> = [
+  { mode: 'standard', label: '标准', hint: '服务商默认档位，计价与平时一致' },
+  { mode: 'fast', label: '快速', hint: 'OpenAI service_tier=fast / Claude speed=fast，按快速档计价' },
+  { mode: 'ultrafast', label: '极速', hint: 'OpenAI service_tier=ultrafast，仅 gpt-6-astra / gpt-6.1-sol' }
+]
 
 export function Composer({
   value,
@@ -97,6 +110,9 @@ export function Composer({
   const [levels, setLevels] = useState<string[]>([])
   const [thinkingLoading, setThinkingLoading] = useState(false)
   const [thinkingError, setThinkingError] = useState<string>()
+  const [speedOpen, setSpeedOpen] = useState(false)
+  const [speedBusy, setSpeedBusy] = useState(false)
+  const [speedError, setSpeedError] = useState<string>()
   const [preview, setPreview] = useState<DraftImage>()
   const [dragging, setDragging] = useState(false)
   const [slashIndex, setSlashIndex] = useState(0)
@@ -282,12 +298,18 @@ export function Composer({
   }, [contextOpen])
 
   useEffect(() => {
-    if (!thinkingOpen) return
+    if (!thinkingOpen && !speedOpen) return
     const onMouseDown = (event: MouseEvent): void => {
-      if (!pickerRef.current?.contains(event.target as Node)) setThinkingOpen(false)
+      if (!pickerRef.current?.contains(event.target as Node)) {
+        setThinkingOpen(false)
+        setSpeedOpen(false)
+      }
     }
     const onKeyDown = (event: KeyboardEvent): void => {
-      if (event.key === 'Escape') setThinkingOpen(false)
+      if (event.key === 'Escape') {
+        setThinkingOpen(false)
+        setSpeedOpen(false)
+      }
     }
     document.addEventListener('mousedown', onMouseDown)
     document.addEventListener('keydown', onKeyDown)
@@ -295,7 +317,7 @@ export function Composer({
       document.removeEventListener('mousedown', onMouseDown)
       document.removeEventListener('keydown', onKeyDown)
     }
-  }, [thinkingOpen])
+  }, [thinkingOpen, speedOpen])
 
   const openModelPicker = async (): Promise<void> => {
     if (modelOpen) {
@@ -352,6 +374,7 @@ export function Composer({
       return
     }
     setThinkingOpen(true)
+    setSpeedOpen(false)
     setThinkingLoading(true)
     setThinkingError(undefined)
     try {
@@ -379,7 +402,29 @@ export function Composer({
     setThinkingOpen(false)
   }
 
+  /**
+   * Speed tier. The main process restarts pi so the extension picks the new value up; while a run is
+   * in flight that restart is deferred, so the switch reports the saved mode immediately.
+   */
+  const chooseSpeed = async (mode: SpeedMode): Promise<void> => {
+    if (mode === speed?.mode) {
+      setSpeedOpen(false)
+      return
+    }
+    setSpeedBusy(true)
+    setSpeedError(undefined)
+    const result = await window.pi.setSpeedMode(mode)
+    setSpeedBusy(false)
+    if (!result.ok) {
+      setSpeedError(result.error ?? '切换速度档位失败')
+      return
+    }
+    setSpeedOpen(false)
+  }
+
   const workspace = status.cwd.split(/[\\/]/).filter(Boolean).pop() ?? status.cwd
+  const speed = status.speed
+  const speedOptions = SPEED_OPTIONS
   const activeLabel = status.model
     ? (models.find(
         (model) =>
@@ -390,26 +435,29 @@ export function Composer({
     : '未登录 / 无可用模型'
 
   /**
-   * Context-window usage. `percent` is null right after compaction (pi has no fresh usage yet), so
-   * fall back to computing it from the token count and show 0 rather than a stale number.
+   * Usage against the *effective* ceiling rather than the raw window.
+   *
+   * Auto-compaction rewrites the context at `autoCompactPercent`, so that point — 500K of a 1M
+   * window at 50% — is the budget a run can really use; showing 1M described a limit the session
+   * never reaches. With compaction off the ceiling is the window itself.
    */
   const contextMeter = (() => {
     const window = contextUsage?.contextWindow
     if (!window) return undefined
+    const ceiling =
+      typeof autoCompactPercent === 'number' && autoCompactPercent > 0 && autoCompactPercent < 100
+        ? Math.max(1, Math.round((autoCompactPercent / 100) * window))
+        : window
     const used = typeof contextUsage?.tokens === 'number' ? contextUsage.tokens : undefined
-    const percent =
-      typeof contextUsage?.percent === 'number'
-        ? Math.round(contextUsage.percent)
-        : used
-          ? Math.round((used / window) * 100)
-          : 0
-    const limit = autoCompactPercent ?? 90
-    const tone = percent >= limit ? 'danger' : percent >= Math.max(50, limit - 15) ? 'warn' : ''
+    const percent = used ? Math.round((used / ceiling) * 100) : 0
+    const tone = percent >= 100 ? 'danger' : percent >= 85 ? 'warn' : ''
     return {
       percent,
       tone,
       usedLabel: used ? contextLabel(used) : '—',
-      windowLabel: contextLabel(window)
+      ceilingLabel: contextLabel(ceiling),
+      windowLabel: contextLabel(window),
+      compacting: ceiling !== window
     }
   })()
 
@@ -607,22 +655,16 @@ export function Composer({
               <div
                 className={`context-meter ${contextMeter.tone}`}
                 title={
-                  `上下文窗口 ${contextMeter.usedLabel} / ${contextMeter.windowLabel}` +
-                  (autoCompactPercent
-                    ? `（${autoCompactPercent}%${
-                        contextUsage?.contextWindow
-                          ? ` ≈ ${contextLabel(
-                              Math.round((autoCompactPercent / 100) * contextUsage.contextWindow)
-                            )}`
-                          : ''
-                      } 时自动压缩）`
-                    : '（自动压缩已关闭）')
+                  contextMeter.compacting
+                    ? `上下文 ${contextMeter.usedLabel} / ${contextMeter.ceilingLabel}` +
+                      `（窗口 ${contextMeter.windowLabel}，到 ${autoCompactPercent}% 自动压缩）`
+                    : `上下文 ${contextMeter.usedLabel} / ${contextMeter.windowLabel}（自动压缩已关闭）`
                 }
               >
                 <span className="context-ring" style={{ ['--p' as string]: `${contextMeter.percent}%` }} />
                 <span className="context-meter-value">{contextMeter.percent}%</span>
                 <span className="context-meter-sub">
-                  {contextMeter.usedLabel} / {contextMeter.windowLabel}
+                  {contextMeter.usedLabel} / {contextMeter.ceilingLabel}
                 </span>
               </div>
             )}
@@ -643,6 +685,30 @@ export function Composer({
                 <span>{THINKING_LABELS[status.thinkingLevel ?? ''] ?? status.thinkingLevel ?? 'off'}</span>
                 <ChevronIcon size={11} />
               </button>
+
+              {speed && speed.available.length > 1 && (
+                <>
+                  <span className="pill-sep" />
+                  <button
+                    className={`pill-seg speed ${speed.mode !== 'standard' ? 'on' : ''} ${
+                      speedOpen ? 'open' : ''
+                    }`}
+                    onClick={() => {
+                      setSpeedOpen((open) => !open)
+                      setThinkingOpen(false)
+                      setSpeedError(undefined)
+                    }}
+                    title={
+                      speed.mode === 'standard'
+                        ? '请求按服务商默认档位处理'
+                        : `请求走 ${SPEED_LABELS[speed.mode]} 档位（按服务商计价）`
+                    }
+                  >
+                    <span>{SPEED_LABELS[speed.mode]}</span>
+                    <ChevronIcon size={11} />
+                  </button>
+                </>
+              )}
 
               {modelOpen && (
                 <div className="model-picker">
@@ -726,6 +792,32 @@ export function Composer({
                     <div className="thinking-picker-empty">当前模型没有可用的思考等级</div>
                   )}
                   {thinkingError && <div className="thinking-picker-error">{thinkingError}</div>}
+                </div>
+              )}
+
+              {speedOpen && speed && (
+                <div className="thinking-picker speed-picker">
+                  <div className="thinking-picker-head">速度档位</div>
+                  {speedOptions.map((option) => {
+                    const active = option.mode === speed.mode
+                    return (
+                      <button
+                        key={option.mode}
+                        className={`thinking-option ${active ? 'active' : ''}`}
+                        disabled={speedBusy || !speed.available.includes(option.mode)}
+                        onClick={() => void chooseSpeed(option.mode)}
+                        title={option.hint}
+                      >
+                        <span className="thinking-option-label">
+                          {option.label}
+                          <code>{option.mode}</code>
+                        </span>
+                        {active && <CheckIcon size={12} />}
+                      </button>
+                    )
+                  })}
+                  {speed.note && <div className="thinking-picker-empty">{speed.note}</div>}
+                  {speedError && <div className="thinking-picker-error">{speedError}</div>}
                 </div>
               )}
             </div>

@@ -528,8 +528,9 @@ export default function App(): React.JSX.Element {
 
   /**
    * Auto-compaction decides what counts as "full", so re-read the usage whenever the trigger moves
-   * (`/autocompact`, the settings row) or pi comes back up on a new reserve. Without this the meter
-   * and its warning colours kept describing the previous threshold until the next run settled.
+   * (`/autocompact`, the settings row), the model changes (a new window means a new ceiling) or pi
+   * comes back up on a new reserve. Without this the meter kept describing the previous threshold
+   * and window until the next run settled.
    */
   useEffect(() => {
     if (status.phase !== 'ready') return
@@ -544,7 +545,7 @@ export default function App(): React.JSX.Element {
     return () => {
       cancelled = true
     }
-  }, [status.phase, status.autoCompactPercent])
+  }, [status.phase, status.autoCompactPercent, status.model?.id, status.model?.contextWindow])
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme

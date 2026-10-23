@@ -18,6 +18,7 @@ import * as bridge from './bridge'
 import { applySystemProxy, getProxyInfo } from './proxy'
 import * as profile from './profile'
 import { withRealBash } from './shell'
+import * as speed from './speed'
 import type {
   AppSettings,
   AskAnswer,
@@ -30,7 +31,8 @@ import type {
   PiModel,
   PiStatus,
   PromptImage,
-  SessionStats
+  SessionStats,
+  SpeedMode
 } from '../shared/types'
 
 const rpc = new PiRpcClient()
@@ -111,6 +113,8 @@ interface DesktopConfig {
   mcp?: McpConfig
   /** Auto-compaction policy; `ratio` is the fraction of the window that triggers it. */
   autoCompact?: { ratio?: number }
+  /** Processing tier sent with each request; only applied when the active model offers it. */
+  speed?: { mode?: SpeedMode }
   /** `shared` uses the pi CLI's `~/.pi/agent`; `desktop` keeps its own copy under userData. */
   profile?: 'shared' | 'desktop'
 }
@@ -412,15 +416,26 @@ function serializeSubagent(record: SubagentRecord): Record<string, unknown> {
 }
 
 /** Any built-in server active, which is when the extension has to be loaded. */
+/**
+ * `--extension` for the desktop extension file, or nothing when it is missing.
+ *
+ * The extension is not only MCP: it also patches provider requests for the speed tier, which has to
+ * keep working when the user turns the built-in servers off.
+ */
+function extensionArgs(): string[] {
+  const file = desktopExtensionPath()
+  return existsSync(file) ? ['--extension', file] : []
+}
+
 async function mcpLaunch(
   cwd: string
 ): Promise<{ args: string[]; env: NodeJS.ProcessEnv }> {
   const settings = mcpSettings()
   if (!settings.enabled) {
     gateway.stopAll()
-    return { args: ['--no-mcp'], env: {} }
+    return { args: ['--no-mcp', ...extensionArgs()], env: {} }
   }
-  if (!desktopToolAvailable()) return { args: [], env: {} }
+  if (!desktopToolAvailable()) return { args: extensionArgs(), env: {} }
   const targets = await engines.buildEngineTargets({
     cwd,
     config: engineConfig(),
@@ -430,7 +445,7 @@ async function mcpLaunch(
   // The endpoints must exist before pi connects to them.
   gateway.configure(targets)
   const core = settings.desktopTool
-  if (!core && targets.length === 0) return { args: [], env: {} }
+  if (!core && targets.length === 0) return { args: extensionArgs(), env: {} }
   const url = bridge.getBridgeUrl()
   const env: NodeJS.ProcessEnv = { AGENT_DESKTOP_MCP_TOGGLES: JSON.stringify(toolToggles()) }
   if (url) {
@@ -454,7 +469,7 @@ async function mcpLaunch(
       })
     )
   }
-  return { args: ['--extension', desktopExtensionPath()], env }
+  return { args: extensionArgs(), env }
 }
 
 /**
@@ -715,8 +730,15 @@ let autoCompactEnabled = true
 function statusSnapshot(): PiStatus {
   return {
     ...status,
-    autoCompactPercent: autoCompactEnabled ? Math.round(autoCompactRatio() * 100) : undefined
+    autoCompactPercent: autoCompactEnabled ? Math.round(autoCompactRatio() * 100) : undefined,
+    speed: speed.speedState(status.model, currentSpeedMode())
   }
+}
+
+/** Tier saved in the config; the model still decides whether it can be used (see `speed.ts`). */
+function currentSpeedMode(): SpeedMode {
+  const mode = desktopConfig.speed?.mode
+  return mode === 'fast' || mode === 'ultrafast' ? mode : 'standard'
 }
 
 function cancelPendingAsks(reason: string): void {
@@ -753,7 +775,8 @@ function modelFromState(data: Record<string, unknown> | undefined): PiModel | un
     provider,
     id,
     name: typeof raw.name === 'string' ? raw.name : undefined,
-    contextWindow: typeof raw.contextWindow === 'number' ? raw.contextWindow : undefined
+    contextWindow: typeof raw.contextWindow === 'number' ? raw.contextWindow : undefined,
+    api: typeof raw.api === 'string' ? raw.api : undefined
   }
 }
 
@@ -829,6 +852,8 @@ async function runStart(cwd?: string, extraArgs: string[] = []): Promise<PiStatu
     // An isolated profile is just this variable: pi then reads auth/models/settings/mcp/sessions
     // from the desktop directory instead of the CLI's.
     const env = withRealBash({ ...launch.env })
+    // Read by the extension's request hooks; it re-checks the model before touching the payload.
+    env.AGENT_DESKTOP_SPEED = speed.resolveSpeedMode(status.model, currentSpeedMode())
     if (profile.isIsolatedProfile()) env.PI_CODING_AGENT_DIR = profile.agentDir()
     rpc.start(workspace, [...extraArgs, ...sessionDirArgs(), ...launch.args], env)
     const data = await waitForReady()
@@ -965,7 +990,12 @@ function sessionArgs(): string[] {
   // While a `/btw` side chat is open the process sits on a fork; a restart must land back on the
   // real session, not on the throwaway branch.
   const file = btwActive ? btwOriginal ?? status.sessionFile : status.sessionFile
-  return file ? ['--session', file] : []
+  const args = file ? ['--session', file] : []
+  // A session that has no messages yet has no file on disk, so the restart would otherwise come
+  // back on the default model from settings.json — a model switch or a speed change would look
+  // like it silently reverted.
+  if (status.model) args.push('--provider', status.model.provider, '--model', status.model.id)
+  return args
 }
 
 /**
@@ -1839,6 +1869,26 @@ function registerIpc(): void {
     } catch (error) {
       return { ok: false, error: error instanceof Error ? error.message : String(error) }
     }
+  })
+
+  /**
+   * Speed / processing tier: OpenAI `service_tier`, Anthropic `speed: fast`.
+   *
+   * The extension reads it from the environment at load, so the switch restarts pi (deferred while a
+   * run is in flight, like every other setting that changes the child's env).
+   */
+  ipcMain.handle('pi:set-speed-mode', async (_event, mode: SpeedMode) => {
+    const support = speed.speedSupport(status.model)
+    if (!support.available.includes(mode)) {
+      return {
+        ok: false,
+        error: support.note ?? `${status.model?.id ?? '当前模型'} 不支持这个速度档位`
+      }
+    }
+    await saveConfig({ speed: { mode } })
+    broadcastStatus()
+    await reloadPiConfig()
+    return { ok: true, speed: speed.speedState(status.model, mode) }
   })
 
   ipcMain.handle('providers:list-provider-models', (_event, providerId: string) =>

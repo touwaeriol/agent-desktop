@@ -11,6 +11,7 @@ import type {
   PromptImage,
   ProviderAuthType,
   SessionSummary,
+  SpeedMode,
   SubagentView
 } from '../shared/types'
 const bridge: PiBridge = {
@@ -59,6 +60,7 @@ const bridge: PiBridge = {
     ipcRenderer.invoke('pi:set-model', provider, modelId),
   listThinkingLevels: () => ipcRenderer.invoke('pi:list-thinking-levels'),
   setThinkingLevel: (level: string) => ipcRenderer.invoke('pi:set-thinking-level', level),
+  setSpeedMode: (mode: SpeedMode) => ipcRenderer.invoke('pi:set-speed-mode', mode),
   listProviderModels: (providerId: string) =>
     ipcRenderer.invoke('providers:list-provider-models', providerId),
   setProviderModels: (providerId: string, enabledIds: string[]) =>

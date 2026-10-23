@@ -1242,7 +1242,7 @@ export function SettingsModal({
               </div>
 
               <div className="field">
-                <label>自动压缩</label>
+                <label>默认自动压缩</label>
                 <div className="field-row">
                   <Toggle
                     checked={settings?.compaction?.enabled !== false}
@@ -1255,14 +1255,14 @@ export function SettingsModal({
                   </span>
                 </div>
                 <p className="field-hint">
-                  阈值按当前模型的上下文窗口换算成 pi 的 <code>reserveTokens</code>
-                  ，按比例保存，换模型时会重新计算。没有窗口信息的自定义模型请先补上
+                  全局默认，对所有会话生效（包括新会话）。阈值按当前模型的上下文窗口换算成 pi 的{' '}
+                  <code>reserveTokens</code>，按比例保存，换模型时会重新计算。没有窗口信息的自定义模型请先补上
                   <code>contextWindow</code>。
                 </p>
               </div>
 
               <div className="field">
-                <label>自动压缩阈值</label>
+                <label>默认自动压缩阈值</label>
                 <select
                   value={compactPercent || String(status.autoCompactPercent ?? 90)}
                   disabled={compactBusy || settings?.compaction?.enabled === false}

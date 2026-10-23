@@ -3,11 +3,27 @@ export interface PiModel {
   id: string
   name?: string
   contextWindow?: number
+  /** Wire API of the provider (`openai-responses`, `anthropic-messages`, …); decides speed support. */
+  api?: string
 }
 
 export interface ModelOption extends PiModel {
   providerName?: string
   reasoning?: boolean
+}
+
+/**
+ * Processing tier of a request. `standard` sends nothing; the others map to the vendor's own knob
+ * (OpenAI `service_tier`, Anthropic `speed: fast` plus a beta header).
+ */
+export type SpeedMode = 'standard' | 'fast' | 'ultrafast'
+
+export interface PiSpeedState {
+  mode: SpeedMode
+  /** Modes the active model accepts, always including `standard`. */
+  available: SpeedMode[]
+  /** Why the other modes are missing, when there is something to explain. */
+  note?: string
 }
 
 export interface PiStatus {
@@ -22,6 +38,8 @@ export interface PiStatus {
   compacting?: boolean
   /** Percentage of the window at which auto-compaction starts; absent when it is off. */
   autoCompactPercent?: number
+  /** Processing tier of the next request, plus what the active model supports. */
+  speed?: PiSpeedState
   error?: string
   stderrTail?: string
 }
@@ -466,6 +484,8 @@ export interface PiBridge {
   setModel(provider: string, modelId: string): Promise<{ ok: boolean; error?: string }>
   listThinkingLevels(): Promise<string[]>
   setThinkingLevel(level: string): Promise<{ ok: boolean; error?: string }>
+  /** Processing tier for the active model; restarts pi so the extension picks up the new value. */
+  setSpeedMode(mode: SpeedMode): Promise<{ ok: boolean; error?: string; speed?: PiSpeedState }>
   listProviderModels(providerId: string): Promise<ProviderModelOption[]>
   setProviderModels(providerId: string, enabledIds: string[]): Promise<{ ok: boolean; error?: string }>
   /** `null` clears the override and puts the provider back on its default endpoint. */

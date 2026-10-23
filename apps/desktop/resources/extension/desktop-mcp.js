@@ -99,6 +99,69 @@ function parseJson(value, fallback) {
   }
 }
 
+/**
+ * Processing tier, sent with every request.
+ *
+ * Both vendors put it in the request body, but under different names, and Anthropic additionally
+ * gates it behind a beta header:
+ *
+ * - OpenAI (`openai-responses` / `openai-completions`): `service_tier` — `fast` (the old
+ *   `priority`, ~2.5× faster) or `ultrafast` (GPT-6 Astra / GPT-6.1 Sol only).
+ * - Anthropic (`anthropic-messages`): `speed: "fast"` + `anthropic-beta: fast-mode-2026-02-01`,
+ *   Opus 5.5 / 5 / 4.8 only.
+ *
+ * The tier is refused outright on unsupported models, so the model is checked here as well as in
+ * the window: a model switch mid-session must not turn into a failing request.
+ */
+const FAST_BETA = 'fast-mode-2026-02-01'
+const ULTRAFAST_MODELS = /^(gpt-6-astra|gpt-6\.1-sol)$/i
+const FAST_OPUS = /^claude-opus-(5-5|5|4-8)(-|$)/i
+
+function registerSpeed(pi) {
+  const mode = process.env.AGENT_DESKTOP_SPEED
+  if (mode !== 'fast' && mode !== 'ultrafast') return
+
+  /** How this request should be served, or undefined when the model cannot honour it. */
+  const tierFor = (ctx) => {
+    const model = ctx?.model
+    const provider = typeof model?.provider === 'string' ? model.provider : ''
+    const api = typeof model?.api === 'string' ? model.api : ''
+    const id = typeof model?.id === 'string' ? model.id : ''
+    // Provider first: every OpenAI-compatible vendor (DeepSeek, Moonshot, Z.AI, …) reports an
+    // `openai-*` api but does not implement `service_tier`.
+    if (provider === 'openai' && api.startsWith('openai')) {
+      if (mode === 'ultrafast' && !ULTRAFAST_MODELS.test(id)) return undefined
+      return { api: 'openai', tier: mode }
+    }
+    if (provider === 'anthropic' && api === 'anthropic-messages') {
+      // No ultrafast on Anthropic, and fast is limited to the Opus models that support it.
+      if (mode !== 'fast' || !FAST_OPUS.test(id)) return undefined
+      return { api: 'anthropic', tier: 'fast' }
+    }
+    return undefined
+  }
+
+  pi.on('before_provider_request', (event, ctx) => {
+    const tier = tierFor(ctx)
+    const payload = event?.payload
+    if (!tier || !payload || typeof payload !== 'object') return payload
+    if (tier.api === 'openai') payload.service_tier = tier.tier
+    else payload.speed = 'fast'
+    return payload
+  })
+
+  pi.on('before_provider_headers', (event, ctx) => {
+    const tier = tierFor(ctx)
+    const headers = event?.headers
+    if (!tier || tier.api !== 'anthropic' || !headers || typeof headers !== 'object') return
+    const key = Object.keys(headers).find((name) => name.toLowerCase() === 'anthropic-beta')
+    const current = typeof headers[key] === 'string' ? headers[key] : ''
+    const betas = current.split(',').map((value) => value.trim()).filter(Boolean)
+    if (!betas.includes(FAST_BETA)) betas.push(FAST_BETA)
+    headers[key ?? 'anthropic-beta'] = betas.join(',')
+  })
+}
+
 /** Tools the user disabled in Settings, hidden from the model. */
 function hiddenTools(toggles, server) {
   const tools = toggles[server]
@@ -117,6 +180,8 @@ export default function desktopMcp(pi) {  const url = process.env.AGENT_DESKTOP_
   const toggles = parseJson(process.env.AGENT_DESKTOP_MCP_TOGGLES, {})
   const subagentsEnabled = process.env.AGENT_DESKTOP_SUBAGENTS === '1'
   const agentsSection = process.env.AGENT_DESKTOP_AGENTS_SECTION ?? ''
+  // Request-level, so it must not depend on the bridge: the built-in servers can be off.
+  registerSpeed(pi)
   if (!url) return
 
   if (coreScript) {

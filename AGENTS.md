@@ -74,7 +74,8 @@ npm run typecheck    # node + web 两个 tsconfig 分别检查
 - **粘贴入口在 `Composer.tsx` 的 window 级 `paste` 监听**（不是 textarea 的 `onPaste`）：焦点在 chip / 滚动区时 Cmd+V 也要能附图，而落到其他控件（设置、@ 搜索框、队列编辑）的粘贴要放过去不拦。命中图片时 `preventDefault()`，纯文本粘贴仍走浏览器默认。`addImages` 用 `imagesRef` 而不是 props 里的 `images`：连贴两张时两次解码并发，用 props 会让后一张覆盖前一张。
 - 点任意缩略图打开 `ImageLightbox`（Esc / 点背景关闭）；会话里用户消息用 `MessageImages` 渲染，图片在气泡**上方**右对齐（`.message.user` 是 column + align-items flex-end）。
 - 允许只发图片不发文字：`prompt` 的 `message` 传空串，pi 接受（实测模型能收到图）。
-- **上下文用量**：输入框右下角的小圆环 + `2% 20K / 1M`，数据来自 `get_session_stats().contextUsage`（`{tokens, contextWindow, percent}`）。`App.tsx` 在 `loadMessages`、`agent_settled` 以及 **`status.autoCompactPercent` 变化时**刷新（改了压缩阈值后用量/配色必须跟着变，之前只能等下一轮结束才更新）；`percent` 在刚压缩完时是 `null`，此时按 `tokens/window` 兜底、拿不到就显示 0。颜色：到自动压缩阈值变红、阈值前 15 个百分点变琥珀。**不要**显示 prompt cache 到期时间——pi 不提供，也不该猜。
+- **上下文用量**：输入框右下角的小圆环 + `2% 20K / 1M`，数据来自 `get_session_stats().contextUsage`（`{tokens, contextWindow, percent}`）。`App.tsx` 在 `loadMessages`、`agent_settled`、`status.autoCompactPercent` 以及 **`status.model.id` / `contextWindow` 变化时**刷新（换模型是新的窗口、新的阈值，用量和配色必须跟着变）；`percent` 在刚压缩完时是 `null`，此时按 `tokens/ceiling` 兜底、拿不到就显示 0。**不要**显示 prompt cache 到期时间——pi 不提供，也不该猜。
+- **分母是“可用上限”，不是窗口**：自动压缩开着时 `ceiling = round(window × autoCompactPercent / 100)`（1M 窗口 50% → 500K），界面显示 `211K / 500K`，提示里才写 `（窗口 1M，到 50% 自动压缩）`。显示 1M 等于给用户一个这轮永远到不了的上限（压缩先发生）。压缩关掉时分母回到窗口本身，提示写「自动压缩已关闭」。颜色：`>= 100%` 红、`>= 85%` 琥珀。
 - **自动压缩**：默认目标是窗口的 90%（`AUTO_COMPACT_RATIO`）。pi 在 `contextTokens > contextWindow - reserveTokens` 时压缩，所以 `reserveTokens = window × (1 - ratio)`（1M 窗口 → 100K 余量）。写入 `~/.pi/agent/settings.json` 的 `compaction.{enabled,reserveTokens}`；**pi 只在启动时读这个值**，所以改完必须重启（`reloadPiConfig`，忙时会延后）。`syncAutoCompact()` 在启用、换模型、启动时各跑一次，值没变就不重启。
 - 阈值只有一个真源：`config.json` 的 `autoCompact.ratio`（按比例存，换模型时按新窗口重算）。三个入口都写它并立刻 `broadcastStatus()`：设置 → 通用 → 「自动压缩」开关（`pi:set-auto-compact`）、设置 → 通用 → 「自动压缩阈值」下拉（`pi:set-auto-compact-ratio`，10–99%）、`/autocompact <tokens>`（换算成比例）。**设阈值必须把 `autoCompactEnabled` 置 true**：`statusSnapshot()` 只在它为真时给出 `autoCompactPercent`，漏了这一步界面会一直显示「已关闭 / 90%」，用户看到的阈值就不跟随设置变。
 - 渲染层不要用 `status.autoCompactPercent ?? 90` 兜底成一个假阈值（历史上设置页这么写过，等于把真实值藏掉）；拿不到就说明没窗口信息或压缩已关，按这个含义显示。模型没有 `contextWindow` 时保留 pi 默认的 16K 余量并提示用户补 `contextWindow`。
@@ -112,6 +113,15 @@ npm run typecheck    # node + web 两个 tsconfig 分别检查
 - 所以 `shell.ts` 的 `withRealBash()` 会在**每个 pi 子进程**（主进程 `runStart`、子代理 `SubagentManager.start`）的环境里把真实 Git Bash 的目录放到 PATH 最前面（`%LOCALAPPDATA%\Programs\Git\bin`、`%ProgramFiles%\Git\bin`、以及从 PATH 里的 `git.exe` 反推的 `…\Git\bin`），WindowsApps 里的 stub 一律跳过。
 - 注意 `withRealBash(env)` 的 `env` 只是**要追加的变量**（`launch.env` 通常没有 PATH），PATH 必须从 `process.env` 取；写成从 `env` 取会把整条 PATH 换成单个目录，`where.exe` 自己就找不到了（表现成 `No bash shell found`）。合并后只保留一种大小写（`PATH` / `Path` 同时出现时 Windows 取哪个是不确定的）。
 - 用户在 `settings.json` 里写 `shellPath` 时仍然优先（pi 先看它），不要覆盖。
+
+## 速度档位（fast / ultrafast）
+
+- 两家都把它放在**请求体**里，但字段不同，Anthropic 还要 beta 头：OpenAI `service_tier`（`fast` 即原来的 `priority`，`ultrafast` 只有 `gpt-6-astra` / `gpt-6.1-sol`）；Anthropic `speed: "fast"` + `anthropic-beta: fast-mode-2026-02-01`，且只支持 Claude Opus 5.5 / 5 / 4.8（Opus 4.7 直接报错，4.6 静默按标准速度跑）。
+- pi 自己没有这个开关（`service_tier` 只出现在内置 ai-sdk 的 chunk 里），所以走扩展的两个钩子：`before_provider_request`（改 payload）和 `before_provider_headers`（原地改 headers，返回值被忽略）。它们在 `apps/desktop/resources/extension/desktop-mcp.js` 的 `registerSpeed()` 里，**注册在 `if (!url) return` 之前**：MCP 全关时也要能改请求。
+- 判定必须按 **provider**，不能只看 `model.api`：DeepSeek / Moonshot / Z.AI / Groq 都是 `openai-completions`，但都不实现 `service_tier`（发过去是 400 或未知字段）。`src/main/speed.ts` 与扩展里的 `tierFor()` 各判一次，扩展那次是防止模型中途切换后仍把档位塞给不支持的模型。
+- 界面：输入框右侧 `.pill-seg.speed`（只有 `status.speed.available.length > 1` 时出现，非 `standard` 时高亮），点开是「标准 / 快速 / 极速」。`PiStatus.speed = { mode, available, note }`，`note` 说明缺哪档、为什么。
+- 档位通过环境变量 `AGENT_DESKTOP_SPEED` 传给 pi 子进程（扩展在加载时读），所以切换会重启 pi；`sessionArgs()` 因此必须带上 `--provider/--model`：没有消息的新会话在磁盘上还没有文件，不带这两个参数重启会退回 settings.json 的默认模型，用户看到的是「切了档位模型自己变了」。
+- 用户 `settings.json` 里显式写了别的 shell/模型默认值时不要覆盖；`ultrafast` 与 `flex` 的计价不同，UI 里要写清是按服务商计价的档位。
 
 ## 运行状态（busy）
 

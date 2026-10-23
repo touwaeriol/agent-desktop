@@ -5142,6 +5142,21 @@ button:disabled {
   color: var(--text-faint);
 }
 
+/* Speed tier: only rendered when the active model offers one. Accent while it is not `standard`,
+   because the request is then billed at a premium tier. */
+.pill-seg.speed {
+  max-width: 90px;
+  color: var(--text-faint);
+}
+
+.pill-seg.speed.on {
+  color: var(--accent-text);
+}
+
+.speed-picker {
+  width: 232px;
+}
+
 .pill-sep {
   width: 1px;
   height: 14px;
