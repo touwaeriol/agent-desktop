@@ -533,6 +533,29 @@ ${text.trim()}`,
     tools: CoreTool[]
   ): Promise<{ ok: true; message: Record<string, unknown> } | { ok: false; error: string }> {
     const tier = speed.resolveSpeedMode(modelInfo(model), this.options.speedMode?.() ?? 'standard')
+    // Fast tiers are a request-level knob with two different shapes: OpenAI takes `service_tier` in
+    // the body, Anthropic takes `speed` plus a beta header. `onPayload`/`transformHeaders` are the
+    // SDK's hooks for exactly this, so no global fetch patching is needed.
+    const fastOptions =
+      tier === 'standard'
+        ? {}
+        : {
+            onPayload: (payload: unknown) => {
+              if (!payload || typeof payload !== 'object') return undefined
+              const body = payload as Record<string, unknown>
+              return model.api === 'anthropic-messages'
+                ? { ...body, speed: 'fast' }
+                : { ...body, service_tier: tier }
+            },
+            ...(model.api === 'anthropic-messages'
+              ? {
+                  transformHeaders: (headers: Record<string, string>) => ({
+                    ...headers,
+                    'anthropic-beta': mergeBeta(headers['anthropic-beta'], 'fast-mode-2026-02-01')
+                  })
+                }
+              : {})
+          }
     const stream = runtime.streamSimple(
       model,
       {
@@ -540,10 +563,7 @@ ${text.trim()}`,
         messages: this.transcript as never,
         tools: toolDeclarations(tools)
       },
-      // `samplingParams` is merged into the request body as-is by the OpenAI adapters, which is how
-      // `service_tier` reaches the provider. Anthropic's fast mode also needs a body field the SDK
-      // does not expose, so it stays on the pi engine.
-      tier === 'standard' ? {} : { samplingParams: { service_tier: tier } }
+      fastOptions
     )
     let partial: Record<string, unknown> | undefined
     for await (const event of stream as AsyncIterable<Record<string, unknown>>) {
@@ -653,6 +673,16 @@ function isRetryable(message: string): boolean {
   return /rate.?limit|429|overloaded|timeout|timed out|ECONNRESET|socket hang up|network|fetch failed|502|503|504|stream (ended|closed)|premature close/i.test(
     message
   )
+}
+
+/** Merge a beta flag into an existing `anthropic-beta` header value without duplicating it. */
+function mergeBeta(existing: string | undefined, flag: string): string {
+  const flags = (existing ?? '')
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter(Boolean)
+  if (!flags.includes(flag)) flags.push(flag)
+  return flags.join(',')
 }
 
 /** The status shape the window expects for the current model. */

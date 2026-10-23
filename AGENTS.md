@@ -137,12 +137,12 @@ npm run typecheck    # node + web 两个 tsconfig 分别检查
 - **子代理**：Prophey 引擎把 `packages/mcp-core/tools/subagent.mjs` 也加载进来，但**不走 MCP**——`agent/core-tools.ts` 的 `bridgeContext()` 直接对桥接的 JSON API 发请求（同一个 token、同一批端点），所以子代理管理器只有一份实现。
 - **`/btw` 也通了**：`clone()` 把 transcript 复制成新 id 并返回它的路径，`switchSession()` 按路径载入，所以 `pi:btw-start` 那套「记住原会话 → fork → 关闭时切回」的记账不用改就成立（实测：起侧边对话 → 追问 → 关闭后 sessionFile 回到原值）。
 - **MCP 也通了**：`agent/mcp-client.ts` 直接连桥接的 `/mcp/<key>`（streamable HTTP，`initialize` + `tools/list` + `tools/call`），工具名保持 `mcp__<server>__<tool>`，和 pi 完全一致。端点由 `mcpEndpointsFor(workspace)` 生成（同一套 `buildEngineTargets` / `buildEngineRegistrations`，所以多根仓库的 `codegraph__<repo>` 也在）。实测：Prophey 引擎下调 `mcp__codegraph__codegraph_search` 拿到了真实路径。
-- **速度档位（OpenAI 部分）**：`streamSimple` 的 `samplingParams` 会原样并进请求体，所以 `service_tier: fast|ultrafast` 在 Prophey 引擎下也生效（`speed.resolveSpeedMode` 按模型判断，非 OpenAI 不会发）。Anthropic 的 `speed: "fast"` 需要另一个体字段，SDK 没暴露，所以 Claude 快速模式仍只有 pi 引擎有。**注意：这条没有在真实付费账号上验证过**（当前账号不支持该档位）。
+- **速度档位（两家都支持）**：用 SDK 的 `onPayload`（改请求体）+ `transformHeaders`（加 beta 头）两个钩子，不要去 patch 全局 fetch。OpenAI 写 `service_tier: fast|ultrafast`；Anthropic 写 `speed: "fast"` 并把 `fast-mode-2026-02-01` 合并进已有的 `anthropic-beta`（不重复、不覆盖别的 beta）。档位由 `speed.resolveSpeedMode` 按 provider 判断，非目标服务商不会发。**注意：两家都没有在真实付费账号上验证过**（当前账号不支持该档位），只验证了生成的 payload/header 形状。
 - **`ask_user_question` 也通了**：工具直接调桥接 `/ask`（走 `node:http`，**不要用 fetch**——主进程装了全局 undici proxy dispatcher，loopback 请求会 `fetch failed`，而且 undici 有 300s headers 超时，等待用户回答必然超时）。实测：引擎调工具 → 窗口弹窗 → 回答后模型拿到选择。
 - **默认引擎是 Prophey**（`config.engine` 不设或不是 `'pi'` 时都走它）；`pi` 仍是可切换的另一套实现。
 - **MCP 工具名不带 `mcp__` 前缀**：那个前缀是 pi 为了给 MCP 工具分命名空间才有的，我们自己的循环不需要——工具名就是 `<server>__<tool>`（如 `codegraph__codegraph_search`、`codegraph__git__codegraph_search`）。pi 引擎那边仍然是 `mcp__…`，所以两边的工具名不同，提示词不要写死名字。
 - **系统提示词由引擎自己拼**（`systemPrompt()`）：角色、`<workspace>`（主目录 + 附加目录）、`<tools>`（root 语义、先读后改、run_bash 指目录）、多根时再加 `<project>`（绝对路径、每条 bash 是新 shell、按目录选工具集）。没有扩展钩子参与。
-- Prophey 引擎还缺：Anthropic 快速模式。切换引擎是热替换（`desktop:set-engine` 重建引擎对象并重启会话），不需要退出应用。
+- Prophey 引擎与 pi 的功能差距：**没有了**（Anthropic 快速模式已补齐）。切换引擎是热替换（`desktop:set-engine` 重建引擎对象并重启会话），不需要退出应用。
 - 改名说明：产品名是 Prophey，但 `app.setName('agent-desktop')` **故意保留**——它决定 `%APPDATA%/agent-desktop`，改了等于丢失用户的配置、会话、项目和凭据。
 - 还没搬完的部分：`/btw` 的 clone/switch、压缩阈值同步、登录消息、MCP 启动参数装配（`prepare` 仍由 `index.ts` 提供，这是刻意的）。
 
