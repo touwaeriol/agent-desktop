@@ -3,7 +3,8 @@ import { randomUUID } from 'node:crypto'
 import { existsSync, promises as fs, unlinkSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { PiEngine, modelFromState } from './agent/pi-engine'
+import { OwnEngine } from './agent/own-engine'
+import { PiEngine } from './agent/pi-engine'
 import { listSessions, readSummary } from './sessions'
 import { SessionStore, toSummary } from './session-store'
 import * as providers from './providers'
@@ -22,7 +23,7 @@ import * as repo from './repo'
 import * as projects from './projects'
 import { realBashPath, withRealBash } from './shell'
 import * as speed from './speed'
-import type { AgentWorkspace } from './agent/engine'
+import type { AgentEngine, AgentWorkspace } from './agent/engine'
 import type {
   AppSettings,
   AskAnswer,
@@ -118,67 +119,76 @@ function activeProject(): projects.Project | undefined {
   return id ? projectStore?.get(id) : undefined
 }
 
-const engine = new PiEngine({
-  prepare: async (workspace) => {
-    await applySystemProxy()
-    cancelPendingAsks('pi 已重启')
-    const launch = await mcpLaunch(workspace)
-    // An isolated profile is just this variable: pi then reads auth/models/settings/mcp/sessions
-    // from the desktop directory instead of the CLI's.
-    const env = withRealBash({ ...launch.env })
-    // Read by the extension's request hooks; it re-checks the model before touching the payload.
-    env.AGENT_DESKTOP_SPEED = speed.resolveSpeedMode(status.model, currentSpeedMode())
-    // The root-aware bash tool runs in the core server, which has no idea where Git Bash lives.
-    const bash = realBashPath()
-    if (bash) env.AGENT_DESKTOP_SHELL = bash
-    // Root-aware file tools need the same list the model is told about, so both come from here.
-    if (workspace.additional.length > 0) {
-      env.AGENT_DESKTOP_ROOTS = JSON.stringify([
-        { name: path.basename(workspace.primary), path: workspace.primary, primary: true },
-        ...workspace.additional.map((root) => ({ name: path.basename(root), path: root }))
-      ])
-    }
-    // Several directories need to be explained to the model; one directory is just a normal session
-    // and gets no section.
-    const project = activeProject()
-    if (project && workspace.additional.length > 0) {
-      env.AGENT_DESKTOP_PROJECT = JSON.stringify({
-        id: project.id,
-        name: project.name,
-        roots: [
-          { path: workspace.primary, name: path.basename(workspace.primary), primary: true },
-          ...workspace.additional.map((root) => ({ path: root, name: path.basename(root) }))
-        ]
-      })
-    }
-    if (profile.isIsolatedProfile()) env.PI_CODING_AGENT_DIR = profile.agentDir()
-    return { args: launch.args, env }
-  },
-  sessionArgs: () => sessionArgs(),
-  sessionDirArgs: () => sessionDirArgs(),
-  onStatus: (next) => {
-    const previous = status
-    status = next
-    // A new or renamed session should show up in the list without waiting for a run to settle.
-    if (next.sessionFile && next.sessionFile !== previous.sessionFile) void rememberSession()
-    else if (next.sessionName && next.sessionName !== previous.sessionName) void rememberSession()
-  },
-  onEvent: (record) => {
-    // While the `/btw` panel is open the window must not see the fork's transcript.
-    if (btwActive) return
-    mainWindow?.webContents.send('pi:event', record)
-  },
-  onSettled: () => {
-    void rememberSession()
-    if (!configPending) return
-    // The run is over, so the deferred MCP/agent restart can finally happen.
-    configPending = false
-    void startPi(status.cwd, sessionArgs())
-  },
-  onAssistantError: (message) => noteSpeedRejection(message),
-  onExit: () => handleExit()
-})
-engine.attach()
+let desktopConfig: DesktopConfig = {}
+
+/** Engine factory: pi stays the default; `own` is the text-only v1. */
+function createEngine(): AgentEngine {
+  const shared = {
+    onStatus: (next: PiStatus) => {
+      const previous = status
+      status = next
+      if (next.sessionFile && next.sessionFile !== previous.sessionFile) void rememberSession()
+      else if (next.sessionName && next.sessionName !== previous.sessionName) void rememberSession()
+    },
+    onEvent: (record: Record<string, unknown>) => {
+      // While the /btw panel is open the window must not see the fork's transcript.
+      if (btwActive) return
+      mainWindow?.webContents.send('pi:event', record)
+    },
+    onSettled: () => {
+      void rememberSession()
+      if (!configPending) return
+      configPending = false
+      void startPi(status.cwd, sessionArgs())
+    },
+    onAssistantError: (message: string) => noteSpeedRejection(message),
+    onExit: () => handleExit()
+  }
+  if (desktopConfig.engine === 'own') return new OwnEngine(shared)
+  return new PiEngine({
+    ...shared,
+    prepare: async (workspace) => {
+      await applySystemProxy()
+      cancelPendingAsks('pi 已重启')
+      const launch = await mcpLaunch(workspace)
+      // An isolated profile is just this variable: pi then reads auth/models/settings/mcp/sessions
+      // from the desktop directory instead of the CLI's.
+      const env = withRealBash({ ...launch.env })
+      // Read by the extension's request hooks; it re-checks the model before touching the payload.
+      env.AGENT_DESKTOP_SPEED = speed.resolveSpeedMode(status.model, currentSpeedMode())
+      // The root-aware bash tool runs in the core server, which has no idea where Git Bash lives.
+      const bash = realBashPath()
+      if (bash) env.AGENT_DESKTOP_SHELL = bash
+      // Root-aware file tools need the same list the model is told about, so both come from here.
+      if (workspace.additional.length > 0) {
+        env.AGENT_DESKTOP_ROOTS = JSON.stringify([
+          { name: path.basename(workspace.primary), path: workspace.primary, primary: true },
+          ...workspace.additional.map((root) => ({ name: path.basename(root), path: root }))
+        ])
+      }
+      // Several directories need to be explained to the model; one directory is just a normal session
+      // and gets no section.
+      const project = activeProject()
+      if (project && workspace.additional.length > 0) {
+        env.AGENT_DESKTOP_PROJECT = JSON.stringify({
+          id: project.id,
+          name: project.name,
+          roots: [
+            { path: workspace.primary, name: path.basename(workspace.primary), primary: true },
+            ...workspace.additional.map((root) => ({ path: root, name: path.basename(root) }))
+          ]
+        })
+      }
+      if (profile.isIsolatedProfile()) env.PI_CODING_AGENT_DIR = profile.agentDir()
+      return { args: launch.args, env }
+    },
+    sessionArgs: () => sessionArgs(),
+    sessionDirArgs: () => sessionDirArgs()
+  })
+}
+
+/** Created in `whenReady`, once `config.engine` is known. */
+let engine: AgentEngine
 
 if (process.env.PI_DEBUG_PORT) {
   app.commandLine.appendSwitch('remote-debugging-port', process.env.PI_DEBUG_PORT)
@@ -244,6 +254,8 @@ interface DesktopConfig {
   speed?: { mode?: SpeedMode }
   /** Project the window is working in; sessions still start on its primary repository. */
   activeProject?: string
+  /** Which engine runs the turn: `pi` (default) or `own` (text-only v1). */
+  engine?: 'pi' | 'own'
   /** Repositories the user worked in, most recent first (sidebar "切换仓库" menu). */
   recentRepos?: string[]
   /** Per-repository defaults applied to a new session in that repository. */
@@ -252,7 +264,6 @@ interface DesktopConfig {
   profile?: 'shared' | 'desktop'
 }
 
-let desktopConfig: DesktopConfig = {}
 
 function configPath(): string {
   return path.join(app.getPath('userData'), 'config.json')
@@ -1075,11 +1086,11 @@ async function closeSideChat(): Promise<void> {
   btwFork = undefined
   try {
     if (engine.busy() && engine.running()) {
-      await engine.request('abort', {}, 15_000).catch(() => undefined)
+      await engine.abort().catch(() => undefined)
       await engine.waitForSettle(15_000)
     }
     if (original && engine.running()) {
-      await engine.request('switch_session', { sessionPath: original }, 20_000)
+      await engine.switchSession(original)
     }
   } catch {
     // `refreshState` below re-syncs whatever pi ended up on.
@@ -1093,14 +1104,9 @@ async function closeSideChat(): Promise<void> {
 async function btwPrompt(message: string): Promise<{ text: string; settled: boolean }> {
   // Arm the waiter first: a short answer can settle before the prompt response even arrives.
   const settling = engine.waitForSettle(300_000)
-  await engine.request('prompt', { message }, 30_000)
+  await engine.send(message)
   const settled = await settling
-  const last = await engine.request<{ data?: { text?: string | null } }>(
-    'get_last_assistant_text',
-    {},
-    10_000
-  )
-  const text = last.data?.text ?? ''
+  const text = (await engine.lastAssistantText()) ?? ''
   if (text.trim()) return { text, settled }
   return { text: settled ? '（没有回答）' : '（超过 5 分钟仍未结束，可以关闭窗口）', settled }
 }
@@ -1388,7 +1394,7 @@ function registerIpc(): void {
     lastAbortAt = Date.now()
     if (!engine.running()) return
     try {
-      await engine.request('abort', {}, 30000)
+      await engine.abort()
     } catch {
       // ignore
     }
@@ -1399,9 +1405,8 @@ function registerIpc(): void {
     if (!engine.running()) return { ok: false, error: 'pi 未运行' }
     if (btwActive) await closeSideChat()
     try {
-      const response = await engine.request<{ data?: { cancelled?: boolean } }>('new_session')
-      await engine.refresh()
-      return { ok: true, cancelled: response.data?.cancelled }
+      const response = await engine.newSession()
+      return { ok: true, cancelled: response.cancelled }
     } catch (error) {
       return { ok: false, error: error instanceof Error ? error.message : String(error) }
     }
@@ -1411,11 +1416,8 @@ function registerIpc(): void {
     if (!engine.running()) return { ok: false, error: 'pi 未运行' }
     if (btwActive) await closeSideChat()
     try {
-      const response = await engine.request<{ data?: { cancelled?: boolean } }>('switch_session', {
-        sessionPath
-      })
-      await engine.refresh()
-      return { ok: true, cancelled: response.data?.cancelled }
+      await engine.switchSession(sessionPath)
+      return { ok: true }
     } catch (error) {
       return { ok: false, error: error instanceof Error ? error.message : String(error) }
     }
@@ -1423,8 +1425,7 @@ function registerIpc(): void {
 
   ipcMain.handle('pi:get-messages', async () => {
     if (!engine.running()) return []
-    const response = await engine.request<{ data?: { messages?: unknown[] } }>('get_messages')
-    return response.data?.messages ?? []
+    return engine.messages()
   })
 
   ipcMain.handle('pi:list-sessions', async () => {
@@ -1439,13 +1440,7 @@ function registerIpc(): void {
   ipcMain.handle('pi:session-stats', async () => {
     if (!engine.running()) return {}
     try {
-      const response = await engine.request<{ data?: Record<string, unknown> }>('get_session_stats')
-      const data = response.data ?? {}
-      return {
-        tokens: data.tokens as SessionStats['tokens'],
-        cost: typeof data.cost === 'number' ? data.cost : undefined,
-        contextUsage: data.contextUsage as SessionStats['contextUsage']
-      }
+      return (await engine.stats()) as SessionStats
     } catch {
       return {}
     }
@@ -1650,13 +1645,8 @@ function registerIpc(): void {
     // Compacting the fork would summarize the throwaway branch and leave the real session alone.
     if (btwActive) await closeSideChat()
     try {
-      const response = await engine.request<{ data?: { summary?: string } }>(
-        'compact',
-        { ...(instructions?.trim() ? { customInstructions: instructions.trim() } : {}) },
-        600_000
-      )
-      await engine.refresh()
-      return { ok: true, summary: response.data?.summary }
+      const result = await engine.compact(instructions)
+      return { ok: true, summary: result.summary }
     } catch (error) {
       return { ok: false, error: error instanceof Error ? error.message : String(error) }
     }
@@ -1668,7 +1658,7 @@ function registerIpc(): void {
    */
   ipcMain.handle('pi:set-auto-compact', async (_event, enabled: boolean) => {
     try {
-      await engine.request('set_auto_compaction', { enabled }, 10_000)
+      await engine.setAutoCompaction({ enabled })
       await providers.setCompactionSettings({ enabled })
       autoCompactEnabled = enabled
       broadcastStatus()
@@ -1741,7 +1731,7 @@ function registerIpc(): void {
       // `syncAutoCompact` only restarts when the reserve changes, so make the switch effective for
       // the process that is running right now (it may have been left with compaction off).
       if (engine.running()) {
-        await engine.request('set_auto_compaction', { enabled: true }, 10_000).catch(() => undefined)
+        await engine.setAutoCompaction({ enabled: true }).catch(() => undefined)
       }
       broadcastStatus()
       const reserveTokens = await syncAutoCompact({ restart: true })
@@ -1786,10 +1776,8 @@ function registerIpc(): void {
     btwOriginal = original
     try {
       // `fork` requires a specific entry id and rejects the leaf; `clone` is the snapshot we want.
-      const cloned = await engine.request<{ data?: { cancelled?: boolean } }>('clone', {}, 20_000)
-      if (cloned.data?.cancelled) throw new Error('克隆会话被取消')
-      const state = await engine.request<{ data?: Record<string, unknown> }>('get_state', {}, 5000)
-      if (typeof state.data?.sessionFile === 'string') btwFork = state.data.sessionFile
+      const forkPath = await engine.clone()
+      if (forkPath) btwFork = forkPath
       const answer = await btwPrompt(trimmed)
       return { ok: true, answer: answer.text, settled: answer.settled, forkPath: btwFork }
     } catch (error) {
@@ -1973,9 +1961,7 @@ function registerIpc(): void {
   ipcMain.handle('pi:list-models', async () => {
     if (!engine.running()) return []
     try {
-      const response = await engine.request<{ data?: { models?: Record<string, unknown>[] } }>(
-        'get_available_models'
-      )
+      const models = await engine.models()
       const names = new Map<string, string>()
       try {
         for (const provider of await providers.listProviders()) {
@@ -1985,7 +1971,7 @@ function registerIpc(): void {
         // provider display names are optional
       }
       const patterns = await providers.getEnabledModelPatterns().catch(() => [])
-      return (response.data?.models ?? [])
+      return models
         .map((model) => {
           const provider = String(model.provider ?? '')
           return {
@@ -2007,13 +1993,7 @@ function registerIpc(): void {
   ipcMain.handle('pi:set-model', async (_event, provider: string, modelId: string) => {
     if (!engine.running()) return { ok: false, error: 'pi 未运行' }
     try {
-      const response = await engine.request<{ data?: Record<string, unknown> }>('set_model', {
-        provider,
-        modelId
-      })
-      const model = modelFromState({ model: response.data })
-      if (model) setStatus({ model })
-      await engine.refresh()
+      await engine.setModel(provider, modelId)
       // A different window means a different 90% point; pi only reads the reserve at startup, so
       // this restarts when (and only when) the number actually changed.
       await syncAutoCompact({ restart: true }).catch(() => undefined)
@@ -2026,10 +2006,7 @@ function registerIpc(): void {
   ipcMain.handle('pi:list-thinking-levels', async () => {
     if (!engine.running()) return []
     try {
-      const response = await engine.request<{ data?: { levels?: string[] } }>(
-        'get_available_thinking_levels'
-      )
-      return response.data?.levels ?? []
+      return engine.thinkingLevels()
     } catch {
       return []
     }
@@ -2038,7 +2015,7 @@ function registerIpc(): void {
   ipcMain.handle('pi:set-thinking-level', async (_event, level: string) => {
     if (!engine.running()) return { ok: false, error: 'pi 未运行' }
     try {
-      await engine.request('set_thinking_level', { level })
+      await engine.setThinkingLevel(level)
       setStatus({ thinkingLevel: level })
       return { ok: true }
     } catch (error) {
@@ -2175,6 +2152,8 @@ app.whenReady().then(async () => {
   // The window's session list: ids, titles and workspaces we own; pi's files are engine storage.
   sessionStore = new SessionStore(path.join(app.getPath('userData'), 'sessions.json'))
   await sessionStore.load().catch(() => undefined)
+  engine = createEngine()
+  if (engine instanceof PiEngine) engine.watch()
   // Before anything reads a provider, model list or MCP config: point the modules at the profile.
   applyProfile()
   await loadToolCache()
@@ -2243,7 +2222,6 @@ app.whenReady().then(async () => {
     })
     .catch(() => undefined)
   void startPi(cwd).then(() => syncAutoCompact())
-  engine.watch()
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()

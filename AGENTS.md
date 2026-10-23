@@ -127,8 +127,9 @@ npm run typecheck    # node + web 两个 tsconfig 分别检查
 - `run_bash` 的 `root` 只决定**工作目录**，shell 本身仍有完整文件系统权限（`cd ../别的仓库` 照样能跑）——要真正限制得靠沙箱，现在没有。
 - 实测（两目录项目）：模型全程只用 `mcp__desktop__*`，`root: "Git"` 读到/写入第二个目录，`run_bash` 在 `Git` 里跑 `ls | head -3` 拿到真实输出；`../beta/x`、`C:/Windows/win.ini`、未知 root 全部被拒绝并列出可用目录。
 - `index.ts` 里的 `status` 只是**镜像**：引擎通过 `onStatus` 推过来，`statusSnapshot()` 再加应用自己的字段（压缩百分比、档位、仓库）。写状态必须走 `engine.setStatus()`，不要直接赋值。
-- 新增 pi 调用时用 `engine.request('命令', payload)`；不要重新引入第二个 `PiRpcClient`（子代理进程有自己的，那是另一回事）。
+- 新增 pi 调用时用引擎的**语义方法**（`setModel` / `thinkingLevels` / `stats` / `messages` / `compact` / `newSession` / `switchSession` / `clone` / `abort` / `send`），**不要**再写 `engine.request('set_model')` 这种命令名：那等于把 pi 的命令表写进窗口，第二个引擎就接不进来。`PiEngine` 里这些方法只是薄封装，`index.ts` 已无一处 `engine.request(`。
 - `engine.prompt()` 承担「窗口和 pi 对忙碌判断不一致」的全部兜底（压缩中等空闲后重试、`already processing` 改发 `followUp` 并回 `queued: true`），所以它是唯一发送入口；不要在别处再包一层重试。
+- **own 引擎（v1，实验）**：`agent/own-engine.ts`，`config.engine = 'own'` 才启用（默认 `pi`）。它自己调 `ModelRuntime.streamSimple` 跑一轮纯文本：发 `agent_start → message_start → message_update… → message_end → agent_end → agent_settled`，transcript 只在内存里。**没有工具、没有压缩、没有重试、没有会话持久化、没有子代理/`/btw`**——这些方法一律抛「own 引擎 v1 还不支持…」。引擎实例必须在 `loadConfig()` **之后**创建（`createEngine()` 在 `whenReady` 里调用），否则 `config.engine` 读不到，永远是 pi。
 - 还没搬完的部分：`/btw` 的 clone/switch、压缩阈值同步、登录消息、MCP 启动参数装配（`prepare` 仍由 `index.ts` 提供，这是刻意的）。
 
 ## 会话存储（我们自己的）

@@ -1,4 +1,4 @@
-import type { PiStatus, PromptImage, PromptResult } from '@shared/types'
+import type { PiModel, PiStatus, PromptImage, PromptResult } from '@shared/types'
 
 /**
  * The directories one session works on.
@@ -61,6 +61,29 @@ export interface AgentEngine {
     message: string,
     options?: { behavior?: 'steer' | 'followUp'; images?: PromptImage[] }
   ): Promise<PromptResult>
+  /** Send one message with no queueing or retry logic (used for the `/btw` fork). */
+  send(message: string): Promise<void>
+
+  // Session and model operations. These are semantic on purpose: the window must not need to know
+  // an engine's command names, or a second engine could never be dropped in.
+  models(): Promise<Record<string, unknown>[]>
+  setModel(provider: string, modelId: string): Promise<PiModel | undefined>
+  thinkingLevels(): Promise<string[]>
+  setThinkingLevel(level: string): Promise<void>
+  stats(): Promise<{
+    tokens?: { input?: number; output?: number; total?: number }
+    cost?: number
+    contextUsage?: { tokens?: number | null; contextWindow?: number; percent?: number | null }
+  }>
+  messages(): Promise<unknown[]>
+  lastAssistantText(): Promise<string | null>
+  compact(instructions?: string): Promise<{ summary?: string }>
+  setAutoCompaction(options: { enabled: boolean; reserveTokens?: number }): Promise<void>
+  newSession(): Promise<{ cancelled?: boolean }>
+  switchSession(sessionPath: string): Promise<void>
+  /** Fork the current session; resolves to the new session file when the engine reports one. */
+  clone(): Promise<string | undefined>
+  abort(): Promise<void>
 
   /** Raw command channel; `type` is the engine's own command name. */
   request<T = Record<string, unknown>>(

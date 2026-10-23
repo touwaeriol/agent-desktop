@@ -49,7 +49,9 @@ export class PiEngine implements AgentEngine {
   private isBusy = false
   private isCompacting = false
 
-  constructor(private readonly options: PiEngineOptions) {}
+  constructor(private readonly options: PiEngineOptions) {
+    this.attach()
+  }
 
   state(): PiStatus {
     return this.snapshot
@@ -339,6 +341,111 @@ export class PiEngine implements AgentEngine {
 
   private resolveSettled(): void {
     for (const waiter of this.settleWaiters.splice(0)) waiter()
+  }
+
+  // --- session and model operations -------------------------------------------------------------
+  // Each one is a thin, semantic wrapper over the command channel, so the window never spells an
+  // engine command name and a second engine can implement the same operations differently.
+
+  async models(): Promise<Record<string, unknown>[]> {
+    const response = await this.request<{ data?: { models?: Record<string, unknown>[] } }>(
+      'get_available_models'
+    )
+    return response.data?.models ?? []
+  }
+
+  async setModel(provider: string, modelId: string): Promise<PiModel | undefined> {
+    const response = await this.request<{ data?: Record<string, unknown> }>('set_model', {
+      provider,
+      modelId
+    })
+    const model = modelFromState({ model: response.data })
+    if (model) this.setStatus({ model })
+    await this.refresh()
+    return model
+  }
+
+  async thinkingLevels(): Promise<string[]> {
+    const response = await this.request<{ data?: { levels?: string[] } }>(
+      'get_available_thinking_levels'
+    )
+    return response.data?.levels ?? []
+  }
+
+  async setThinkingLevel(level: string): Promise<void> {
+    await this.request('set_thinking_level', { level })
+    this.setStatus({ thinkingLevel: level })
+  }
+
+  async stats(): Promise<{
+    tokens?: { input?: number; output?: number; total?: number }
+    cost?: number
+    contextUsage?: { tokens?: number | null; contextWindow?: number; percent?: number | null }
+  }> {
+    const response = await this.request<{ data?: Record<string, unknown> }>('get_session_stats')
+    const data = response.data ?? {}
+    return {
+      tokens: data.tokens as { input?: number; output?: number; total?: number } | undefined,
+      cost: typeof data.cost === 'number' ? data.cost : undefined,
+      contextUsage: data.contextUsage as
+        | { tokens?: number | null; contextWindow?: number; percent?: number | null }
+        | undefined
+    }
+  }
+
+  async messages(): Promise<unknown[]> {
+    const response = await this.request<{ data?: { messages?: unknown[] } }>('get_messages')
+    return response.data?.messages ?? []
+  }
+
+  async lastAssistantText(): Promise<string | null> {
+    const response = await this.request<{ data?: { text?: string | null } }>(
+      'get_last_assistant_text',
+      {},
+      10_000
+    )
+    return response.data?.text ?? null
+  }
+
+  async compact(instructions?: string): Promise<{ summary?: string }> {
+    const response = await this.request<{ data?: { summary?: string } }>(
+      'compact',
+      { ...(instructions?.trim() ? { customInstructions: instructions.trim() } : {}) },
+      600_000
+    )
+    await this.refresh()
+    return { summary: response.data?.summary }
+  }
+
+  async setAutoCompaction(options: { enabled: boolean; reserveTokens?: number }): Promise<void> {
+    await this.request('set_auto_compaction', options)
+  }
+
+  async newSession(): Promise<{ cancelled?: boolean }> {
+    const response = await this.request<{ data?: { cancelled?: boolean } }>('new_session')
+    await this.refresh()
+    return { cancelled: response.data?.cancelled }
+  }
+
+  async switchSession(sessionPath: string): Promise<void> {
+    await this.request('switch_session', { sessionPath }, 20_000)
+    await this.refresh()
+  }
+
+  async clone(): Promise<string | undefined> {
+    // `fork` requires a specific entry id and rejects the leaf; `clone` is the snapshot we want.
+    const cloned = await this.request<{ data?: { cancelled?: boolean } }>('clone', {}, 20_000)
+    if (cloned.data?.cancelled) throw new Error('克隆会话被取消')
+    const state = await this.request<{ data?: Record<string, unknown> }>('get_state', {}, 5000)
+    return typeof state.data?.sessionFile === 'string' ? state.data.sessionFile : undefined
+  }
+
+  async abort(): Promise<void> {
+    await this.request('abort', {}, 15_000)
+  }
+
+  async send(message: string): Promise<void> {
+    await this.request('prompt', { message }, 30_000)
   }
 
   private handleRecord(record: Record<string, unknown>): void {
