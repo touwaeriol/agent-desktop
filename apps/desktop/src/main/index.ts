@@ -21,6 +21,7 @@ import * as repo from './repo'
 import * as projects from './projects'
 import { withRealBash } from './shell'
 import * as speed from './speed'
+import type { AgentWorkspace } from './agent/engine'
 import type {
   AppSettings,
   AskAnswer,
@@ -74,14 +75,17 @@ const engine = new PiEngine({
     const env = withRealBash({ ...launch.env })
     // Read by the extension's request hooks; it re-checks the model before touching the payload.
     env.AGENT_DESKTOP_SPEED = speed.resolveSpeedMode(status.model, currentSpeedMode())
-    // A project with several repositories needs to be explained to the model; one repository is
-    // just a normal session and gets no section.
+    // Several directories need to be explained to the model; one directory is just a normal session
+    // and gets no section.
     const project = activeProject()
-    if (project && project.roots.length > 1) {
+    if (project && workspace.additional.length > 0) {
       env.AGENT_DESKTOP_PROJECT = JSON.stringify({
         id: project.id,
         name: project.name,
-        roots: project.roots
+        roots: [
+          { path: workspace.primary, name: path.basename(workspace.primary), primary: true },
+          ...workspace.additional.map((root) => ({ path: root, name: path.basename(root) }))
+        ]
       })
     }
     if (profile.isIsolatedProfile()) env.PI_CODING_AGENT_DIR = profile.agentDir()
@@ -494,7 +498,7 @@ function extensionArgs(): string[] {
 }
 
 async function mcpLaunch(
-  cwd: string
+  workspace: AgentWorkspace
 ): Promise<{ args: string[]; env: NodeJS.ProcessEnv }> {
   const settings = mcpSettings()
   if (!settings.enabled) {
@@ -502,13 +506,12 @@ async function mcpLaunch(
     return { args: ['--no-mcp', ...extensionArgs()], env: {} }
   }
   if (!desktopToolAvailable()) return { args: extensionArgs(), env: {} }
-  // A project covers several repositories, and code search has to be per repository, so each root
-  // gets its own endpoint (capped by the engine module).
-  const project = activeProject()
-  const roots =
-    project && project.roots.length > 1
-      ? project.roots.map((root) => ({ path: root.path, name: root.name, primary: root.primary }))
-      : [{ path: cwd, name: path.basename(cwd) || cwd, primary: true }]
+  // Several directories mean code search has to run per directory, so each root gets its own
+  // endpoint (capped by the engine module).
+  const roots = [
+    { path: workspace.primary, name: path.basename(workspace.primary) || workspace.primary, primary: true },
+    ...workspace.additional.map((root) => ({ path: root, name: path.basename(root) || root }))
+  ]
   const targets = await engines.buildEngineTargets({
     roots,
     config: engineConfig(),
@@ -890,9 +893,32 @@ function setStatus(patch: Partial<PiStatus>): void {
   broadcastStatus()
 }
 
+/**
+ * The directories this session works on.
+ *
+ * A session started inside a project covers the whole project: its own directory is the primary one
+ * and the rest become additional roots. Outside a project there is exactly one root, which is the
+ * behaviour every session had before projects existed.
+ */
+function currentWorkspace(cwd?: string): AgentWorkspace {
+  const primary = cwd ?? status.cwd
+  const project = activeProject()
+  if (!project) return { primary, additional: [] }
+  const key = path.resolve(primary)
+  if (!project.roots.some((root) => path.resolve(root.path) === key)) {
+    return { primary, additional: [] }
+  }
+  return {
+    primary,
+    additional: project.roots
+      .map((root) => root.path)
+      .filter((root) => path.resolve(root) !== key)
+  }
+}
+
 /** Start or restart the session; the engine hands the in-flight promise to a second caller. */
 async function startPi(cwd?: string, extraArgs: string[] = []): Promise<PiStatus> {
-  const next = await engine.start(cwd, extraArgs)
+  const next = await engine.start(currentWorkspace(cwd), extraArgs)
   if (next.phase === 'ready') await afterStart(next.cwd, extraArgs)
   return next
 }

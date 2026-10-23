@@ -1,6 +1,20 @@
 import type { PiStatus, PromptImage, PromptResult } from '@shared/types'
 
 /**
+ * The directories one session works on.
+ *
+ * A session always has a primary directory: it is the working directory, and relative paths, bash
+ * and the search defaults resolve against it. Additional roots are the other folders of a project —
+ * reachable by absolute path, never as subdirectories. This is the agent-layer notion of "working
+ * across several folders"; pi happens to implement it with a prompt section and absolute paths, but
+ * the contract does not depend on that.
+ */
+export interface AgentWorkspace {
+  primary: string
+  additional: string[]
+}
+
+/**
  * What the window needs from an agent engine.
  *
  * The desktop app is moving to "our own agent, with a swappable engine underneath". pi is engine #1
@@ -27,8 +41,10 @@ export interface AgentEngine {
   /** Last few KB of the child's stderr, for error reporting. */
   stderrTail(): string
 
+  /** Directories this session works on. */
+  workspace(): AgentWorkspace
   /** Start (or restart) the session; resolves once the engine answers `get_state`. */
-  start(cwd?: string, extraArgs?: string[]): Promise<PiStatus>
+  start(workspace?: string | AgentWorkspace, extraArgs?: string[]): Promise<PiStatus>
   /** True while a start is in flight, so a restart never runs over it. */
   starting(): boolean
   stop(): void

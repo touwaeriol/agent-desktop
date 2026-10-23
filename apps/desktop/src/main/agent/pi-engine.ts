@@ -2,7 +2,7 @@ import { existsSync } from 'node:fs'
 import os from 'node:os'
 import type { PiModel, PiStatus, PromptImage, PromptResult } from '@shared/types'
 import { PiRpcClient } from '../pi-rpc'
-import type { AgentEngine } from './engine'
+import type { AgentEngine, AgentWorkspace } from './engine'
 
 export interface PiEngineOptions {
   /**
@@ -11,7 +11,7 @@ export interface PiEngineOptions {
    * The engine does not know what a profile or an MCP server is; it asks for them, so a second
    * engine can be given a completely different set.
    */
-  prepare(workspace: string): Promise<{ args: string[]; env: NodeJS.ProcessEnv }>
+  prepare(workspace: AgentWorkspace): Promise<{ args: string[]; env: NodeJS.ProcessEnv }>
   /** Extra args that pin the session (session file, provider/model). */
   sessionArgs(): string[]
   /** Session directory args. */
@@ -40,6 +40,8 @@ export class PiEngine implements AgentEngine {
 
   private readonly rpc = new PiRpcClient()
   private snapshot: PiStatus = { phase: 'stopped', cwd: process.cwd() }
+  /** Primary plus additional roots; the engine never resolves them itself, it only reports them. */
+  private roots: AgentWorkspace = { primary: process.cwd(), additional: [] }
   private starting_ = false
   private startPromise: Promise<PiStatus> | undefined
   private settleWaiters: Array<() => void> = []
@@ -99,30 +101,49 @@ export class PiEngine implements AgentEngine {
     this.options.onStatus(this.snapshot)
   }
 
-  async start(cwd?: string, extraArgs: string[] = []): Promise<PiStatus> {
+  workspace(): AgentWorkspace {
+    return { primary: this.roots.primary, additional: [...this.roots.additional] }
+  }
+
+  async start(
+    workspace?: string | AgentWorkspace,
+    extraArgs: string[] = []
+  ): Promise<PiStatus> {
     // A second caller while a start is running used to receive `phase: 'starting'` and wait forever;
     // hand it the same promise instead.
     if (this.startPromise) return this.startPromise
-    const run = this.runStart(cwd, extraArgs).finally(() => {
+    const run = this.runStart(workspace, extraArgs).finally(() => {
       if (this.startPromise === run) this.startPromise = undefined
     })
     this.startPromise = run
     return run
   }
 
-  private async runStart(cwd: string | undefined, extraArgs: string[]): Promise<PiStatus> {
+  private async runStart(
+    requested: string | AgentWorkspace | undefined,
+    extraArgs: string[]
+  ): Promise<PiStatus> {
     this.starting_ = true
-    let workspace = cwd ?? this.snapshot.cwd
+    const wanted =
+      typeof requested === 'string'
+        ? { primary: requested, additional: [] }
+        : requested ?? this.roots
+    let workspace = wanted.primary || this.snapshot.cwd
     if (!existsSync(workspace)) {
       console.warn(`[pi] workspace does not exist, falling back to home: ${workspace}`)
       workspace = os.homedir()
+    }
+    this.roots = {
+      primary: workspace,
+      // A root that no longer exists is dropped instead of being handed to the model.
+      additional: [...new Set(wanted.additional)].filter((root) => root && existsSync(root))
     }
     this.rpc.stop()
     this.isBusy = false
     this.isCompacting = false
     this.setStatus({ phase: 'starting', cwd: workspace, error: undefined, stderrTail: undefined })
     try {
-      const launch = await this.options.prepare(workspace)
+      const launch = await this.options.prepare(this.roots)
       this.rpc.start(
         workspace,
         [...extraArgs, ...this.options.sessionDirArgs(), ...launch.args],

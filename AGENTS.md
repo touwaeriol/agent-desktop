@@ -122,6 +122,7 @@ npm run typecheck    # node + web 两个 tsconfig 分别检查
 - 目标形态是「我们自己的 agent，pi 只是可替换的引擎」。`agent/engine.ts` 是契约（`state/busy/compacting/running/start/stop/request/refresh/waitForSettle/waitForIdle`），`agent/pi-engine.ts` 是 pi 的实现。
 - **引擎只负责跑一轮和运行状态机**：子进程、`agent_start → agent_settled` 的 busy、压缩、settle waiter、`get_state` 权威校正、崩溃退出通知。**应用策略全部留在 `index.ts`**：MCP 服务器、`/btw` 分支、压缩阈值、速度档位、config、profile、子代理。
 - 引擎要的启动参数（MCP 参数、扩展、profile、速度档位、项目根）由 `prepare(workspace)` 回调提供，所以引擎不认识 MCP/profile 这些概念；`sessionArgs()` / `sessionDirArgs()` 同理。
+- **`AgentWorkspace = { primary, additional[] }`** 是「一个会话跨多个目录」在 agent 层的表达：`primary` 是工作目录（相对路径、bash、搜索默认都对它解析），`additional` 是项目里的其他目录（只能用绝对路径访问，绝不当子目录）。`engine.start()` 收 `string | AgentWorkspace`，`engine.workspace()` 报告当前生效的根；不存在的 additional 根在启动时被丢弃。**会话在项目内启动时覆盖整个项目，在项目外就是一个根**（`currentWorkspace()`），这条是行为分界，别在别处再拼一遍根列表。
 - `index.ts` 里的 `status` 只是**镜像**：引擎通过 `onStatus` 推过来，`statusSnapshot()` 再加应用自己的字段（压缩百分比、档位、仓库）。写状态必须走 `engine.setStatus()`，不要直接赋值。
 - 新增 pi 调用时用 `engine.request('命令', payload)`；不要重新引入第二个 `PiRpcClient`（子代理进程有自己的，那是另一回事）。
 - `engine.prompt()` 承担「窗口和 pi 对忙碌判断不一致」的全部兜底（压缩中等空闲后重试、`already processing` 改发 `followUp` 并回 `queued: true`），所以它是唯一发送入口；不要在别处再包一层重试。
@@ -130,6 +131,7 @@ npm run typecheck    # node + web 两个 tsconfig 分别检查
 ## 项目（多仓库）
 
 - `src/main/projects.ts`：`ProjectStore`（`projects.json`，原子写、坏文件静默当空）+ `renderProjectSection()`。一个 project = 多个仓库根，**恰好一个 primary**，它是 pi 的 cwd。
+- **项目是可选的上层，不是会话的前提**：默认侧栏还是「按文件夹分组」的老样子，没有项目时不出现任何 chip、不建任何文件。只有在需要「把多个目录合成一个工作单元」时才建项目，项目激活后会话才覆盖它的全部根。**不要**在启动时给每个会话目录自动建项目，也不要在新建会话/选目录时强制建项目（试过，等于把界面形状改了，被否掉）。
 - 激活项目：`projects:activate` 把 `config.activeProject` 存下并重启 pi 到主仓库；扩展通过环境变量 `AGENT_DESKTOP_PROJECT`（`{id,name,roots}`）收到根清单，在 `before_agent_start` 里注入 `<project>` 段——**只在多根时注入**，单仓库就是普通会话。这个段和速度档位一样，注册在 `if (!url) return` 之前，MCP 全关也要生效。
 - pi 没有 `--add-dir`：跨仓库靠提示词约定（绝对路径、每条 bash 是新 shell 要 `cd`、跨仓库搜索用 grep 的 `path` 参数）。实测模型能准确复述两个仓库的绝对路径。
 - 侧栏在项目激活时把该项目所有仓库的会话归到同一个组头（`project:<id>`），组头的 `+` 和分支徽标用主仓库。
