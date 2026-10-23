@@ -71,7 +71,8 @@ npm run typecheck    # node + web 两个 tsconfig 分别检查
 
 - 图片走 pi 原生能力：RPC `prompt` / `steer` 的 `images` 字段，元素是 `{type:'image', data: base64, mimeType}`；pi 会把它们写进会话 JSONL 的 image content block，`get_messages` 也返回同样的块。
 - 渲染层 `lib/images.ts` 负责 File → base64（`blobToDraftImage`，上限 8MB）和 `clipboardImages`（读 `clipboardData.items`）。**图片是纯附件**：不写文件名、不插入 `[图片N]` 标记，统一在输入框上方以 42×42 圆角方块展示（`object-fit: cover`，不同长宽比也对齐），悬停才出现删除按钮；发送时按数组顺序传给 pi。
-- **粘贴入口在 `Composer.tsx` 的 window 级 `paste` 监听**（不是 textarea 的 `onPaste`）：焦点在 chip / 滚动区时 Cmd+V 也要能附图，而落到其他控件（设置、@ 搜索框、队列编辑）的粘贴要放过去不拦。命中图片时 `preventDefault()`，纯文本粘贴仍走浏览器默认。`addImages` 用 `imagesRef` 而不是 props 里的 `images`：连贴两张时两次解码并发，用 props 会让后一张覆盖前一张。
+- **粘贴入口在 `Composer.tsx` 的 window 级 `paste` 监听**（不是 textarea 的 `onPaste`）：焦点在 chip / 滚动区时 Cmd+V 也要能附图，而落到其他控件（设置、@ 搜索框、队列编辑）的粘贴要放过去不拦。命中图片时 `preventDefault()`，纯文本粘贴仍走浏览器默认。`addImages` 和 `removeImage` 都用 `imagesRef` 而不是 props 里的 `images`：连贴两张时两次解码并发、连删两个时两次点击同批，用 props 会让后一次覆盖前一次。输入框 `disabled`（pi 未就绪或 `/btw` 开着）时给提示而不是静默丢弃——剪贴板里那张图已经没了。
+- 验证方式（不用手点）：PowerShell `[Windows.Forms.Clipboard]::SetImage()` 放一张图到系统剪贴板，再用 CDP `Input.dispatchKeyEvent`（`modifiers: 2` + `KeyV`）发真正的 Ctrl+V，然后数 `.draft-image` 的数量；合成 `ClipboardEvent` + `DataTransfer` 只能测到监听器，测不到系统剪贴板这一层。
 - 点任意缩略图打开 `ImageLightbox`（Esc / 点背景关闭）；会话里用户消息用 `MessageImages` 渲染，图片在气泡**上方**右对齐（`.message.user` 是 column + align-items flex-end）。
 - 允许只发图片不发文字：`prompt` 的 `message` 传空串，pi 接受（实测模型能收到图）。
 - **上下文用量**：输入框右下角的小圆环 + `2% 20K / 1M`，数据来自 `get_session_stats().contextUsage`（`{tokens, contextWindow, percent}`）。`App.tsx` 在 `loadMessages`、`agent_settled`、`status.autoCompactPercent` 以及 **`status.model.id` / `contextWindow` 变化时**刷新（换模型是新的窗口、新的阈值，用量和配色必须跟着变）；`percent` 在刚压缩完时是 `null`，此时按 `tokens/ceiling` 兜底、拿不到就显示 0。**不要**显示 prompt cache 到期时间——pi 不提供，也不该猜。

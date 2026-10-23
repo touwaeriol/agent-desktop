@@ -175,17 +175,27 @@ export function Composer({
     [onImagesChange, onNotice]
   )
 
-  const removeImage = (id: string): void => {
-    onImagesChange(images.filter((image) => image.id !== id))
-  }
+  /** Same reason as `addImages`: two removals in one tick must not both start from stale props. */
+  const removeImage = useCallback(
+    (id: string): void => {
+      const next = imagesRef.current.filter((image) => image.id !== id)
+      imagesRef.current = next
+      onImagesChange(next)
+    },
+    [onImagesChange]
+  )
 
   const handleFiles = useCallback(
     (files: File[]): void => {
       // Nothing may be attached while pi is not accepting prompts (or a `/btw` fork is open).
-      if (disabled) return
+      // Say so instead of dropping the paste: the image is gone from the clipboard by then.
+      if (disabled) {
+        onNotice?.('现在不能添加图片：pi 未就绪，或侧边提问窗口还开着')
+        return
+      }
       void addImages(files)
     },
-    [addImages, disabled]
+    [addImages, disabled, onNotice]
   )
 
   /**
