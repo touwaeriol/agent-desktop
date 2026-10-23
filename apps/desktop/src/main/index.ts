@@ -122,7 +122,7 @@ function activeProject(): projects.Project | undefined {
 
 let desktopConfig: DesktopConfig = {}
 
-/** Engine factory: pi stays the default; `prophey` is ours. */
+/** Engine factory: Prophey is the default; `pi` stays available as the other engine. */
 function createEngine(): AgentEngine {
   const shared = {
     onStatus: (next: PiStatus) => {
@@ -145,7 +145,7 @@ function createEngine(): AgentEngine {
     onAssistantError: (message: string) => noteSpeedRejection(message),
     onExit: () => handleExit()
   }
-  if (desktopConfig.engine === 'prophey') {
+  if (desktopConfig.engine !== 'pi') {
     return new PropheyEngine({
       ...shared,
       toolModulePath: coreToolsModule(),
@@ -1385,7 +1385,7 @@ function registerIpc(): void {
   })
 
   ipcMain.handle('desktop:config', () => ({
-    engine: desktopConfig.engine === 'prophey' ? 'prophey' : 'pi',
+    engine: desktopConfig.engine === 'pi' ? 'pi' : 'prophey',
     cwd: status.cwd,
     sessionMode: currentSessionMode(),
     sessionDir: currentSessionDir(),
@@ -2245,7 +2245,7 @@ app.whenReady().then(async () => {
   // The window's session list: ids, titles and workspaces we own; pi's files are engine storage.
   sessionStore = new SessionStore(path.join(app.getPath('userData'), 'sessions.json'))
   await sessionStore.load().catch(() => undefined)
-  if (desktopConfig.engine === 'prophey' && !desktopConfig.propheySessionId) {
+  if (desktopConfig.engine !== 'pi' && !desktopConfig.propheySessionId) {
     await saveConfig({ propheySessionId: `s_${Math.random().toString(16).slice(2, 14)}` })
   }
   currentEngine = createEngine()

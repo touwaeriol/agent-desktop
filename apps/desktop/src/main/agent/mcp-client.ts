@@ -98,7 +98,9 @@ export async function loadMcpTools(endpoints: McpEndpoint[]): Promise<CoreTool[]
   for (const endpoint of endpoints) {
     const listed = await listTools(endpoint)
     for (const tool of listed) {
-      const name = `mcp__${endpoint.name}__${tool.name}`
+      // No `mcp__` prefix: that name exists because pi has to namespace MCP tools. We own the
+      // loop, so the server is already part of the name (`codegraph__git__codegraph_search`).
+      const name = `${endpoint.name}__${tool.name}`
       tools.push({
         name,
         description: tool.description ?? `${endpoint.name} 的 ${tool.name}`,

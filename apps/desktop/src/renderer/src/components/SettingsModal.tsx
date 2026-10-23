@@ -1233,13 +1233,13 @@ export function SettingsModal({
                 <label>引擎</label>
                 <div className="theme-switch storage-switch">
                   <button
-                    className={desktopConfig?.engine !== 'prophey' ? 'active' : ''}
+                    className={desktopConfig?.engine === 'pi' ? 'active' : ''}
                     onClick={() => void changeEngine('pi')}
                   >
                     pi
                   </button>
                   <button
-                    className={desktopConfig?.engine === 'prophey' ? 'active' : ''}
+                    className={desktopConfig?.engine !== 'pi' ? 'active' : ''}
                     onClick={() => void changeEngine('prophey')}
                   >
                     Prophey
@@ -1249,8 +1249,9 @@ export function SettingsModal({
                   pi：完整的编码 agent（工具、压缩、子代理、扩展、<code>/btw</code>）。
                 </p>
                 <p className="field-hint">
-                  Prophey：我们自己的循环——直连服务商、跑同一套根感知工具、会话存我们自己的
-                  transcript。压缩、自动重试之外的恢复、子代理与 <code>/btw</code> 还不支持。
+                  Prophey（默认）：我们自己的循环——直连服务商、根感知工具、MCP、子代理、
+                  <code>/btw</code>、压缩与重试、自己的 transcript 与系统提示词。
+                  只差 Claude 的快速模式。
                 </p>
               </div>
 
