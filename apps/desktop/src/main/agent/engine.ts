@@ -1,4 +1,4 @@
-import type { PiStatus } from '@shared/types'
+import type { PiStatus, PromptImage, PromptResult } from '@shared/types'
 
 /**
  * What the window needs from an agent engine.
@@ -29,9 +29,22 @@ export interface AgentEngine {
 
   /** Start (or restart) the session; resolves once the engine answers `get_state`. */
   start(cwd?: string, extraArgs?: string[]): Promise<PiStatus>
+  /** True while a start is in flight, so a restart never runs over it. */
+  starting(): boolean
   stop(): void
   /** Kill without the grace period, for app shutdown. */
   dispose(): void
+
+  /**
+   * Run one turn, absorbing the moments where the window and the engine disagree about "busy":
+   * waiting out a compaction, retrying, and turning a refusal into a queued follow-up.
+   *
+   * This is the only send path; callers must not wrap it in a second retry loop.
+   */
+  prompt(
+    message: string,
+    options?: { behavior?: 'steer' | 'followUp'; images?: PromptImage[] }
+  ): Promise<PromptResult>
 
   /** Raw command channel; `type` is the engine's own command name. */
   request<T = Record<string, unknown>>(
