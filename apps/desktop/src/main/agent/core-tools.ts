@@ -1,3 +1,4 @@
+import http from 'node:http'
 import { pathToFileURL } from 'node:url'
 import type { Tool } from '@earendil-works/pi-ai'
 
@@ -44,24 +45,50 @@ export interface BridgeOptions {
 }
 
 export function bridgeContext(options: BridgeOptions): Record<string, unknown> {
-  const request = async (method: string, target: string, payload?: unknown): Promise<unknown> => {
-    const url = new URL(target, options.url)
-    const body = payload === undefined ? undefined : JSON.stringify(payload)
-    const response = await fetch(url, {
-      method,
-      headers: {
-        ...(body ? { 'content-type': 'application/json' } : {}),
-        'x-agent-desktop-token': options.token
-      },
-      ...(body ? { body } : {})
+  // `node:http` rather than `fetch`: the main process installs a global undici dispatcher for the
+  // system proxy, and loopback requests through it fail (`fetch failed`) — the same reason the
+  // MCP server uses raw http. It also avoids undici's 300s headers timeout, which a question
+  // waiting for the user would otherwise hit.
+  const request = (method: string, target: string, payload?: unknown): Promise<unknown> =>
+    new Promise((resolve, reject) => {
+      let url: URL
+      try {
+        url = new URL(target, options.url)
+      } catch (error) {
+        reject(new Error(`桥接地址无效：${String(error)}`))
+        return
+      }
+      const body = payload === undefined ? undefined : Buffer.from(JSON.stringify(payload), 'utf8')
+      const call = http.request(
+        {
+          hostname: url.hostname,
+          port: url.port,
+          path: `${url.pathname}${url.search}`,
+          method,
+          headers: {
+            ...(body ? { 'content-type': 'application/json', 'content-length': body.length } : {}),
+            'x-agent-desktop-token': options.token
+          }
+        },
+        (response) => {
+          const chunks: Buffer[] = []
+          response.on('data', (chunk: Buffer) => chunks.push(chunk))
+          response.on('end', () => {
+            const text = Buffer.concat(chunks).toString('utf8')
+            try {
+              resolve(JSON.parse(text))
+            } catch {
+              reject(new Error(`桥接返回了无法解析的内容：${text.slice(0, 200)}`))
+            }
+          })
+        }
+      )
+      // A question can stay unanswered for a long time; never cut it.
+      call.setTimeout(0)
+      call.on('error', reject)
+      if (body) call.end(body)
+      else call.end()
     })
-    const text = await response.text()
-    try {
-      return JSON.parse(text)
-    } catch {
-      throw new Error(`桥接返回了无法解析的内容：${text.slice(0, 200)}`)
-    }
-  }
   return {
     request,
     post: (target: string, payload?: unknown) => request('POST', target, payload),
@@ -93,6 +120,34 @@ export async function loadSubagentTools(
     parameters: tool.inputSchema ?? { type: 'object', properties: {} },
     call: (args) => tool.call(args ?? {}, context)
   }))
+}
+
+/** Import the desktop question tool: it shows a dialog in the window and waits for the answer. */
+export async function loadAskTool(
+  modulePath: string,
+  context: Record<string, unknown>
+): Promise<CoreTool[]> {
+  const module = (await import(pathToFileURL(modulePath).href)) as {
+    askUserQuestion?: {
+      name: string
+      description?: string
+      inputSchema?: Record<string, unknown>
+      call(args?: Record<string, unknown>, ctx?: unknown): Promise<{
+        content: Array<{ type: string; text?: string }>
+        isError?: boolean
+      }>
+    }
+  }
+  const tool = module.askUserQuestion
+  if (!tool) return []
+  return [
+    {
+      name: tool.name,
+      description: tool.description ?? tool.name,
+      parameters: tool.inputSchema ?? { type: 'object', properties: {} },
+      call: (args) => tool.call(args ?? {}, context)
+    }
+  ]
 }
 
 /** Import the workspace tool module by absolute path (dev checkout or packaged resources). */

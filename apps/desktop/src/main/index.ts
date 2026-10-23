@@ -163,6 +163,7 @@ function createEngine(): AgentEngine {
         return port && token ? { url: `http://127.0.0.1:${port}`, token } : undefined
       },
       subagentModulePath: coreToolModule('subagent.mjs'),
+      askModulePath: coreToolModule('ask-user.mjs'),
       mcpEndpoints: (workspace) => mcpEndpointsFor(workspace),
       speedMode: () => currentSpeedMode()
     })

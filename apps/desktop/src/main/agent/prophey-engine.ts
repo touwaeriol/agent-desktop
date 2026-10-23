@@ -6,6 +6,7 @@ import type { TranscriptStore } from '../transcript-store'
 import { loadMcpTools } from './mcp-client'
 import {
   bridgeContext,
+  loadAskTool,
   loadSubagentTools,
   loadWorkspaceTools,
   toolDeclarations,
@@ -58,6 +59,8 @@ export class PropheyEngine implements AgentEngine {
       bridge?: () => { url: string; token: string } | undefined
       /** Directory holding `subagent.mjs`; absent when subagents are off. */
       subagentModulePath?: string
+      /** Path of `ask-user.mjs`; the desktop question dialog. */
+      askModulePath?: string
       /** The processing tier the window selected; resolved per model. */
       speedMode?: () => 'standard' | 'fast' | 'ultrafast'
       /** The app's MCP endpoints (`/mcp/<key>` on the bridge), configured for this workspace. */
@@ -393,10 +396,12 @@ ${text.trim()}`,
     const context = bridge ? bridgeContext(bridge) : undefined
     const subagents =
       context && subagentPath ? await loadSubagentTools(subagentPath, context).catch(() => []) : []
+    const askPath = this.options.askModulePath
+    const ask = context && askPath ? await loadAskTool(askPath, context).catch(() => []) : []
     // MCP servers (codegraph / warpgrep / web) over the same bridge endpoints pi connects to.
     const endpoints = await this.options.mcpEndpoints?.(this.workspace()).catch(() => [])
     const mcp = endpoints && endpoints.length > 0 ? await loadMcpTools(endpoints).catch(() => []) : []
-    this.tools = [...workspace, ...subagents, ...mcp]
+    this.tools = [...workspace, ...subagents, ...ask, ...mcp]
     return this.tools
   }
 
