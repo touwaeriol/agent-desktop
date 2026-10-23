@@ -299,7 +299,7 @@ function normalizeTools(raw: unknown): Record<string, McpToolInfo[]> {
   return result
 }
 
-const MCP_ENDPOINT = /^\/mcp\/([a-z0-9_-]+)$/
+const MCP_ENDPOINT = /^\/mcp\/([A-Za-z0-9_-]+)$/
 const API_PREFIX = /^\/(agents|models|subagents)(\/.*)?$/
 
 export interface ApiRequest {

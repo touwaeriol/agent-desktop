@@ -502,8 +502,15 @@ async function mcpLaunch(
     return { args: ['--no-mcp', ...extensionArgs()], env: {} }
   }
   if (!desktopToolAvailable()) return { args: extensionArgs(), env: {} }
+  // A project covers several repositories, and code search has to be per repository, so each root
+  // gets its own endpoint (capped by the engine module).
+  const project = activeProject()
+  const roots =
+    project && project.roots.length > 1
+      ? project.roots.map((root) => ({ path: root.path, name: root.name, primary: root.primary }))
+      : [{ path: cwd, name: path.basename(cwd) || cwd, primary: true }]
   const targets = await engines.buildEngineTargets({
-    cwd,
+    roots,
     config: engineConfig(),
     morphApiKey: desktopConfig.mcp?.morphApiKey,
     webAvailable: webReady()
@@ -2088,7 +2095,8 @@ app.whenReady().then(async () => {
     void saveToolCache(next).then(() => broadcastMcpState())
   })
   bridge.setMcpHandler((engine, message) => {
-    if (engine !== 'codegraph' && engine !== 'warpgrep' && engine !== 'web') {
+    // Endpoints are `codegraph`, `codegraph__<repo>`, `warpgrep`, … — a project adds one per root.
+    if (!gateway.isConfigured(engine)) {
       return Promise.reject(new Error(`未知网关端点：${engine}`))
     }
     return gateway.handleMessage(engine, message)

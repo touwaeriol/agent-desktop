@@ -17,6 +17,8 @@ import { WARPGREP_TOOL, WarpGrep, WarpGrepError } from './warpgrep'
 
 export interface EngineTarget {
   id: McpEngineId
+  /** Endpoint key: the engine id for the primary root, `<id>__<repo>` for the others. */
+  key: string
   /** `upstream` spawns a stdio MCP server; `warpgrep` and `web` run in-process. */
   kind: 'upstream' | 'warpgrep' | 'web'
   command?: string
@@ -498,7 +500,7 @@ interface Gateway {
   stop(sync?: boolean): void
 }
 
-const gateways = new Map<McpEngineId, Gateway>()
+const gateways = new Map<string, Gateway>()
 
 function createGateway(target: EngineTarget): Gateway {
   if (target.kind === 'warpgrep') return new WarpGrepGateway(target)
@@ -508,15 +510,15 @@ function createGateway(target: EngineTarget): Gateway {
 
 /** Point the endpoints at the engines for the current session directory. */
 export function configure(targets: EngineTarget[]): void {
-  const wanted = new Set(targets.map((target) => target.id))
-  for (const [id, gateway] of gateways) {
-    if (!wanted.has(id)) {
+  const wanted = new Set(targets.map((target) => target.key))
+  for (const [key, gateway] of gateways) {
+    if (!wanted.has(key)) {
       gateway.stop()
-      gateways.delete(id)
+      gateways.delete(key)
     }
   }
   for (const target of targets) {
-    const existing = gateways.get(target.id)
+    const existing = gateways.get(target.key)
     const same =
       existing &&
       existing.target.kind === target.kind &&
@@ -526,16 +528,21 @@ export function configure(targets: EngineTarget[]): void {
       (existing.target.args ?? []).join('\u0000') === (target.args ?? []).join('\u0000')
     if (same) continue
     existing?.stop()
-    gateways.set(target.id, createGateway(target))
+    gateways.set(target.key, createGateway(target))
   }
 }
 
-export function isConfigured(id: McpEngineId): boolean {
-  return gateways.has(id)
+export function isConfigured(key: string): boolean {
+  return gateways.has(key)
 }
 
-export function gatewayError(id: McpEngineId): string | undefined {
-  return gateways.get(id)?.error
+export function gatewayError(key: string): string | undefined {
+  return gateways.get(key)?.error
+}
+
+/** Every endpoint key that currently has a gateway (primary engines plus per-repository ones). */
+export function configuredKeys(): string[] {
+  return [...gateways.keys()]
 }
 
 /**
@@ -543,10 +550,10 @@ export function gatewayError(id: McpEngineId): string | undefined {
  * notifications (which the bridge answers with 202).
  */
 export async function handleMessage(
-  id: McpEngineId,
+  key: string,
   message: Record<string, unknown>
 ): Promise<unknown | undefined> {
-  const gateway = gateways.get(id)
+  const gateway = gateways.get(key)
   const method = typeof message.method === 'string' ? message.method : ''
   if (message.id === undefined || message.id === null) {
     if (method === 'notifications/cancelled' && gateway) {
@@ -559,7 +566,7 @@ export async function handleMessage(
     return {
       jsonrpc: '2.0',
       id: message.id,
-      error: { code: -32603, message: `${id} 网关未启用` }
+      error: { code: -32603, message: `${key} 网关未启用` }
     }
   }
   try {

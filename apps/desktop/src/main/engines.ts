@@ -211,6 +211,16 @@ export async function engineEntry(id: McpEngineId, explicit?: string): Promise<s
 /** What the gateway needs to serve one engine. */
 export interface EngineTargetSpec {
   id: McpEngineId
+  /**
+   * Unique endpoint key: the engine id for the primary repository, `<id>__<repo>` for the others.
+   *
+   * A project can span several repositories and code search has to be per repository (the upstream
+   * indexes one tree), so each root gets its own endpoint and its own tool set instead of pretending
+   * one index covers everything.
+   */
+  key: string
+  /** Repository display name, when the target is scoped to one root of a project. */
+  label?: string
   kind: 'upstream' | 'warpgrep' | 'web'
   command?: string
   args?: string[]
@@ -232,29 +242,58 @@ export interface EngineRegistration {
   toolExposure: Record<string, string>
   timeout: number
   description: string
+  /** Repository this endpoint is scoped to, when a project spans several. */
+  label?: string
 }
 
-function exposureFor(
-  id: McpEngineId,
-  toggles: Record<string, Record<string, boolean> | undefined>
-): Record<string, string> {
+function exposureFor(id: McpEngineId, toggles: Record<string, boolean> | undefined): Record<string, string> {
   const toolExposure: Record<string, string> = {}
   for (const tool of DIRECT_TOOLS[id]) toolExposure[tool] = 'direct'
-  for (const [tool, enabled] of Object.entries(toggles[id] ?? {})) {
+  for (const [tool, enabled] of Object.entries(toggles ?? {})) {
     if (!enabled) toolExposure[tool] = 'hidden'
   }
   return toolExposure
 }
 
+/** A repository the engines should cover: the project's roots, primary first. */
+export interface EngineRoot {
+  path: string
+  name: string
+  primary?: boolean
+}
+
+/**
+ * Cap on how many repositories get their own engine endpoints.
+ *
+ * Each root is another upstream process (CodeGraph or Serena) plus its own tools in the model's
+ * list, so a project with eight repositories would cost eight processes and a wall of tools. Beyond
+ * this, the remaining roots stay reachable through pi's own grep/read tools.
+ */
+export const ENGINE_ROOT_LIMIT = 3
+
+/** `codegraph` for the primary root, `codegraph__server` for the others. */
+function rootKey(id: McpEngineId, root: EngineRoot): string {
+  if (root.primary) return id
+  // Lower case: the bridge's endpoint pattern and pi's tool names both stay simpler that way.
+  const slug = root.name
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, '_')
+    .replace(/^_+|_+$/g, '') || 'root'
+  return `${id}__${slug}`
+}
+
 /** Engines that are enabled and usable, in the shape the gateway consumes. */
 export async function buildEngineTargets(options: {
-  cwd: string
+  roots: EngineRoot[]
   config: Record<string, { enabled?: boolean; entry?: string } | undefined>
   morphApiKey?: string
   /** Web engine: whether any backend (Brave key or native provider) is configured. */
   webAvailable?: boolean
 }): Promise<EngineTargetSpec[]> {
   const targets: EngineTargetSpec[] = []
+  const roots = options.roots.length > 0 ? options.roots : [{ path: process.cwd(), name: 'root', primary: true }]
+  const primary = roots.find((root) => root.primary) ?? roots[0]
+  const ordered = [primary, ...roots.filter((root) => root !== primary)].slice(0, ENGINE_ROOT_LIMIT)
   for (const id of ['codegraph', 'warpgrep', 'web'] as McpEngineId[]) {
     const engine = options.config[id]
     if (!engine?.enabled) continue
@@ -263,42 +302,51 @@ export async function buildEngineTargets(options: {
       if (options.webAvailable === false) continue
       targets.push({
         id,
+        key: id,
         kind: 'web',
-        cwd: options.cwd,
+        cwd: primary.path,
         allowlist: ALLOWED_TOOLS[id],
         timeoutMs: TIMEOUT_MS[id]
       })
       continue
     }
     if (id === 'warpgrep') {
-      targets.push({
-        id,
-        kind: 'warpgrep',
-        cwd: options.cwd,
-        allowlist: ALLOWED_TOOLS[id],
-        timeoutMs: TIMEOUT_MS[id],
-        apiKey: options.morphApiKey?.trim() || undefined
-      })
+      for (const root of ordered) {
+        targets.push({
+          id,
+          key: rootKey(id, root),
+          label: ordered.length > 1 ? root.name : undefined,
+          kind: 'warpgrep',
+          cwd: root.path,
+          allowlist: ALLOWED_TOOLS[id],
+          timeoutMs: TIMEOUT_MS[id],
+          apiKey: options.morphApiKey?.trim() || undefined
+        })
+      }
       continue
     }
     const detection = await detect(id, engine.entry?.trim() || undefined)
     if (!detection.entry) continue
-    targets.push({
-      id,
-      kind: 'upstream',
-      command: process.execPath,
-      args: [detection.entry.path, 'serve', '--mcp', '--path', options.cwd],
-      env: {
-        ELECTRON_RUN_AS_NODE: '1',
-        // No CODEGRAPH_NO_DAEMON: that makes the server take CodeGraph's single writer lock, and a
-        // second client (the user's IDE or terminal) then either refuses to start or serves a
-        // reduced tool set. Letting it proxy to the shared daemon keeps them coexisting.
-        CODEGRAPH_MCP_TOOLS: CODEGRAPH_TOOLS
-      },
-      cwd: options.cwd,
-      allowlist: ALLOWED_TOOLS[id],
-      timeoutMs: TIMEOUT_MS[id]
-    })
+    for (const root of ordered) {
+      targets.push({
+        id,
+        key: rootKey(id, root),
+        label: ordered.length > 1 ? root.name : undefined,
+        kind: 'upstream',
+        command: process.execPath,
+        args: [detection.entry.path, 'serve', '--mcp', '--path', root.path],
+        env: {
+          ELECTRON_RUN_AS_NODE: '1',
+          // No CODEGRAPH_NO_DAEMON: that makes the server take CodeGraph's single writer lock, and a
+          // second client (the user's IDE or terminal) then either refuses to start or serves a
+          // reduced tool set. Letting it proxy to the shared daemon keeps them coexisting.
+          CODEGRAPH_MCP_TOOLS: CODEGRAPH_TOOLS
+        },
+        cwd: root.path,
+        allowlist: ALLOWED_TOOLS[id],
+        timeoutMs: TIMEOUT_MS[id]
+      })
+    }
   }
   return targets
 }
@@ -310,20 +358,28 @@ export function buildEngineRegistrations(options: {
   targets: EngineTargetSpec[]
   toggles: Record<string, Record<string, boolean> | undefined>
 }): EngineRegistration[] {
-  return options.targets.map((target) => ({
-    name: target.id,
-    url: `${options.baseUrl}/mcp/${target.id}`,
-    headers: { authorization: `Bearer ${options.token}` },
-    exposure: 'deferred',
-    toolExposure: exposureFor(target.id, options.toggles),
-    timeout: Math.round(target.timeoutMs / 1000),
-    description:
+  return options.targets.map((target) => {
+    // pi exposes these as `mcp__<name>__<tool>`, so the name has to survive as an identifier.
+    const name = target.key.replace(/[^a-zA-Z0-9_-]+/g, '_')
+    const repo = target.label ? `（仓库 ${target.label}）` : ''
+    const base =
       target.id === 'codegraph'
         ? `CodeGraph 网关：符号搜索、调用关系、影响面分析（${ALLOWED_TOOLS.codegraph.length} 个工具，默认只返回位置不返回源码）`
         : target.id === 'web'
           ? '网络网关：web_search（服务商原生搜索或 Brave）与 web_fetch（本地抓取并转 Markdown）'
           : 'WarpGrep 网关：Morph 的自然语言代码搜索（codebase_search，默认只返回文件与行号）'
-  }))
+    return {
+      name,
+      url: `${options.baseUrl}/mcp/${target.key}`,
+      headers: { authorization: `Bearer ${options.token}` },
+      exposure: 'deferred',
+      // Tool switches are per engine, so a per-root endpoint follows its engine's settings.
+      toolExposure: exposureFor(target.id, options.toggles[target.key] ?? options.toggles[target.id]),
+      timeout: Math.round(target.timeoutMs / 1000),
+      description: repo ? `${base}${repo}` : base,
+      ...(target.label ? { label: target.label } : {})
+    }
+  })
 }
 
 export async function engineStates(options: {

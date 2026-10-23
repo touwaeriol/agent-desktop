@@ -98,11 +98,15 @@ const WEB_GUIDANCE = [
  * belong together and where they live, so the app sends that list and this renders it. Absent for a
  * single-repository session, which needs no explanation.
  */
-function projectSection(raw) {
+function projectSection(raw, engineSpecs) {
   const project = parseJson(raw, undefined)
   const roots = Array.isArray(project?.roots) ? project.roots : []
   if (roots.length <= 1) return undefined
   const primary = roots.find((root) => root?.primary) ?? roots[0]
+  // Code search runs once per repository, so the model has to know which tool set belongs to which.
+  const servers = (Array.isArray(engineSpecs) ? engineSpecs : [])
+    .filter((spec) => typeof spec?.label === 'string' && spec.label)
+    .map((spec) => `\`mcp__${String(spec.name).replace(/[^a-zA-Z0-9_]/g, '_')}__*\` → ${spec.label}`)
   return [
     `当前项目「${String(project.name ?? '')}」包含 ${roots.length} 个仓库，你的工作目录是主仓库 ${
       primary?.name ?? ''
@@ -115,7 +119,10 @@ function projectSection(raw) {
     '',
     '跨仓库引用文件一律写绝对路径，不要按工作目录去推算相对路径，也不要把别的仓库当成子目录。',
     '每条 bash 命令都是新的 shell，cd 不会保留：要进哪个仓库就先 `cd <仓库路径> && …`。',
-    '跨仓库搜索用 grep 工具的 `path` 参数指向仓库目录，不要用 `bash grep -rn` 扫整个磁盘。'
+    '跨仓库搜索用 grep 工具的 `path` 参数指向仓库目录，不要用 `bash grep -rn` 扫整个磁盘。',
+    ...(servers.length > 0
+      ? ['', `代码搜索按仓库分成独立工具集，按仓库选对再搜：${servers.join('，')}。`]
+      : [])
   ].join('\n')
 }
 
@@ -210,7 +217,7 @@ export default function desktopMcp(pi) {  const url = process.env.AGENT_DESKTOP_
   const toggles = parseJson(process.env.AGENT_DESKTOP_MCP_TOGGLES, {})
   const subagentsEnabled = process.env.AGENT_DESKTOP_SUBAGENTS === '1'
   const agentsSection = process.env.AGENT_DESKTOP_AGENTS_SECTION ?? ''
-  const projectText = projectSection(process.env.AGENT_DESKTOP_PROJECT)
+  const projectText = projectSection(process.env.AGENT_DESKTOP_PROJECT, engines)
   // Prompt- and request-level, so neither may depend on the bridge: the built-in servers can be off.
   registerSpeed(pi)
   if (projectText) {
@@ -282,10 +289,18 @@ export default function desktopMcp(pi) {  const url = process.env.AGENT_DESKTOP_
       return
     }
     const servers = {}
+    // A server name can contain `__` (`codegraph__Git` for a project's second repository), so the
+    // split has to try the names we registered, longest first, instead of a lazy regex that would
+    // file those tools under `codegraph` with a `Git__…` tool name.
+    const known = [CORE_SERVER, ...(Array.isArray(engines) ? engines.map((spec) => spec?.name) : [])]
+      .filter((name) => typeof name === 'string' && name)
+      .sort((a, b) => b.length - a.length)
     for (const tool of tools) {
-      const match = /^mcp__(.+?)__(.+)$/.exec(tool.name)
-      if (!match) continue
-      const [, server, name] = match
+      if (typeof tool?.name !== 'string' || !tool.name.startsWith('mcp__')) continue
+      const rest = tool.name.slice(5)
+      const server = known.find((name) => rest.startsWith(`${name}__`))
+      if (!server) continue
+      const name = rest.slice(server.length + 2)
       if (!servers[server]) servers[server] = []
       servers[server].push({ name, exposure: tool.exposure })
     }
