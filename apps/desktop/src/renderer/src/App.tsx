@@ -328,6 +328,10 @@ export default function App(): React.JSX.Element {
   const [editingProject, setEditingProject] = useState<Project>()
   const [activeProjectId, setActiveProjectId] = useState<string>()
   const [recentRepos, setRecentRepos] = useState<string[]>([])
+  /** What the active engine supports; the composer hides the rest. */
+  const [capabilities, setCapabilities] = useState<
+    { compact: boolean; fork: boolean; thinking: boolean; models: boolean } | undefined
+  >(undefined)
 
   const loadProjects = useCallback(async () => {
     try {
@@ -335,6 +339,7 @@ export default function App(): React.JSX.Element {
       setProjects(list)
       const config = await window.pi.getDesktopConfig()
       setActiveProjectId(config.activeProject)
+      setCapabilities(config.capabilities)
       setRecentRepos(await window.pi.recentRepos())
     } catch {
       // a missing projects file is not an error, just no projects
@@ -1275,6 +1280,7 @@ export default function App(): React.JSX.Element {
         )}
 
         <Composer
+          capabilities={capabilities}
           value={draft}
           onChange={setDraft}
           images={draftImages}

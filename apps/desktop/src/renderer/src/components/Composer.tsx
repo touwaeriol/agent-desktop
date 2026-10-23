@@ -82,7 +82,8 @@ export function Composer({
   contextUsage,
   autoCompactPercent,
   onChooseWorkspace,
-  statusBar
+  statusBar,
+  capabilities
 }: {
   value: string
   onChange: (value: string) => void
@@ -105,6 +106,11 @@ export function Composer({
   onChooseWorkspace: () => void
   /** Run summary rendered directly above the input, so it reads as part of the composer. */
   statusBar?: ReactNode
+  /**
+   * What the active engine supports. A CLI engine owns its own loop, so compaction and the side chat
+   * are its own commands — offering ours would only produce "not supported" after the click.
+   */
+  capabilities?: { compact: boolean; fork: boolean; thinking: boolean; models: boolean }
 }) {
   const ref = useRef<HTMLTextAreaElement>(null)
   const contextRef = useRef<HTMLDivElement>(null)
@@ -138,10 +144,17 @@ export function Composer({
     value !== slashPicked && value.startsWith('/') && !value.includes(' ') && !value.includes('\n')
       ? value.slice(1).toLowerCase()
       : undefined
+  // Only offer what the engine can answer.
+  const availableCommands = SLASH_COMMANDS.filter((command) => {
+    if (!capabilities) return true
+    if (command.name === '/compact' || command.name === '/autocompact') return capabilities.compact
+    if (command.name === '/btw') return capabilities.fork
+    return true
+  })
   const slashMatches =
     slashQuery === undefined
       ? []
-      : SLASH_COMMANDS.filter((command) => command.name.slice(1).startsWith(slashQuery))
+      : availableCommands.filter((command) => command.name.slice(1).startsWith(slashQuery))
 
   const applyCommand = (name: string, args: string): void => {
     const next = args ? `${name} ` : name
@@ -693,6 +706,7 @@ export function Composer({
                 </span>
               </div>
             )}
+            {capabilities?.models !== false && (
             <div className="model-pill" ref={pickerRef}>
               <button
                 className={`pill-seg model ${status.model ? '' : 'warn'} ${modelOpen ? 'open' : ''}`}
@@ -701,15 +715,21 @@ export function Composer({
               >
                 <span>{activeLabel}</span>
               </button>
-              <span className="pill-sep" />
-              <button
-                className={`pill-seg thinking ${thinkingOpen ? 'open' : ''}`}
-                onClick={() => void openThinkingPicker()}
-                title="选择思考等级"
-              >
-                <span>{THINKING_LABELS[status.thinkingLevel ?? ''] ?? status.thinkingLevel ?? 'off'}</span>
-                <ChevronIcon size={11} />
-              </button>
+              {capabilities?.thinking !== false && (
+                <>
+                  <span className="pill-sep" />
+                  <button
+                    className={`pill-seg thinking ${thinkingOpen ? 'open' : ''}`}
+                    onClick={() => void openThinkingPicker()}
+                    title="选择思考等级"
+                  >
+                    <span>
+                      {THINKING_LABELS[status.thinkingLevel ?? ''] ?? status.thinkingLevel ?? 'off'}
+                    </span>
+                    <ChevronIcon size={11} />
+                  </button>
+                </>
+              )}
 
               {speed && speed.available.length > 1 && (
                 <>
@@ -846,6 +866,7 @@ export function Composer({
                 </div>
               )}
             </div>
+            )}
             {streaming ? (
               <button className="send-btn stop" onClick={onStop} title="中止当前运行">
                 <StopIcon size={14} />

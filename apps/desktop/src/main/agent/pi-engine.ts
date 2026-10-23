@@ -2,7 +2,7 @@ import { existsSync } from 'node:fs'
 import os from 'node:os'
 import type { PiModel, PiStatus, PromptImage, PromptResult } from '@shared/types'
 import { PiRpcClient } from '../pi-rpc'
-import type { AgentEngine, AgentWorkspace } from './engine'
+import type { AgentEngine, AgentWorkspace, EngineCapabilities } from './engine'
 
 export interface PiEngineOptions {
   /**
@@ -101,6 +101,10 @@ export class PiEngine implements AgentEngine {
   setStatus(patch: Partial<PiStatus>): void {
     this.snapshot = { ...this.snapshot, ...patch }
     this.options.onStatus(this.snapshot)
+  }
+
+  capabilities(): EngineCapabilities {
+    return { compact: true, fork: true, thinking: true, models: true }
   }
 
   workspace(): AgentWorkspace {

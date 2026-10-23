@@ -1443,6 +1443,7 @@ function registerIpc(): void {
 
   ipcMain.handle('desktop:config', () => ({
     engine: currentEngineId(),
+    capabilities: currentEngine.capabilities(),
     cwd: status.cwd,
     sessionMode: currentSessionMode(),
     sessionDir: currentSessionDir(),

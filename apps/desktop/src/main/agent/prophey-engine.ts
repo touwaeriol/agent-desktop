@@ -12,7 +12,7 @@ import {
   toolDeclarations,
   type CoreTool
 } from './core-tools'
-import type { AgentEngine, AgentWorkspace } from './engine'
+import type { AgentEngine, AgentWorkspace, EngineCapabilities } from './engine'
 
 /**
  * Prophey — our own engine, v1.
@@ -92,6 +92,10 @@ export class PropheyEngine implements AgentEngine {
     return ''
   }
 
+  capabilities(): EngineCapabilities {
+    return { compact: true, fork: true, thinking: false, models: true }
+  }
+
   workspace(): AgentWorkspace {
     return { primary: this.roots.primary, additional: [...this.roots.additional] }
   }
@@ -160,8 +164,15 @@ export class PropheyEngine implements AgentEngine {
     throw new Error(`Prophey 引擎 v1 还不支持${what}（请切回 pi 引擎）`)
   }
 
-  models(): Promise<Record<string, unknown>[]> {
-    this.unimplemented('模型目录查询')
+  /** The provider catalogue, in the shape the window's picker expects. */
+  async models(): Promise<Record<string, unknown>[]> {
+    const choices = await providers.listModelChoices({ includeUnconfigured: true })
+    return choices.map((choice) => ({
+      provider: choice.provider,
+      id: choice.id,
+      name: choice.name,
+      contextWindow: choice.contextWindow
+    }))
   }
 
   async setModel(provider: string, modelId: string): Promise<PiModel | undefined> {
@@ -174,12 +185,13 @@ export class PropheyEngine implements AgentEngine {
     return info
   }
 
+  /** This engine does not model thinking levels: one level, whatever the provider does. */
   thinkingLevels(): Promise<string[]> {
-    this.unimplemented('思考等级')
+    return Promise.resolve([])
   }
 
   setThinkingLevel(): Promise<void> {
-    this.unimplemented('思考等级')
+    return Promise.resolve()
   }
 
   /**

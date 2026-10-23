@@ -15,6 +15,24 @@ export interface AgentWorkspace {
 }
 
 /**
+ * What an engine can do.
+ *
+ * The window uses this to hide what the engine cannot answer, instead of letting the user press a
+ * button that comes back as "not supported". A CLI engine owns its own loop, so compaction, the side
+ * chat and thinking levels are its business, not ours.
+ */
+export interface EngineCapabilities {
+  /** Rewriting the context: the compact command and the auto-compaction threshold. */
+  compact: boolean
+  /** Forking the session for the side chat. */
+  fork: boolean
+  /** Thinking levels beyond the model default. */
+  thinking: boolean
+  /** A model catalogue the picker can list. */
+  models: boolean
+}
+
+/**
  * What the window needs from an agent engine.
  *
  * The desktop app is moving to "our own agent, with a swappable engine underneath". pi is engine #1
@@ -41,6 +59,8 @@ export interface AgentEngine {
   /** Last few KB of the child's stderr, for error reporting. */
   stderrTail(): string
 
+  /** What this engine supports; see {@link EngineCapabilities}. */
+  capabilities(): EngineCapabilities
   /** Directories this session works on. */
   workspace(): AgentWorkspace
   /** Start (or restart) the session; resolves once the engine answers `get_state`. */

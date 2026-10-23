@@ -259,6 +259,13 @@ export interface DesktopConfig {
   activeProject?: string
   /** Which engine runs the turn. */
   engine?: 'pi' | 'prophey' | 'claude' | 'codex'
+  /** What the active engine supports, so the window can hide the rest. */
+  capabilities?: {
+    compact: boolean
+    fork: boolean
+    thinking: boolean
+    models: boolean
+  }
 }
 
 export type AppUpdateStatus =

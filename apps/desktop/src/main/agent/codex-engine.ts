@@ -1,6 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import type { PiModel, PiStatus, PromptImage, PromptResult } from '@shared/types'
-import type { AgentEngine, AgentWorkspace } from './engine'
+import type { AgentEngine, AgentWorkspace, EngineCapabilities } from './engine'
 
 /**
  * Codex CLI as an engine.
@@ -51,6 +51,10 @@ export class CodexEngine implements AgentEngine {
 
   stderrTail(): string {
     return ''
+  }
+
+  capabilities(): EngineCapabilities {
+    return { compact: false, fork: false, thinking: false, models: false }
   }
 
   workspace(): AgentWorkspace {

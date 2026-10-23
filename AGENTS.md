@@ -154,6 +154,8 @@ npm run typecheck    # node + web 两个 tsconfig 分别检查
 - `agent/codex-engine.ts`：一轮 = 一次 `codex exec --json -C <primary> -`；事件只有 `thread.started` / `item.completed` / `turn.completed`，**没有 token 级流式**，所以消息是"完成即出现"，不假装打字机。续接用 `codex exec resume <thread_id>`。
 - **提示词走 stdin，不进 argv**：Windows 上它们的 npm 入口是 `.cmd`，spawn 需要 shell，而 shell 会把提示词拼进命令行。所以直接调无 shell 的入口：Claude Code 用包内的 `bin/claude.exe`，Codex 用 `ELECTRON_RUN_AS_NODE=1` + `bin/codex.js`（`process.execPath` 就是 Electron 的 node）。
 - 两个引擎都不提供：压缩、`/btw`、`ask_user_question`、`thinkingLevels`、模型目录——一律抛「不支持（这是 CLI 自己的功能）」，不假装。多目录只靠 `--add-dir`（Claude）或 sandbox（Codex），我们的 root 工具对它们无效。
+- **能力声明**：`AgentEngine.capabilities()` → `{ compact, fork, thinking, models }`，随 `desktop:config` 一起给窗口。渲染层据此隐藏：不支持的引擎看不到 `/compact`、`/autocompact`、`/btw`、模型 pill、思考 pill。**不要**让用户点了按钮再收到"不支持"。
+- Prophey 的 `models()` 返回服务商全量目录（`providers.listModelChoices`），否则默认引擎的模型选择器是空的；`thinkingLevels()` 返回空数组（它不建模思考等级）。
 
 ## 会话存储（我们自己的）
 
