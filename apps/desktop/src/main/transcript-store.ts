@@ -68,7 +68,8 @@ export class TranscriptStore {
   async save(
     sessionId: string,
     workspace: { primary: string; additional: string[] },
-    messages: Array<Record<string, unknown>>
+    messages: Array<Record<string, unknown>>,
+    strict = false
   ): Promise<void> {
     const body = [
       JSON.stringify({ type: 'header', sessionId, workspace, savedAt: Date.now() }),
@@ -76,7 +77,8 @@ export class TranscriptStore {
     ].join('\n')
     try {
       await writeTextAtomic(this.fileFor(sessionId), `${body}\n`)
-    } catch {
+    } catch (error) {
+      if (strict) throw error
       // Losing persistence is bad, losing the conversation in memory is worse: stay quiet here.
     }
   }

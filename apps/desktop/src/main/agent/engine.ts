@@ -1,3 +1,4 @@
+import type { HistoryMessage } from './history'
 import type { EngineCapabilities, EngineCommand } from '../../shared/engine'
 export type { EngineCapabilities } from '../../shared/engine'
 import type { PiModel, PiStatus, PromptImage, PromptResult } from '@shared/types'
@@ -85,6 +86,8 @@ export interface AgentEngine {
     cost?: number
     contextUsage?: { tokens?: number | null; contextWindow?: number; percent?: number | null }
   }>
+  /** Create a fresh native session from portable context; never replay imported tool calls. */
+  importHistory(messages: HistoryMessage[]): Promise<void>
   messages(): Promise<unknown[]>
   lastAssistantText(): Promise<string | null>
   compact(instructions?: string): Promise<{ summary?: string }>

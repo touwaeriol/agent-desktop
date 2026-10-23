@@ -1,3 +1,5 @@
+import { ImportedHistoryStore } from './imported-history-store'
+import { normalizeHistory } from './agent/history'
 import { writeJsonAtomic } from './storage'
 import { listEngineCommands, executeEngineCommand } from './engine-commands'
 import { compactionRatio, compactionPercent, reserveFor, ratioFromPercent, ratioFromTokens } from './compaction-policy'
@@ -59,6 +61,7 @@ let mainWindow: BrowserWindow | null = null
 let status: PiStatus = { phase: 'stopped', cwd: process.cwd() }
 /** An MCP/agent config change arrived mid-run and still has to restart pi. */
 let configPending = false
+let switchingEngine: EngineId | undefined
 
 /**
  * pi behind the `AgentEngine` contract.
@@ -96,7 +99,8 @@ async function importPiSessions(): Promise<void> {
 }
 
 /** Record (or refresh) the session the engine is currently running. */
-async function rememberSession(extra: { title?: string } = {}): Promise<void> {
+async function rememberSession(extra: { title?: string } = {}, duringSwitch = false): Promise<void> {
+  if (switchingEngine && !duringSwitch) return
   if (!sessionStore || btwActive) return
   const owner = currentEngine
   const snapshot = { ...status }
@@ -106,6 +110,7 @@ async function rememberSession(extra: { title?: string } = {}): Promise<void> {
   if (!isNativeSessionReference(file) && !existsSync(file)) return
   // Native IDs can exist before a durable session is materialized. Do not save an empty ID.
   if (isNativeSessionReference(file) && (await owner.messages()).length === 0) return
+  if (owner !== currentEngine || (switchingEngine && !duringSwitch)) return
   const engineId = owner.id as EngineId
   const workspace = owner.workspace()
   const projectId = desktopConfig.activeProject
@@ -206,18 +211,18 @@ function createEngine(): AgentEngine {
     onEvent: (record: Record<string, unknown>) => {
       if (generation !== engineGeneration) return
       // While the /btw panel is open the window must not see the fork's transcript.
-      if (btwActive) return
+      if (btwActive || switchingEngine) return
       mainWindow?.webContents.send('pi:event', record)
     },
     onSettled: () => {
       if (generation !== engineGeneration) return
       void rememberSession()
-      if (!configPending) return
+      if (!configPending || switchingEngine) return
       configPending = false
       void startPi(status.cwd, sessionArgs())
     },
     onAssistantError: (message: string) => {
-      if (generation === engineGeneration) noteSpeedRejection(message)
+      if (generation === engineGeneration && !switchingEngine) noteSpeedRejection(message)
     },
     onExit: () => {
       if (generation === engineGeneration) handleExit()
@@ -227,6 +232,7 @@ function createEngine(): AgentEngine {
     return new ClaudeCodeEngine({
       ...shared,
       binary: claudeBinary(),
+      historyStore: new ImportedHistoryStore(path.join(app.getPath('userData'), 'imports', 'claude')),
       // Ignore retired web toggles so old settings cannot silently disable native search.
       disabledTools: () =>
         (desktopConfig.engineTools?.claude ?? []).filter(
@@ -239,6 +245,7 @@ function createEngine(): AgentEngine {
     return new CodexEngine({
       ...shared,
       binary: command,
+      historyStore: new ImportedHistoryStore(path.join(app.getPath('userData'), 'imports', 'codex')),
       script,
       sandbox: () => desktopConfig.codexSandbox
     })
@@ -274,6 +281,7 @@ function createEngine(): AgentEngine {
   }
   return new PiEngine({
     ...shared,
+    historyDir: path.join(app.getPath('userData'), 'imports', 'pi'),
     prepare: async (workspace) => {
       await applySystemProxy()
       cancelPendingAsks('pi 已重启')
@@ -391,6 +399,9 @@ interface DesktopConfig {
   /** Tools switched off for a CLI engine (its own tool names). */
   engineTools?: { claude?: string[]; codex?: string[] }
   engineSessions?: Partial<Record<EngineId, string>>
+  /** Recover the source if the process exits before a context transfer commits. */
+  pendingEngineSwitch?: { engine: EngineId; cwd: string; session?: string;
+    propheySessionId?: string; activeProject?: string }
   codexSandbox?: 'read-only' | 'workspace-write'
   /** Repositories the user worked in, most recent first (sidebar "切换仓库" menu). */
   recentRepos?: string[]
@@ -1108,6 +1119,8 @@ function statusSnapshot(): PiStatus {
   return {
     ...status,
     engine: currentEngineId(),
+    switchingEngine,
+    ...(switchingEngine ? { phase: 'starting' as const, isStreaming: true } : {}),
     capabilities: currentEngine.capabilities(),
     autoCompactPercent:
       currentEngine.capabilities().autoCompaction === 'configurable' && autoCompactEnabled
@@ -1227,7 +1240,11 @@ async function afterStart(workspace: string, extraArgs: string[]): Promise<void>
   const defaults = desktopConfig.repoDefaults?.[workspace]
   if (!defaults) return
   if (defaults.provider && defaults.model) {
-    await currentEngine.setModel(defaults.provider, defaults.model).catch(() => undefined)
+    const owner = currentEngine
+    const choices = await owner.models().catch(() => [])
+    // Repository defaults may belong to a different engine; never feed its model ID to this CLI.
+    if (owner === currentEngine && choices.some((model) => model.provider === defaults.provider && model.id === defaults.model))
+      await owner.setModel(defaults.provider, defaults.model).catch(() => undefined)
   }
   if (defaults.thinkingLevel) {
     await currentEngine.setThinkingLevel(defaults.thinkingLevel).catch(() => undefined)
@@ -1322,6 +1339,7 @@ function submitPrompt(
   behavior?: 'steer' | 'followUp',
   images?: PromptImage[]
 ): Promise<PromptResult> {
+  if (switchingEngine) return Promise.resolve({ ok: false, error: '正在迁移对话，请稍候' })
   const caps = currentEngine.capabilities()
   if (images?.length && !caps.images)
     return Promise.resolve({ ok: false, error: '当前引擎不支持图片' })
@@ -1331,6 +1349,7 @@ function submitPrompt(
 }
 
 async function reloadPiConfig(): Promise<void> {
+  if (switchingEngine) { configPending = true; return }
   if (btwActive) await closeSideChat()
   await refreshAgents()
   if (currentEngine.busy()) {
@@ -1349,15 +1368,22 @@ function sendLoginMessage(message: LoginMessage): void {
 }
 
 function registerIpc(): void {
-  ipcMain.handle('pi:get-status', () => statusSnapshot())
+  const handle: typeof ipcMain.handle = (channel, listener) => ipcMain.handle(channel, (event, ...args) => {
+    const mutatesEngine =
+      (channel.startsWith('pi:') && !/^pi:(get-|list-|repo|session-stats|open-agent-dir)/.test(channel)) ||
+      /^desktop:set-|^engine:(command$|sandbox)|^projects:(activate|create|update|remove|add-root)|^mcp:(set-|add-|remove-)|^agents:(save-|delete-|set-)|^providers:(save-|set-|logout|import-cli)|^settings:save/.test(channel)
+    if (switchingEngine && mutatesEngine) throw new Error('正在迁移对话，请等待引擎切换完成')
+    return listener(event, ...args)
+  })
+  handle('pi:get-status', () => statusSnapshot())
 
-  ipcMain.handle('pi:restart', async (_event, cwd?: string) => {
+  handle('pi:restart', async (_event, cwd?: string) => {
     if (btwActive) await closeSideChat()
     if (cwd) await saveConfig({ cwd })
     return startPi(cwd ?? status.cwd, sessionArgs())
   })
 
-  ipcMain.handle('pi:new-project-session', async (_event, cwd: string) => {
+  handle('pi:new-project-session', async (_event, cwd: string) => {
     if (btwActive) await closeSideChat()
     // A session belongs to one repository: a subdirectory lands on the repo root instead, so the
     // sidebar groups by repository and the agent's cwd is the repo it is working on.
@@ -1366,7 +1392,7 @@ function registerIpc(): void {
     return startPi(workspace)
   })
 
-  ipcMain.handle('pi:repo-info', async (_event, dir?: string) => {
+  handle('pi:repo-info', async (_event, dir?: string) => {
     const target = dir ?? status.cwd
     const info = await repo.repoInfo(target)
     // The window's own lookup doubles as a refresh of the active repository (branch/dirty move).
@@ -1377,15 +1403,15 @@ function registerIpc(): void {
     return info
   })
 
-  ipcMain.handle('pi:repos', (_event, dirs: string[]) => repo.repoInfos(dirs))
+  handle('pi:repos', (_event, dirs: string[]) => repo.repoInfos(dirs))
 
-  ipcMain.handle('projects:list', async () => {
+  handle('projects:list', async () => {
     if (!projectStore) return []
     await projectStore.load()
     return projectStore.list()
   })
 
-  ipcMain.handle(
+  handle(
     'projects:create',
     async (_event, input: { name: string; roots: string[]; primary?: string }) => {
       if (!projectStore) return { ok: false, error: '项目存储未就绪' }
@@ -1402,7 +1428,7 @@ function registerIpc(): void {
     }
   )
 
-  ipcMain.handle(
+  handle(
     'projects:update',
     async (_event, id: string, patch: { name?: string; roots?: string[]; primary?: string }) => {
       if (!projectStore) return { ok: false, error: '项目存储未就绪' }
@@ -1420,7 +1446,7 @@ function registerIpc(): void {
   )
 
   /** Create a project from a folder picker; the first repository becomes the primary root. */
-  ipcMain.handle('projects:create-from-dialog', async () => {
+  handle('projects:create-from-dialog', async () => {
     if (!projectStore) return { ok: false, error: '项目存储未就绪' }
     const result = await dialog.showOpenDialog(mainWindow!, {
       title: '新建项目：选择仓库（可多选）',
@@ -1444,7 +1470,7 @@ function registerIpc(): void {
   })
 
   /** Add another repository to a project (the primary root stays where it is). */
-  ipcMain.handle('projects:add-root', async (_event, id: string) => {
+  handle('projects:add-root', async (_event, id: string) => {
     const project = projectStore?.get(id)
     if (!projectStore || !project) return { ok: false, error: '项目不存在' }
     const result = await dialog.showOpenDialog(mainWindow!, {
@@ -1466,7 +1492,7 @@ function registerIpc(): void {
     }
   })
 
-  ipcMain.handle('projects:remove', async (_event, id: string) => {
+  handle('projects:remove', async (_event, id: string) => {
     await projectStore?.remove(id)
     if (desktopConfig.activeProject === id) await saveConfig({ activeProject: undefined })
     return { ok: true }
@@ -1476,7 +1502,7 @@ function registerIpc(): void {
    * Work in a project: restart pi on its primary repository. The other roots reach the model
    * through the extension's `<project>` section (see `prepare`).
    */
-  ipcMain.handle('projects:activate', async (_event, id?: string) => {
+  handle('projects:activate', async (_event, id?: string) => {
     const project = id ? projectStore?.get(id) : undefined
     if (id && !project) return { ok: false, error: '项目不存在' }
     await saveConfig({ activeProject: project?.id })
@@ -1485,10 +1511,10 @@ function registerIpc(): void {
     return startPi(primary?.path ?? status.cwd)
   })
 
-  ipcMain.handle('repos:recent', () => desktopConfig.recentRepos ?? [])
+  handle('repos:recent', () => desktopConfig.recentRepos ?? [])
 
   /** Folder picker without side effects, resolved to git roots; used by the project editor. */
-  ipcMain.handle('repos:pick-folders', async (_event, title?: string) => {
+  handle('repos:pick-folders', async (_event, title?: string) => {
     const result = await dialog.showOpenDialog(mainWindow!, {
       title: title ?? '选择仓库',
       defaultPath: status.cwd,
@@ -1499,7 +1525,7 @@ function registerIpc(): void {
   })
 
   /** Store the current model/thinking level as this repository's default for new sessions. */
-  ipcMain.handle('repos:save-defaults', async () => {
+  handle('repos:save-defaults', async () => {
     const defaults = {
       ...(desktopConfig.repoDefaults ?? {}),
       [status.cwd]: {
@@ -1512,7 +1538,7 @@ function registerIpc(): void {
     return { ok: true }
   })
 
-  ipcMain.handle('pi:open-session', async (_event, sessionPath: string, cwd: string) => {
+  handle('pi:open-session', async (_event, sessionPath: string, cwd: string) => {
     if (btwActive) await closeSideChat()
     if (currentEngine.busy()) throw new Error('请先停止当前回合')
     const record = sessionStore?.byPath(sessionPath)
@@ -1534,7 +1560,7 @@ function registerIpc(): void {
     return startPi(cwd, ['--session', sessionPath])
   })
 
-  ipcMain.handle('desktop:config', () => ({
+  handle('desktop:config', () => ({
     engine: currentEngineId(),
     capabilities: currentEngine.capabilities(),
     codexSandbox: desktopConfig.codexSandbox,
@@ -1556,7 +1582,7 @@ function registerIpc(): void {
    * Nothing is moved: the window simply starts reading the other directory. Switching to `desktop`
    * leaves it empty until `providers:import-cli` copies the CLI's files in.
    */
-  ipcMain.handle('desktop:set-profile', async (_event, next: 'shared' | 'desktop') => {
+  handle('desktop:set-profile', async (_event, next: 'shared' | 'desktop') => {
     if (btwActive) await closeSideChat()
     await saveConfig({ profile: next === 'desktop' ? 'desktop' : 'shared' })
     applyProfile()
@@ -1565,7 +1591,7 @@ function registerIpc(): void {
     return { ok: true, profile: currentProfile(), profileDir: desktopProfileDir() }
   })
 
-  ipcMain.handle('providers:import-cli', async () => {
+  handle('providers:import-cli', async () => {
     try {
       const result = await providers.importFromCli()
       if (result.error) return { ok: false, error: result.error }
@@ -1576,38 +1602,77 @@ function registerIpc(): void {
     }
   })
 
-  ipcMain.handle('updates:snapshot', () => updates.getSnapshot())
-  ipcMain.handle('updates:check', () => updates.check())
-  ipcMain.handle('updates:install', () => updates.install())
-  ipcMain.handle('updates:cancel', () => updates.cancel())
-  ipcMain.handle('updates:auto', (_event, enabled: boolean) => updates.setAuto(enabled))
-  ipcMain.handle('app:proxy', () => getProxyInfo())
+  handle('updates:snapshot', () => updates.getSnapshot())
+  handle('updates:check', () => updates.check())
+  handle('updates:install', () => updates.install())
+  handle('updates:cancel', () => updates.cancel())
+  handle('updates:auto', (_event, enabled: boolean) => updates.setAuto(enabled))
+  handle('app:proxy', () => getProxyInfo())
 
-  ipcMain.handle(
-    'desktop:set-engine',
-    async (_event, next: 'pi' | 'prophey' | 'claude' | 'codex') => {
+  handle('desktop:set-engine', async (_event, next: EngineId) => {
+    if (!['pi', 'prophey', 'claude', 'codex'].includes(next)) throw new Error('未知引擎')
+    if (switchingEngine) throw new Error('正在切换引擎，请稍候')
+    if (next === currentEngineId()) return statusSnapshot()
+    if (currentEngine.starting()) throw new Error('引擎正在启动，请稍候')
+    switchingEngine = next
+    broadcastStatus()
+    let originalConfig = { ...desktopConfig }
+    let source = currentEngine
+    let sourceRef: string | undefined
+    let replaced = false
+    try {
       if (btwActive) await closeSideChat()
-      if (currentEngine.busy()) throw new Error('请先停止当前回合')
-      await rememberSession()
-      currentEngine.dispose()
-      const engine = (['pi', 'claude', 'codex'].includes(next) ? next : 'prophey') as EngineId
-      await saveConfig({
-        engine,
-        ...(engine === 'prophey' && !desktopConfig.propheySessionId
-          ? { propheySessionId: `s_${Math.random().toString(16).slice(2, 14)}` }
-          : {})
-      })
-      // The engine object itself changes, so a restart is a rebuild, not a relaunch.
+      source = currentEngine
+      cancelPendingAsks('正在切换引擎')
+      lastAbortAt = Date.now()
+      if (source.busy()) {
+        await source.abort()
+        if (!(await source.waitForIdle(15_000))) throw new Error('当前工具尚未停止，暂未切换引擎')
+      }
+      const history = normalizeHistory(await source.messages())
+      const workspace = source.workspace()
+      const ref = source.state().sessionFile
+      sourceRef = ref && (isNativeSessionReference(ref) ? history.length > 0 : existsSync(ref)) ? ref : undefined
+      await rememberSession({}, true)
+      originalConfig = { ...desktopConfig }
+      await saveConfig({ pendingEngineSwitch: { engine: source.id as EngineId,
+        cwd: workspace.primary, session: sourceRef, propheySessionId: desktopConfig.propheySessionId,
+        activeProject: desktopConfig.activeProject } })
+      source.dispose()
+      replaced = true
+      await saveConfig({ engine: next,
+        ...(next === 'prophey' ? { propheySessionId: 's_' + randomUUID() } : {}) })
       currentEngine = createEngine()
       currentEngine.poll()
-      const saved = desktopConfig.engineSessions?.[engine]
-      const record = saved ? sessionStore?.byPath(saved) : undefined
-      if (record) await saveConfig({ cwd: record.cwd, activeProject: record.projectId })
-      return startPi(record?.cwd ?? status.cwd, saved ? ['--session', saved] : [])
+      const started = await currentEngine.start(workspace)
+      if (started.phase !== 'ready') throw new Error(started.error ?? '目标引擎启动失败')
+      if (history.length) await currentEngine.importHistory(history)
+      await afterStart(workspace.primary, [])
+      await rememberSession({}, true)
+      await saveConfig({ pendingEngineSwitch: undefined })
+    } catch (error) {
+      if (replaced) {
+        currentEngine.dispose()
+        await saveConfig({ ...originalConfig, propheySessionId: originalConfig.propheySessionId,
+          engineSessions: originalConfig.engineSessions, pendingEngineSwitch: undefined })
+        currentEngine = createEngine()
+        currentEngine.poll()
+        try {
+          const restored = await currentEngine.start(source.workspace(), { session: sourceRef })
+          if (restored.phase !== 'ready') throw new Error(restored.error)
+        } catch (restoreError) {
+          throw new Error('切换失败，原会话恢复也失败；原历史仍保留：' + String(error) + '；' + String(restoreError))
+        }
+      }
+      throw new Error('未切换引擎：' + (error instanceof Error ? error.message : String(error)))
+    } finally {
+      switchingEngine = undefined
+      broadcastStatus()
     }
-  )
+    return statusSnapshot()
+  })
 
-  ipcMain.handle(
+  handle(
     'desktop:set-engine-tools',
     async (_event, engine: 'claude' | 'codex', disabled: string[]) => {
       const next = {
@@ -1620,13 +1685,13 @@ function registerIpc(): void {
     }
   )
 
-  ipcMain.handle('desktop:set-session-mode', async (_event, mode: SessionMode) => {
+  handle('desktop:set-session-mode', async (_event, mode: SessionMode) => {
     if (btwActive) await closeSideChat()
     await saveConfig({ sessionMode: mode === 'isolated' ? 'isolated' : 'shared' })
     return startPi(status.cwd)
   })
 
-  ipcMain.handle('pi:choose-workspace', async () => {
+  handle('pi:choose-workspace', async () => {
     const result = await dialog.showOpenDialog(mainWindow!, {
       title: '选择一个 git 仓库（将在该仓库新建会话）',
       defaultPath: status.cwd,
@@ -1640,7 +1705,7 @@ function registerIpc(): void {
     return startPi(cwd)
   })
 
-  ipcMain.handle(
+  handle(
     'pi:prompt',
     async (
       _event,
@@ -1650,7 +1715,7 @@ function registerIpc(): void {
     ) => submitPrompt(message, streamingBehavior, images)
   )
 
-  ipcMain.handle('pi:abort', async () => {
+  handle('pi:abort', async () => {
     cancelPendingAsks('用户中止了本次运行')
     // A subagent that settles right after a manual stop must not start a new turn behind the
     // user's back; the notice is queued instead (see subagentManager onSettle).
@@ -1664,7 +1729,7 @@ function registerIpc(): void {
     await currentEngine.refresh()
   })
 
-  ipcMain.handle('pi:new-session', async () => {
+  handle('pi:new-session', async () => {
     if (!currentEngine.running()) return { ok: false, error: 'pi 未运行' }
     if (btwActive) await closeSideChat()
     try {
@@ -1675,7 +1740,7 @@ function registerIpc(): void {
     }
   })
 
-  ipcMain.handle('pi:switch-session', async (_event, sessionPath: string) => {
+  handle('pi:switch-session', async (_event, sessionPath: string) => {
     if (!currentEngine.running()) return { ok: false, error: 'pi 未运行' }
     if (btwActive) await closeSideChat()
     try {
@@ -1686,12 +1751,12 @@ function registerIpc(): void {
     }
   })
 
-  ipcMain.handle('pi:get-messages', async () => {
+  handle('pi:get-messages', async () => {
     if (!currentEngine.running()) return []
     return currentEngine.messages()
   })
 
-  ipcMain.handle('pi:list-sessions', async () => {
+  handle('pi:list-sessions', async () => {
     if (!sessionStore) return listSessions(currentSessionDir())
     await sessionStore.load()
     await importPiSessions()
@@ -1702,7 +1767,7 @@ function registerIpc(): void {
     return sessionStore.list().map(toSummary)
   })
 
-  ipcMain.handle('pi:session-stats', async () => {
+  handle('pi:session-stats', async () => {
     if (!currentEngine.running()) return {}
     try {
       return (await currentEngine.stats()) as SessionStats
@@ -1711,17 +1776,17 @@ function registerIpc(): void {
     }
   })
 
-  ipcMain.handle('pi:open-agent-dir', async () => {
+  handle('pi:open-agent-dir', async () => {
     const dir = profile.agentDir()
     await fs.mkdir(dir, { recursive: true })
     await shell.openPath(dir)
   })
 
-  ipcMain.handle('app:open-external', async (_event, url: string) => {
+  handle('app:open-external', async (_event, url: string) => {
     if (/^https?:\/\//i.test(url)) await shell.openExternal(url)
   })
 
-  ipcMain.handle('app:set-theme', (_event, theme: 'dark' | 'light') => {
+  handle('app:set-theme', (_event, theme: 'dark' | 'light') => {
     mainWindow?.setTitleBarOverlay({
       color: theme === 'light' ? '#f6f6f7' : '#17181b',
       symbolColor: theme === 'light' ? '#3a3c45' : '#b9bbc2',
@@ -1729,28 +1794,28 @@ function registerIpc(): void {
     })
   })
 
-  ipcMain.handle('providers:list', () => providers.listProviders())
+  handle('providers:list', () => providers.listProviders())
 
-  ipcMain.handle('ask:answer', (_event, id: string, answers: AskAnswer[]) => {
+  handle('ask:answer', (_event, id: string, answers: AskAnswer[]) => {
     bridge.answerAsk(id, Array.isArray(answers) ? answers : [])
   })
 
-  ipcMain.handle('ask:cancel', (_event, id: string, reason?: string) => {
+  handle('ask:cancel', (_event, id: string, reason?: string) => {
     bridge.cancelAsk(id, reason ?? '用户取消了提问')
   })
 
-  ipcMain.handle('mcp:state', () => buildMcpState())
+  handle('mcp:state', () => buildMcpState())
 
-  ipcMain.handle('subagents:list', () =>
+  handle('subagents:list', () =>
     subagentManager()
       .list()
       .map((record) => serializeSubagent(record))
   )
-  ipcMain.handle('subagents:get', (_event, id: string) => {
+  handle('subagents:get', (_event, id: string) => {
     const record = subagentManager().get(id)
     return record ? serializeSubagent(record) : null
   })
-  ipcMain.handle('subagents:stop', async (_event, id: string) => {
+  handle('subagents:stop', async (_event, id: string) => {
     try {
       await subagentManager().stop(id)
       return true
@@ -1758,7 +1823,7 @@ function registerIpc(): void {
       return false
     }
   })
-  ipcMain.handle(
+  handle(
     'subagents:prompt',
     async (_event, id: string, text: string, mode: 'interrupt' | 'steer' | 'follow-up') => {
       try {
@@ -1769,31 +1834,31 @@ function registerIpc(): void {
       }
     }
   )
-  ipcMain.handle('subagents:reveal', (_event, file: string) => {
+  handle('subagents:reveal', (_event, file: string) => {
     if (typeof file !== 'string' || !existsSync(file)) return false
     shell.showItemInFolder(file)
     return true
   })
 
-  ipcMain.handle('workspace:files', () => {
+  handle('workspace:files', () => {
     // A project's picker covers every repository, not just the one pi sits in.
     const roots = activeProject()?.roots.map((root) => root.path) ?? [status.cwd]
     return listWorkspaceFiles(roots)
   })
 
-  ipcMain.handle('mcp:set-enabled', async (_event, enabled: boolean) => {
+  handle('mcp:set-enabled', async (_event, enabled: boolean) => {
     await saveConfig({ mcp: { ...desktopConfig.mcp, enabled: Boolean(enabled) } })
     await reloadPiConfig()
     return buildMcpState()
   })
 
-  ipcMain.handle('mcp:set-desktop-tool', async (_event, enabled: boolean) => {
+  handle('mcp:set-desktop-tool', async (_event, enabled: boolean) => {
     await saveConfig({ mcp: { ...desktopConfig.mcp, desktopTool: Boolean(enabled) } })
     await reloadPiConfig()
     return buildMcpState()
   })
 
-  ipcMain.handle('mcp:set-engine-enabled', async (_event, id: McpEngineId, enabled: boolean) => {
+  handle('mcp:set-engine-enabled', async (_event, id: McpEngineId, enabled: boolean) => {
     const current = engineConfig()
     await saveConfig({
       mcp: {
@@ -1805,7 +1870,7 @@ function registerIpc(): void {
     return buildMcpState()
   })
 
-  ipcMain.handle('mcp:set-engine-entry', async (_event, id: McpEngineId, entry: string | null) => {
+  handle('mcp:set-engine-entry', async (_event, id: McpEngineId, entry: string | null) => {
     const current = engineConfig()
     const next = { ...current[id] }
     if (entry && entry.trim()) next.entry = entry.trim()
@@ -1816,12 +1881,12 @@ function registerIpc(): void {
     return buildMcpState()
   })
 
-  ipcMain.handle('mcp:refresh-engines', async () => {
+  handle('mcp:refresh-engines', async () => {
     engines.invalidateDetection()
     return buildMcpState()
   })
 
-  ipcMain.handle('mcp:build-index', async () => {
+  handle('mcp:build-index', async () => {
     const cwd = status.cwd
     const config = engineConfig().codegraph
     engineIndexStatus.codegraph = { state: 'indexing', message: cwd }
@@ -1835,7 +1900,7 @@ function registerIpc(): void {
     return result
   })
 
-  ipcMain.handle('mcp:set-tool', async (_event, server: string, tool: string, enabled: boolean) => {
+  handle('mcp:set-tool', async (_event, server: string, tool: string, enabled: boolean) => {
     const toggles = { ...toolToggles() }
     const next = { ...(toggles[server] ?? {}) }
     if (enabled) delete next[tool]
@@ -1847,7 +1912,7 @@ function registerIpc(): void {
     return buildMcpState()
   })
 
-  ipcMain.handle('mcp:set-morph-key', async (_event, key: string | null) => {
+  handle('mcp:set-morph-key', async (_event, key: string | null) => {
     const next = { ...desktopConfig.mcp }
     if (key && key.trim()) next.morphApiKey = key.trim()
     else delete next.morphApiKey
@@ -1856,13 +1921,13 @@ function registerIpc(): void {
     return buildMcpState()
   })
 
-  ipcMain.handle('mcp:set-brave-key', async (_event, key: string | null) => {
+  handle('mcp:set-brave-key', async (_event, key: string | null) => {
     await saveWebConfig({ braveApiKey: key && key.trim() ? key.trim() : undefined })
     await reloadPiConfig()
     return buildMcpState()
   })
 
-  ipcMain.handle('mcp:set-web-mode', async (_event, mode: 'auto' | 'brave' | 'native') => {
+  handle('mcp:set-web-mode', async (_event, mode: 'auto' | 'brave' | 'native') => {
     const next = mode === 'brave' || mode === 'native' ? mode : 'auto'
     // The route is resolved per call, so no restart is needed here.
     await saveWebConfig({ mode: next })
@@ -1870,7 +1935,7 @@ function registerIpc(): void {
     return buildMcpState()
   })
 
-  ipcMain.handle(
+  handle(
     'mcp:set-provider-web-search',
     async (_event, providerId: string, enabled: boolean) => {
       if (typeof providerId !== 'string' || !providerId.trim()) return buildMcpState()
@@ -1888,7 +1953,7 @@ function registerIpc(): void {
     }
   )
 
-  ipcMain.handle('mcp:set-subagents', async (_event, enabled: boolean) => {
+  handle('mcp:set-subagents', async (_event, enabled: boolean) => {
     await saveConfig({
       mcp: {
         ...desktopConfig.mcp,
@@ -1899,14 +1964,14 @@ function registerIpc(): void {
     return buildMcpState()
   })
 
-  ipcMain.handle('agents:set-exposure', async (_event, exposure: 'prompt' | 'lazy' | 'hidden') => {
+  handle('agents:set-exposure', async (_event, exposure: 'prompt' | 'lazy' | 'hidden') => {
     await agents.saveExposure(app.getPath('userData'), exposure)
     await reloadPiConfig()
     return buildMcpState()
   })
 
-  ipcMain.handle('engine:commands', () => listEngineCommands(currentEngine))
-  ipcMain.handle('engine:sandbox', async (_event, mode: string) => {
+  handle('engine:commands', () => listEngineCommands(currentEngine))
+  handle('engine:sandbox', async (_event, mode: string) => {
     if (!['default', 'read-only', 'workspace-write'].includes(mode))
       return { ok: false, error: '无效的沙箱模式' }
     await saveConfig({
@@ -1915,14 +1980,14 @@ function registerIpc(): void {
     if (currentEngineId() === 'codex') await reloadPiConfig()
     return { ok: true }
   })
-  ipcMain.handle('engine:command', (_event, name: string, args: string) => {
+  handle('engine:command', (_event, name: string, args: string) => {
     const owner = currentEngine
     return executeEngineCommand(owner, name, args, async () => {
       if (owner === currentEngine) await syncAutoCompact({ restart: true })
     })
   })
 
-  ipcMain.handle('pi:compact', async (_event, instructions?: string) => {
+  handle('pi:compact', async (_event, instructions?: string) => {
     if (!currentEngine.capabilities().compact) return { ok: false, error: '当前引擎不支持压缩' }
     // Compacting the fork would summarize the throwaway branch and leave the real session alone.
     if (btwActive) await closeSideChat()
@@ -1938,7 +2003,7 @@ function registerIpc(): void {
    * Auto-compaction toggle. Turning it on also writes the reserve that makes pi compact at
    * `autoCompactRatio()` of the current model's window, then restarts pi so it reads that value.
    */
-  ipcMain.handle('pi:set-auto-compact', async (_event, enabled: boolean) => {
+  handle('pi:set-auto-compact', async (_event, enabled: boolean) => {
     if (currentEngine.capabilities().autoCompaction !== 'configurable')
       return { ok: false, error: '自动压缩由当前引擎原生管理' }
     try {
@@ -1977,7 +2042,7 @@ function registerIpc(): void {
    * back on: the window's meter and the settings row read `autoCompactPercent`, so leaving
    * `autoCompactEnabled` false here made the UI keep claiming "已关闭 / 90%".
    */
-  ipcMain.handle('pi:set-compact-threshold', async (_event, tokens: number) => {
+  handle('pi:set-compact-threshold', async (_event, tokens: number) => {
     if (currentEngine.capabilities().autoCompaction !== 'configurable')
       return { ok: false, error: '自动压缩由当前引擎原生管理' }
     try {
@@ -2010,7 +2075,7 @@ function registerIpc(): void {
    * the same *proportion*; the reserve is recomputed with it. A threshold is only meaningful while
    * compaction is on, so setting one turns it back on.
    */
-  ipcMain.handle('pi:set-auto-compact-ratio', async (_event, percent: number) => {
+  handle('pi:set-auto-compact-ratio', async (_event, percent: number) => {
     if (currentEngine.capabilities().autoCompaction !== 'configurable')
       return { ok: false, error: '自动压缩由当前引擎原生管理' }
     try {
@@ -2053,7 +2118,7 @@ function registerIpc(): void {
    * fork is taken as soon as it settles, and a second `/btw` replaces the previous fork with a new
    * branch from the node the user is on now.
    */
-  ipcMain.handle('pi:btw-start', async (_event, question: string) => {
+  handle('pi:btw-start', async (_event, question: string) => {
     const trimmed = question.trim()
     if (!trimmed) return { ok: false, error: '缺少问题' }
     if (!currentEngine.running()) return { ok: false, error: 'pi 未运行' }
@@ -2080,7 +2145,7 @@ function registerIpc(): void {
   })
 
   /** Follow-up turn inside the open side chat: same fork, same context. */
-  ipcMain.handle('pi:btw-ask', async (_event, question: string) => {
+  handle('pi:btw-ask', async (_event, question: string) => {
     const trimmed = question.trim()
     if (!trimmed) return { ok: false, error: '缺少问题' }
     if (!btwActive) return { ok: false, error: '侧边提问已经关闭了' }
@@ -2096,12 +2161,12 @@ function registerIpc(): void {
     }
   })
 
-  ipcMain.handle('pi:btw-close', async () => {
+  handle('pi:btw-close', async () => {
     await closeSideChat()
     return { ok: true }
   })
 
-  ipcMain.handle('agents:save-preset', async (_event, draft: agents.PresetDraft) => {
+  handle('agents:save-preset', async (_event, draft: agents.PresetDraft) => {
     try {
       await agents.savePreset(app.getPath('userData'), draft)
       await refreshAgents()
@@ -2112,7 +2177,7 @@ function registerIpc(): void {
     }
   })
 
-  ipcMain.handle('agents:delete-preset', async (_event, id: string) => {
+  handle('agents:delete-preset', async (_event, id: string) => {
     try {
       await agents.deletePreset(app.getPath('userData'), id)
       await refreshAgents()
@@ -2123,12 +2188,12 @@ function registerIpc(): void {
     }
   })
 
-  ipcMain.handle('agents:open-config', async () => {
+  handle('agents:open-config', async () => {
     await agents.ensureAgentsFile(app.getPath('userData'))
     await shell.openPath(agents.agentsFilePath(app.getPath('userData')))
   })
 
-  ipcMain.handle('mcp:choose-engine-entry', async () => {
+  handle('mcp:choose-engine-entry', async () => {
     const filters =
       process.platform === 'win32'
         ? [{ name: 'CodeGraph', extensions: ['exe', 'cmd', 'js'] }]
@@ -2141,7 +2206,7 @@ function registerIpc(): void {
     return result.canceled ? null : (result.filePaths[0] ?? null)
   })
 
-  ipcMain.handle('mcp:set-server-enabled', async (_event, name: string, enabled: boolean) => {
+  handle('mcp:set-server-enabled', async (_event, name: string, enabled: boolean) => {
     try {
       await mcp.setServerEnabled(name, Boolean(enabled))
       await reloadPiConfig()
@@ -2151,7 +2216,7 @@ function registerIpc(): void {
     }
   })
 
-  ipcMain.handle('mcp:remove-server', async (_event, name: string) => {
+  handle('mcp:remove-server', async (_event, name: string) => {
     try {
       await mcp.removeServer(name)
       await reloadPiConfig()
@@ -2161,7 +2226,7 @@ function registerIpc(): void {
     }
   })
 
-  ipcMain.handle('mcp:add-server', async (_event, name: string, config: string) => {
+  handle('mcp:add-server', async (_event, name: string, config: string) => {
     try {
       await mcp.addServer(name, config)
       await reloadPiConfig()
@@ -2171,11 +2236,11 @@ function registerIpc(): void {
     }
   })
 
-  ipcMain.handle('mcp:open-config', (_event, which: 'user' | 'project') =>
+  handle('mcp:open-config', (_event, which: 'user' | 'project') =>
     mcp.openConfig(status.cwd, which === 'project' ? 'project' : 'user')
   )
 
-  ipcMain.handle(
+  handle(
     'providers:start-login',
     async (_event, providerId: string, type: 'api_key' | 'oauth', loginId: string) => {
       await applySystemProxy()
@@ -2192,18 +2257,18 @@ function registerIpc(): void {
     }
   )
 
-  ipcMain.handle(
+  handle(
     'providers:answer-login',
     (_event, loginId: string, promptId: string, value: string) => {
       providers.answerLogin(loginId, promptId, value)
     }
   )
 
-  ipcMain.handle('providers:cancel-login', (_event, loginId: string) => {
+  handle('providers:cancel-login', (_event, loginId: string) => {
     providers.cancelLogin(loginId)
   })
 
-  ipcMain.handle('providers:logout', async (_event, providerId: string) => {
+  handle('providers:logout', async (_event, providerId: string) => {
     try {
       await providers.logoutProvider(providerId)
       await reloadPiConfig()
@@ -2213,9 +2278,9 @@ function registerIpc(): void {
     }
   })
 
-  ipcMain.handle('providers:models-json', () => providers.getModelsJson())
+  handle('providers:models-json', () => providers.getModelsJson())
 
-  ipcMain.handle('providers:save-models-json', async (_event, content: string) => {
+  handle('providers:save-models-json', async (_event, content: string) => {
     try {
       await providers.saveModelsJson(content)
       await reloadPiConfig()
@@ -2225,7 +2290,7 @@ function registerIpc(): void {
     }
   })
 
-  ipcMain.handle('providers:open-models-json', async () => {
+  handle('providers:open-models-json', async () => {
     const file = await providers.getModelsJson()
     await fs.mkdir(path.dirname(file.path), { recursive: true })
     try {
@@ -2236,9 +2301,9 @@ function registerIpc(): void {
     await shell.openPath(file.path)
   })
 
-  ipcMain.handle('settings:get', () => providers.getAppSettings())
+  handle('settings:get', () => providers.getAppSettings())
 
-  ipcMain.handle(
+  handle(
     'settings:save',
     async (
       _event,
@@ -2254,9 +2319,9 @@ function registerIpc(): void {
     }
   )
 
-  ipcMain.handle('settings:models', () => providers.listModelChoices())
+  handle('settings:models', () => providers.listModelChoices())
 
-  ipcMain.handle('pi:list-models', async () => {
+  handle('pi:list-models', async () => {
     if (!currentEngine.running()) return []
     try {
       const models = await currentEngine.models()
@@ -2290,7 +2355,7 @@ function registerIpc(): void {
     }
   })
 
-  ipcMain.handle('pi:set-model', async (_event, provider: string, modelId: string) => {
+  handle('pi:set-model', async (_event, provider: string, modelId: string) => {
     if (!currentEngine.running()) return { ok: false, error: 'pi 未运行' }
     try {
       await currentEngine.setModel(provider, modelId)
@@ -2303,7 +2368,7 @@ function registerIpc(): void {
     }
   })
 
-  ipcMain.handle('pi:list-thinking-levels', async () => {
+  handle('pi:list-thinking-levels', async () => {
     if (!currentEngine.running()) return []
     try {
       return currentEngine.thinkingLevels()
@@ -2312,7 +2377,7 @@ function registerIpc(): void {
     }
   })
 
-  ipcMain.handle('pi:set-thinking-level', async (_event, level: string) => {
+  handle('pi:set-thinking-level', async (_event, level: string) => {
     if (!currentEngine.running()) return { ok: false, error: 'pi 未运行' }
     try {
       await currentEngine.setThinkingLevel(level)
@@ -2329,7 +2394,7 @@ function registerIpc(): void {
    * The extension reads it from the environment at load, so the switch restarts pi (deferred while a
    * run is in flight, like every other setting that changes the child's env).
    */
-  ipcMain.handle('pi:set-speed-mode', async (_event, mode: SpeedMode) => {
+  handle('pi:set-speed-mode', async (_event, mode: SpeedMode) => {
     const support = speed.speedSupport(status.model)
     if (!support.available.includes(mode)) {
       return {
@@ -2343,11 +2408,11 @@ function registerIpc(): void {
     return { ok: true, speed: speed.speedState(status.model, mode) }
   })
 
-  ipcMain.handle('providers:list-provider-models', (_event, providerId: string) =>
+  handle('providers:list-provider-models', (_event, providerId: string) =>
     providers.listProviderModels(providerId)
   )
 
-  ipcMain.handle(
+  handle(
     'providers:set-provider-models',
     async (_event, providerId: string, enabledIds: string[]) => {
       try {
@@ -2366,7 +2431,7 @@ function registerIpc(): void {
    * pi reads that file at startup, so the session is restarted; the web engine resolves the same
    * value through `providers.getRuntime()`, which `setProviderBaseUrl` already invalidated.
    */
-  ipcMain.handle(
+  handle(
     'providers:set-base-url',
     async (_event, providerId: string, baseUrl: string | null) => {
       try {
@@ -2427,7 +2492,7 @@ function handleExit(): void {
     error: currentEngine.stderrTail() || 'pi 进程已退出',
     isStreaming: false
   })
-  if (shuttingDown) return
+  if (shuttingDown || switchingEngine) return
   // pi died on its own (a crashing extension, an OOM kill). Leaving the window dead means the next
   // message is lost with "pi 未运行", so bring it back on the same session.
   const now = Date.now()
@@ -2439,7 +2504,7 @@ function handleExit(): void {
   crashRestarts += 1
   console.warn(`[pi] exited unexpectedly, restarting (${crashRestarts}/3)`)
   setTimeout(() => {
-    if (!shuttingDown && !currentEngine.running() && !currentEngine.starting()) {
+    if (!shuttingDown && !switchingEngine && !currentEngine.running() && !currentEngine.starting()) {
       void startPi(status.cwd, sessionArgs())
     }
   }, 1000)
@@ -2450,6 +2515,13 @@ app.whenReady().then(async () => {
   await migrateLegacyUserData()
   await applySystemProxy()
   desktopConfig = await loadConfig()
+  const interruptedSwitch = desktopConfig.pendingEngineSwitch
+  if (interruptedSwitch) {
+    await saveConfig({ engine: interruptedSwitch.engine, cwd: interruptedSwitch.cwd,
+      activeProject: interruptedSwitch.activeProject, propheySessionId: interruptedSwitch.propheySessionId,
+      engineSessions: { ...desktopConfig.engineSessions, [interruptedSwitch.engine]: interruptedSwitch.session },
+      pendingEngineSwitch: undefined })
+  }
   // Projects live beside the config, in userData; the store reads the file on first use.
   projectStore = new projects.ProjectStore(path.join(app.getPath('userData'), 'projects.json'))
   await projectStore.load().catch(() => undefined)

@@ -63,7 +63,10 @@ Paste or drop images into the composer. Images remain attachments in a thumbnail
 The default Prophey engine stores transcripts under the desktop user-data directory.
 pi can use its CLI session directory or an isolated desktop profile. Claude Code and
 Codex own their native sessions; the desktop keeps an engine-aware index for navigation.
-Switching engines preserves each engine's last durable session.
+Switch engines beside the composer to copy the current user, assistant and tool history
+into a fresh native session, without reasoning or provider signatures. A running turn
+is stopped first; the original session remains in the sidebar. Failed switches restore
+the source session. See [context handoff](docs/engine-handoff.md).
 
 See [engine compatibility](docs/engine-compatibility.md) for native capabilities and
 known upstream limitations, and [the 0.5.4 audit](docs/code-review-0.5.4.md) for the

@@ -16,6 +16,7 @@
     "dist": "npm run dist -w @prophey/desktop",
     "release": "npm run release -w @prophey/desktop",
     "typecheck": "npm run typecheck -w @prophey/desktop",
-    "test:smoke": "node scripts/smoke-electron.cjs"
+    "test:smoke": "node scripts/smoke-electron.cjs",
+    "test:handoff": "node scripts/test-handoff.cjs"
   }
 }

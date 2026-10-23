@@ -1,3 +1,4 @@
+import { EnginePicker } from './EnginePicker'
 import { engineLabel } from '@shared/engine'
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type {
@@ -668,22 +669,6 @@ export function SettingsModal({
     void loadSettings()
   }, [modelConfig, loadProviders, loadSettings])
 
-  const changeEngine = useCallback(async (engine: 'pi' | 'prophey' | 'claude' | 'codex') => {
-    const next = await window.pi.setEngine(engine)
-    if (next.phase === 'error') {
-      setError(next.error ?? '切换引擎失败')
-      return
-    }
-    setDesktopConfig(await window.pi.getDesktopConfig())
-    const labels: Record<string, string> = {
-      prophey: 'Prophey（自带循环、工具、MCP、子代理）',
-      pi: 'pi',
-      claude: 'Claude Code（用 CLI 自己的循环、工具与登录）',
-      codex: 'Codex（用 CLI 自己的循环、工具与登录）'
-    }
-    setNotice(`已切换到 ${labels[engine] ?? engine} 引擎`)
-  }, [])
-
   /** Tools a CLI engine should not have; the flags are applied to the next turn. */
   const toggleEngineTool = useCallback(
     async (engine: 'claude' | 'codex', tool: string) => {
@@ -1103,24 +1088,12 @@ export function SettingsModal({
               )}
               <div className="field">
                 <label>引擎</label>
-                <div className="theme-switch storage-switch">
-                  {(
-                    [
-                      ['prophey', 'Prophey'],
-                      ['pi', 'pi'],
-                      ['claude', 'Claude Code'],
-                      ['codex', 'Codex']
-                    ] as const
-                  ).map(([id, label]) => (
-                    <button
-                      key={id}
-                      className={(desktopConfig?.engine ?? 'prophey') === id ? 'active' : ''}
-                      onClick={() => void changeEngine(id)}
-                    >
-                      {label}
-                    </button>
-                  ))}
-                </div>
+                <EnginePicker status={status} onNotice={setNotice}
+                  onChanged={async () => setDesktopConfig(await window.pi.getDesktopConfig())} />
+                <p className="field-hint">
+                  切换会携带当前对话的用户消息、AI 正文和工具记录，去掉思考内容。
+                  运行中会先停止当前回合；原会话保留在历史列表中。
+                </p>
                 <p className="field-hint">
                   pi：完整的编码 agent（工具、压缩、子代理、扩展、<code>/btw</code>）。
                 </p>

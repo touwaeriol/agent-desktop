@@ -1,3 +1,4 @@
+import { toPiHistory, type HistoryMessage } from './history'
 import type { EngineStartOptions } from './engine'
 import { engineCapabilities } from '../../shared/engine'
 import type { Model } from '@earendil-works/pi-ai'
@@ -207,6 +208,18 @@ export class PropheyEngine implements AgentEngine {
         percent: contextWindow ? Math.min(100, (tokens / contextWindow) * 100) : null
       }
     }
+  }
+
+  async importHistory(messages: HistoryMessage[]): Promise<void> {
+    if (this.busy()) throw new Error('请先停止当前回合')
+    if (!this.options.transcripts) throw new Error('历史存储未配置')
+    const id = (await this.options.newSessionId?.()) ?? 's_' + crypto.randomUUID()
+    const transcript = toPiHistory(messages, this.snapshot.model)
+    await this.options.transcripts.save(id, this.roots, transcript, true)
+    this.loaded = true
+    this.sessionId = id
+    this.transcript = transcript
+    this.setStatus({ sessionFile: this.transcriptPath(), sessionName: undefined })
   }
 
   async messages(): Promise<unknown[]> {

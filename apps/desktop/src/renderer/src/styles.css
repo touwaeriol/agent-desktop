@@ -6617,3 +6617,16 @@ button:disabled {
   font-size: 10.4px;
   white-space: nowrap;
 }
+
+.engine-picker select {
+  max-width: 210px;
+  border: 1px solid var(--border-soft);
+  border-radius: 6px;
+  padding: 4px 6px;
+  color: var(--text-dim);
+  background: var(--bg-input);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.engine-picker select:disabled { opacity: 0.55; cursor: default; }

@@ -1,3 +1,5 @@
+import { toClaudeEntries, type HistoryMessage } from './history'
+import type { ImportedHistoryStore } from '../imported-history-store'
 import type { EngineStartOptions } from './engine'
 import { randomUUID } from 'node:crypto'
 import type { Query, SDKUserMessage, ModelInfo, SlashCommand } from '@anthropic-ai/claude-agent-sdk'
@@ -30,6 +32,7 @@ class InputQueue implements AsyncIterable<SDKUserMessage> {
   }
 }
 interface ClaudeOptions extends NativeOptions {
+  historyStore?: ImportedHistoryStore
   binary: string
   disabledTools?: () => string[]
 }
@@ -94,6 +97,7 @@ export class ClaudeCodeEngine extends NativeEngine {
     this.setStatus({ phase: 'starting', cwd: this.roots.primary, isStreaming: false })
     try {
       const sdk = await import('@anthropic-ai/claude-agent-sdk')
+      const storage = await this.sessionOptions()
       this.input = new InputQueue()
       const q = sdk.query({
         prompt: this.input,
@@ -103,6 +107,7 @@ export class ClaudeCodeEngine extends NativeEngine {
           additionalDirectories: this.roots.additional,
           settingSources: ['user', 'project', 'local'],
           resume: this.sessionId,
+          sessionStore: storage.sessionStore,
           model: this.sessionId ? undefined : this.snapshot.model?.id || undefined,
           disallowedTools: (this.options.disabledTools?.() ?? []).filter(
             (t) => t !== 'WebFetch' && t !== 'WebSearch'
@@ -193,13 +198,32 @@ export class ClaudeCodeEngine extends NativeEngine {
       this.setStatus({ phase: 'stopped' })
     }
   }
+  private async sessionOptions(sessionId = this.sessionId): Promise<{ dir: string; sessionStore?: ImportedHistoryStore }> {
+    const store = this.options.historyStore
+    return {
+      dir: this.roots.primary,
+      sessionStore: sessionId && store && await store.owns(sessionId) ? store : undefined
+    }
+  }
+  async importHistory(messages: HistoryMessage[]): Promise<void> {
+    if (this.busy()) throw new Error('请先停止当前回合')
+    const store = this.options.historyStore
+    if (!store) throw new Error('历史存储未配置')
+    const id = randomUUID()
+    await store.append({ sessionId: id, projectKey: this.roots.primary }, toClaudeEntries(messages, id, this.roots.primary))
+    this.sessionId = id
+    this.transcript = []
+    this.usage = {}
+    this.setStatus({ model: undefined, thinkingLevel: undefined, sessionName: undefined })
+    await this.connect()
+  }
   private async readHistory(): Promise<void> {
     if (!this.sessionId) {
       this.transcript = []
       return
     }
     const sdk = await import('@anthropic-ai/claude-agent-sdk')
-    const messages = await sdk.getSessionMessages(this.sessionId, { dir: this.roots.primary })
+    const messages = await sdk.getSessionMessages(this.sessionId, await this.sessionOptions())
     this.transcript = normalizeClaudeHistory(messages)
   }
   async newSession(): Promise<{ cancelled?: boolean }> {
@@ -215,7 +239,7 @@ export class ClaudeCodeEngine extends NativeEngine {
     if (this.busy()) throw new Error('请先停止当前回合')
     const id = this.parseRef(ref)
     const sdk = await import('@anthropic-ai/claude-agent-sdk')
-    if (!(await sdk.getSessionInfo(id, { dir: this.roots.primary })))
+    if (!(await sdk.getSessionInfo(id, await this.sessionOptions(id))))
       throw new Error('Claude Code 会话不存在')
     this.sessionId = id
     this.setStatus({ model: undefined, thinkingLevel: undefined })
@@ -224,7 +248,7 @@ export class ClaudeCodeEngine extends NativeEngine {
   async clone(): Promise<string> {
     if (this.busy() || !this.sessionId) throw new Error('当前会话还不能分叉')
     const sdk = await import('@anthropic-ai/claude-agent-sdk')
-    const fork = await sdk.forkSession(this.sessionId, { dir: this.roots.primary })
+    const fork = await sdk.forkSession(this.sessionId, await this.sessionOptions())
     const ref = 'claude:' + fork.sessionId
     await this.switchSession(ref)
     return ref
@@ -233,7 +257,7 @@ export class ClaudeCodeEngine extends NativeEngine {
     const id = this.parseRef(ref)
     if (id === this.sessionId) throw new Error('不能删除当前会话')
     const sdk = await import('@anthropic-ai/claude-agent-sdk')
-    await sdk.deleteSession(id, { dir: this.roots.primary })
+    await sdk.deleteSession(id, await this.sessionOptions(id))
   }
   async models(): Promise<Record<string, unknown>[]> {
     return this.modelCatalog.map((m) => ({

@@ -315,3 +315,11 @@ npm run typecheck    # node + web 两个 tsconfig 分别检查
 - 主进程命令在 `engine-commands.ts`，压缩数值策略在 `compaction-policy.ts`。百分比在逻辑层保留小数，避免 1000/1M 被取整为 0%。
 - 渲染层纯数据转换放在 `lib/conversation-events.ts` / `lib/session-groups.ts`，IPC、副作用和运行计时仍由 App 管理。
 - `npm run test:smoke` 在 build 后运行，使用临时数据和真实 Electron，不能接入用户现有 profile；测试成功必须出现明确完成标记。
+
+## 跨引擎切换
+
+- `desktop:set-engine` 现在携带当前对话创建目标新会话；不再跳回目标引擎的旧会话。源会话保留。
+- `agent/history.ts` 是唯一清洗/编码层，`AgentEngine.importHistory` 是唯一导入入口。不能搬运 thinking/签名/系统指令，不能重新执行历史工具。
+- CC 使用应用自有 SessionStore；Codex 使用 thread/inject_items，并保存界面前缀（原生 turns 不保证显示注入记录）；pi 使用 SessionManager。
+- `pendingEngineSwitch` 必须在迁移成功并记录目标会话后才清除。切换时 IPC 修改互斥，队列等待 ready；失败及中途退出均恢复源会话。
+- 新增验证：build 后 `npm run test:handoff`；安装本机 CC/Codex 时再运行 `npm run test:handoff -- --native`。只使用隔离 profile 和本地模拟模型，不用用户历史作 fixture。

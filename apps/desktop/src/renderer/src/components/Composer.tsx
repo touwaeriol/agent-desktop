@@ -1,3 +1,4 @@
+import { EnginePicker } from './EnginePicker'
 import type { EngineCapabilities, EngineCommand } from '@shared/engine'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
@@ -573,6 +574,7 @@ export function Composer({
         />
         <div className="composer-foot">
           <div className="composer-left" ref={contextRef}>
+            <EnginePicker compact status={status} disabled={disabled && status.phase === 'ready'} onNotice={onNotice} />
             <button
               className={`attach-btn ${contextOpen ? 'open' : ''}`}
               title="引用上下文（@ 文件或目录）"

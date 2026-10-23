@@ -321,12 +321,20 @@ export default function App(): React.JSX.Element {
     },
     [activeProjectId, projects, loadProjects]
   )
+  const messagesRequest = useRef(0)
   const loadMessages = useCallback(async () => {
+    const request = ++messagesRequest.current
+    const owner = statusRef.current
+    const isCurrent = (): boolean => request === messagesRequest.current &&
+      statusRef.current.phase === 'ready' && !statusRef.current.switchingEngine &&
+      statusRef.current.engine === owner.engine && statusRef.current.sessionFile === owner.sessionFile
     try {
       const messages = await window.pi.getMessages()
+      if (!isCurrent()) return
       setItems(toChatItems(messages))
       setStick(true)
       const stats = await window.pi.getSessionStats().catch(() => undefined)
+      if (!isCurrent()) return
       setRun({ runningTools: 0, tokens: stats?.tokens?.total })
       setContextUsage(stats?.contextUsage)
     } catch {
@@ -733,7 +741,7 @@ export default function App(): React.JSX.Element {
     // The queue belongs to the main session: never flush it into an open `/btw` fork.
     if (btwChatRef.current) return
     const next = queueRef.current[0]
-    if (!next) return
+    if (!next || (next.command && engineCommands.length === 0)) return
     setQueued((prev) => prev.filter((item) => item.id !== next.id))
     /**
      * Put the item back and arrange the next attempt.

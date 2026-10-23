@@ -1,3 +1,5 @@
+import { toCodexItems, mergeImportedHistory, type HistoryMessage } from './history'
+import type { ImportedHistoryStore } from '../imported-history-store'
 import { version } from '../../../package.json'
 import type { EngineStartOptions } from './engine'
 import type { PiStatus, PiModel, PromptImage, PromptResult } from '../../shared/types'
@@ -6,6 +8,7 @@ import type { AgentWorkspace } from './engine'
 import { NativeEngine, type NativeOptions } from './native-engine'
 import { JsonRpcProcess } from './json-rpc-process'
 interface CodexOptions extends NativeOptions {
+  historyStore?: ImportedHistoryStore
   binary: string
   script?: string
   sandbox?: () => 'read-only' | 'workspace-write' | undefined
@@ -106,7 +109,7 @@ export class CodexEngine extends NativeEngine {
     const sandbox = this.options.sandbox?.()
     return {
       cwd: this.roots.primary,
-      ...(sandbox ? { sandbox: sandbox === 'read-only' ? 'readOnly' : 'workspaceWrite' } : {}),
+      ...(sandbox ? { sandbox } : {}),
       ...(this.roots.additional.length
         ? {
             config: { 'sandbox_workspace_write.writable_roots': this.roots.additional },
@@ -128,6 +131,21 @@ export class CodexEngine extends NativeEngine {
       },
       thinkingLevel: response.reasoningEffort ?? undefined
     })
+  }
+  async importHistory(messages: HistoryMessage[]): Promise<void> {
+    if (this.busy()) throw new Error('请先停止当前回合')
+    const store = this.options.historyStore
+    if (!store) throw new Error('历史存储未配置')
+    await this.newSession()
+    const id = this.threadId!
+    try {
+      await this.rpc.request('thread/inject_items', { threadId: id, items: toCodexItems(messages) })
+      await store.savePrefix(id, messages)
+      this.transcript = structuredClone(messages) as unknown as Array<Record<string, unknown>>
+    } catch (error) {
+      await this.rpc.request('thread/archive', { threadId: id }).catch(() => undefined)
+      throw new Error('Codex 历史导入失败：' + String(error))
+    }
   }
   private async readHistory(thread?: any): Promise<void> {
     this.transcript = []
@@ -158,6 +176,8 @@ export class CodexEngine extends NativeEngine {
       )
         throw error
     }
+    const prefix = await this.options.historyStore?.loadPrefix(this.threadId) ?? []
+    this.transcript = mergeImportedHistory(prefix, this.transcript)
   }
   stop(): void {
     this.connected = false
@@ -195,11 +215,13 @@ export class CodexEngine extends NativeEngine {
   }
   async clone(): Promise<string> {
     if (this.busy() || !this.threadId) throw new Error('当前会话还不能分叉')
+    const prefix = await this.options.historyStore?.loadPrefix(this.threadId) ?? []
     const response = await this.rpc.request('thread/fork', {
       threadId: this.threadId,
       ...this.threadOptions()
     })
     this.applyThread(response)
+    if (prefix.length) await this.options.historyStore?.savePrefix(this.threadId!, prefix)
     await this.readHistory(response.thread)
     return 'codex:' + this.threadId
   }

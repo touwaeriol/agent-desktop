@@ -28,6 +28,8 @@ export interface PiSpeedState {
 }
 
 export interface PiStatus {
+  /** A context transfer owns the engine; queued prompts and mutations must wait. */
+  switchingEngine?: EngineId
   engine?: EngineId
   capabilities?: EngineCapabilities
   phase: 'starting' | 'ready' | 'error' | 'stopped'
