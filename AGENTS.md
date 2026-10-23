@@ -71,10 +71,13 @@ npm run typecheck    # node + web 两个 tsconfig 分别检查
 
 - 图片走 pi 原生能力：RPC `prompt` / `steer` 的 `images` 字段，元素是 `{type:'image', data: base64, mimeType}`；pi 会把它们写进会话 JSONL 的 image content block，`get_messages` 也返回同样的块。
 - 渲染层 `lib/images.ts` 负责 File → base64（`blobToDraftImage`，上限 8MB）和 `clipboardImages`（读 `clipboardData.items`）。**图片是纯附件**：不写文件名、不插入 `[图片N]` 标记，统一在输入框上方以 42×42 圆角方块展示（`object-fit: cover`，不同长宽比也对齐），悬停才出现删除按钮；发送时按数组顺序传给 pi。
+- **粘贴入口在 `Composer.tsx` 的 window 级 `paste` 监听**（不是 textarea 的 `onPaste`）：焦点在 chip / 滚动区时 Cmd+V 也要能附图，而落到其他控件（设置、@ 搜索框、队列编辑）的粘贴要放过去不拦。命中图片时 `preventDefault()`，纯文本粘贴仍走浏览器默认。`addImages` 用 `imagesRef` 而不是 props 里的 `images`：连贴两张时两次解码并发，用 props 会让后一张覆盖前一张。
 - 点任意缩略图打开 `ImageLightbox`（Esc / 点背景关闭）；会话里用户消息用 `MessageImages` 渲染，图片在气泡**上方**右对齐（`.message.user` 是 column + align-items flex-end）。
 - 允许只发图片不发文字：`prompt` 的 `message` 传空串，pi 接受（实测模型能收到图）。
-- **上下文用量**：输入框右下角的小圆环 + `2% 20K / 1M`，数据来自 `get_session_stats().contextUsage`（`{tokens, contextWindow, percent}`）。`App.tsx` 在 `loadMessages` 和 `agent_settled` 时刷新；`percent` 在刚压缩完时是 `null`，此时按 `tokens/window` 兜底、拿不到就显示 0。颜色：到自动压缩阈值变红、阈值前 15 个百分点变琥珀。**不要**显示 prompt cache 到期时间——pi 不提供，也不该猜。
-- **自动压缩**：目标是窗口的 90%（`AUTO_COMPACT_RATIO`）。pi 在 `contextTokens > contextWindow - reserveTokens` 时压缩，所以 `reserveTokens = window × (1 - ratio)`（1M 窗口 → 100K 余量）。写入 `~/.pi/agent/settings.json` 的 `compaction.{enabled,reserveTokens}`；**pi 只在启动时读这个值**，所以改完必须重启（`reloadPiConfig`，忙时会延后）。`syncAutoCompact()` 在启用、换模型、启动时各跑一次，值没变就不重启。`/autocompact <tokens>` 会把它换算成比例存进 `config.json` 的 `autoCompact.ratio`，换模型时按比例重算。模型没有 `contextWindow` 时保留 pi 默认的 16K 余量并在设置里提示。
+- **上下文用量**：输入框右下角的小圆环 + `2% 20K / 1M`，数据来自 `get_session_stats().contextUsage`（`{tokens, contextWindow, percent}`）。`App.tsx` 在 `loadMessages`、`agent_settled` 以及 **`status.autoCompactPercent` 变化时**刷新（改了压缩阈值后用量/配色必须跟着变，之前只能等下一轮结束才更新）；`percent` 在刚压缩完时是 `null`，此时按 `tokens/window` 兜底、拿不到就显示 0。颜色：到自动压缩阈值变红、阈值前 15 个百分点变琥珀。**不要**显示 prompt cache 到期时间——pi 不提供，也不该猜。
+- **自动压缩**：默认目标是窗口的 90%（`AUTO_COMPACT_RATIO`）。pi 在 `contextTokens > contextWindow - reserveTokens` 时压缩，所以 `reserveTokens = window × (1 - ratio)`（1M 窗口 → 100K 余量）。写入 `~/.pi/agent/settings.json` 的 `compaction.{enabled,reserveTokens}`；**pi 只在启动时读这个值**，所以改完必须重启（`reloadPiConfig`，忙时会延后）。`syncAutoCompact()` 在启用、换模型、启动时各跑一次，值没变就不重启。
+- 阈值只有一个真源：`config.json` 的 `autoCompact.ratio`（按比例存，换模型时按新窗口重算）。三个入口都写它并立刻 `broadcastStatus()`：设置 → 通用 → 「自动压缩」开关（`pi:set-auto-compact`）、设置 → 通用 → 「自动压缩阈值」下拉（`pi:set-auto-compact-ratio`，10–99%）、`/autocompact <tokens>`（换算成比例）。**设阈值必须把 `autoCompactEnabled` 置 true**：`statusSnapshot()` 只在它为真时给出 `autoCompactPercent`，漏了这一步界面会一直显示「已关闭 / 90%」，用户看到的阈值就不跟随设置变。
+- 渲染层不要用 `status.autoCompactPercent ?? 90` 兜底成一个假阈值（历史上设置页这么写过，等于把真实值藏掉）；拿不到就说明没窗口信息或压缩已关，按这个含义显示。模型没有 `contextWindow` 时保留 pi 默认的 16K 余量并提示用户补 `contextWindow`。
 
 ## 斜杠命令
 
@@ -84,7 +87,7 @@ npm run typecheck    # node + web 两个 tsconfig 分别检查
   - 需要空闲会话的命令（`/clear`、`/compact`、`/autocompact <数字>`）**排队而不是拒绝**：忙碌时 `queueCommand()` 往消息队列里塞一条 `command: true` 的条目（输入框上方显示「命令」标签，没有「立即发送」按钮），回合结束后由同一个 flush effect 调 `runCommand(text, { queued: true })` 执行。`queued: true` 时若 pi 又忙起来就返回 false，flush 会把条目放回队列而不是丢掉。
   - `/clear`：开新会话（= 侧栏「新建」），不是清空当前 JSONL。
   - `/compact [提示词]`：RPC `compact` + `customInstructions`；会话太小时 pi 会返回 `Nothing to compact`，原样提示给用户。
-  - `/autocompact <token 数 | on | off>`：写 `~/.pi/agent/settings.json` 的 `compaction.enabled` / `compaction.reserveTokens`（`reserveTokens = contextWindow - 阈值`，按当前模型的 `contextWindow` 换算），然后重启 pi；`on/off` 额外调 RPC `set_auto_compaction` 立即生效。
+  - `/autocompact <token 数 | on | off>`：写 `~/.pi/agent/settings.json` 的 `compaction.enabled` / `compaction.reserveTokens`（`reserveTokens = contextWindow - 阈值`，按当前模型的 `contextWindow` 换算），再按比例存进 `config.json` 的 `autoCompact.ratio` 并重启 pi；`on/off` 额外调 RPC `set_auto_compaction` 立即生效。同一个阈值也能在 设置 → 通用 → 「自动压缩阈值」里按百分比选。
   - `/mcp`：用 `getMcpState()` 弹浮层列出所有服务器（名称/传输/内置/启用状态）与全部工具名。
   - `/btw <问题>`：在当前分支节点开一个**新的侧边对话**（`BtwChat` 面板，全屏浮层）。主进程 `pi:btw-start` 用 RPC `clone`（不是 `fork`——`fork` 需要具体 entry id，传 leaf 会报 `Invalid entry ID for forking`）拿到分支文件，然后在这个分支上 `prompt` + `waitForSettle` + `get_last_assistant_text`；**分支保留到面板关闭**，面板里的追问走 `pi:btw-ask`（同一个分支，可多轮），关闭走 `pi:btw-close`：切回原会话、删掉分支文件。整个过程 `btwActive` 为真：`pi:event` 不发给窗口（否则渲染层会把分支会话加载进主记录），`sessionArgs()` 也强制返回原会话，重启不会落到分支上；任何切换/重开会话的 IPC 与 `reloadPiConfig()` 都先 `closeSideChat()`。左侧栏、输入框在面板打开时不可用（输入框 `disabled`），避免消息发进分支。
   - `/btw` 不排队：正在跑时先 `waitForIdle()` 等本轮结束再 `clone`（面板立刻打开显示「正在回答…」）；再次 `/btw` 会先 `closeSideChat()` 丢掉旧分支，从**当前**节点重新分支。`btwGeneration` 在每次 start/close 自增，用于取消还在等待的 start——否则面板关掉后它仍会把进程停在分支上。

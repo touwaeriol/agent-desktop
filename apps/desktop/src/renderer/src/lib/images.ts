@@ -37,10 +37,16 @@ export async function blobToDraftImage(blob: Blob, name?: string): Promise<Draft
 export function clipboardImages(data: DataTransfer | null): File[] {
   if (!data) return []
   const files: File[] = []
-  for (const item of Array.from(data.items)) {
+  for (const item of Array.from(data.items ?? [])) {
     if (item.kind !== 'file' || !item.type.startsWith('image/')) continue
     const file = item.getAsFile()
     if (file) files.push(file)
+  }
+  // Windows / Snipping Tool pastes sometimes come through as plain files with no item entry.
+  if (files.length === 0) {
+    for (const file of Array.from(data.files ?? [])) {
+      if (file.type.startsWith('image/')) files.push(file)
+    }
   }
   return files
 }

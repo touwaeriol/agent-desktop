@@ -295,7 +295,6 @@ export default function App(): React.JSX.Element {
       setSessions([])
     }
   }, [])
-
   const loadMessages = useCallback(async () => {
     try {
       const messages = await window.pi.getMessages()
@@ -526,6 +525,26 @@ export default function App(): React.JSX.Element {
     if (status.sessionFile) setActivePath(status.sessionFile)
     void loadMessages()
   }, [status.phase, status.sessionFile, loadMessages])
+
+  /**
+   * Auto-compaction decides what counts as "full", so re-read the usage whenever the trigger moves
+   * (`/autocompact`, the settings row) or pi comes back up on a new reserve. Without this the meter
+   * and its warning colours kept describing the previous threshold until the next run settled.
+   */
+  useEffect(() => {
+    if (status.phase !== 'ready') return
+    let cancelled = false
+    void window.pi
+      .getSessionStats()
+      .then((stats) => {
+        if (cancelled || !stats?.contextUsage) return
+        setContextUsage(stats.contextUsage)
+      })
+      .catch(() => undefined)
+    return () => {
+      cancelled = true
+    }
+  }, [status.phase, status.autoCompactPercent])
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme

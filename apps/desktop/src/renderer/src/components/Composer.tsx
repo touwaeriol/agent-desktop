@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import type { ModelOption, PiStatus } from '@shared/types'
 import {
@@ -131,27 +131,68 @@ export function Composer({
     })
   }
 
-  const addImages = async (files: File[]): Promise<void> => {
-    const added: DraftImage[] = []
-    for (const file of files) {
-      const image = await blobToDraftImage(file, file.name || undefined)
-      if (!image) {
-        onNotice?.('图片超过 8MB，已跳过')
-        continue
+  /**
+   * Latest draft images, so two pastes that are still decoding do not both append to the same
+   * stale array. `images` from props would be captured by the first `addImages` call.
+   */
+  const imagesRef = useRef(images)
+  useEffect(() => {
+    imagesRef.current = images
+  }, [images])
+
+  const addImages = useCallback(
+    async (files: File[]): Promise<void> => {
+      const added: DraftImage[] = []
+      for (const file of files) {
+        const image = await blobToDraftImage(file, file.name || undefined)
+        if (!image) {
+          onNotice?.('图片超过 8MB，已跳过')
+          continue
+        }
+        added.push(image)
       }
-      added.push(image)
-    }
-    if (added.length === 0) return
-    onImagesChange([...images, ...added])
-  }
+      if (added.length === 0) return
+      const next = [...imagesRef.current, ...added]
+      imagesRef.current = next
+      onImagesChange(next)
+    },
+    [onImagesChange, onNotice]
+  )
 
   const removeImage = (id: string): void => {
     onImagesChange(images.filter((image) => image.id !== id))
   }
 
-  const handleFiles = (files: File[]): void => {
-    void addImages(files)
-  }
+  const handleFiles = useCallback(
+    (files: File[]): void => {
+      // Nothing may be attached while pi is not accepting prompts (or a `/btw` fork is open).
+      if (disabled) return
+      void addImages(files)
+    },
+    [addImages, disabled]
+  )
+
+  /**
+   * Clipboard images are pure attachments: an image in the clipboard is attached instead of being
+   * inserted as text. Listening on the window (not just the textarea) keeps Cmd/Ctrl+V working when
+   * focus sits on a chip or the scroll area; pastes into other inputs (settings, @-mention search)
+   * are left alone.
+   */
+  useEffect(() => {
+    const onPaste = (event: ClipboardEvent): void => {
+      const target = event.target as HTMLElement | null
+      const editable =
+        target instanceof HTMLElement &&
+        (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)
+      if (editable && target !== ref.current) return
+      const files = clipboardImages(event.clipboardData)
+      if (files.length === 0) return
+      event.preventDefault()
+      handleFiles(files)
+    }
+    window.addEventListener('paste', onPaste)
+    return () => window.removeEventListener('paste', onPaste)
+  }, [handleFiles])
 
   const openContextPicker = async (): Promise<void> => {
     if (contextOpen) {
@@ -568,7 +609,13 @@ export function Composer({
                 title={
                   `上下文窗口 ${contextMeter.usedLabel} / ${contextMeter.windowLabel}` +
                   (autoCompactPercent
-                    ? `（${autoCompactPercent}% 时自动压缩）`
+                    ? `（${autoCompactPercent}%${
+                        contextUsage?.contextWindow
+                          ? ` ≈ ${contextLabel(
+                              Math.round((autoCompactPercent / 100) * contextUsage.contextWindow)
+                            )}`
+                          : ''
+                      } 时自动压缩）`
                     : '（自动压缩已关闭）')
                 }
               >

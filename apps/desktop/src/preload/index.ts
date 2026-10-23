@@ -113,6 +113,7 @@ const bridge: PiBridge = {
   openAgentsConfig: () => ipcRenderer.invoke('agents:open-config') as Promise<void>,
   compactSession: (instructions) => ipcRenderer.invoke('pi:compact', instructions),
   setAutoCompact: (enabled) => ipcRenderer.invoke('pi:set-auto-compact', enabled),
+  setAutoCompactRatio: (percent) => ipcRenderer.invoke('pi:set-auto-compact-ratio', percent),
   setCompactThreshold: (tokens) => ipcRenderer.invoke('pi:set-compact-threshold', tokens),
   startSideChat: (question) => ipcRenderer.invoke('pi:btw-start', question),
   askSideChat: (question) => ipcRenderer.invoke('pi:btw-ask', question),

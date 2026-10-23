@@ -509,11 +509,23 @@ export interface PiBridge {
     error?: string
     /** Set when the model has no window, so pi's default reserve is kept. */
     warning?: string
+    /** Percentage of the window where compaction starts (absent when it is off). */
+    percent?: number
     contextWindow?: number
     reserveTokens?: number
   }>
+  /** Set the compaction trigger as a percentage of the model's window (10–99). */
+  setAutoCompactRatio(percent: number): Promise<{
+    ok: boolean
+    percent?: number
+    warning?: string
+    contextWindow?: number
+    reserveTokens?: number
+    error?: string
+  }>
   setCompactThreshold(tokens: number): Promise<{
     ok: boolean
+    percent?: number
     contextWindow?: number
     reserveTokens?: number
     error?: string

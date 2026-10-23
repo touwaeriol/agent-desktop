@@ -1469,13 +1469,15 @@ function registerIpc(): void {
       broadcastStatus()
       if (!enabled) return { ok: true }
       const reserveTokens = await syncAutoCompact({ restart: true })
+      const percent = Math.round(autoCompactRatio() * 100)
       if (reserveTokens === undefined) {
         return {
           ok: true,
+          percent,
           warning: '当前模型没有上下文窗口信息，自动压缩沿用 pi 的默认余量（16K tokens）'
         }
       }
-      return { ok: true, contextWindow: status.model?.contextWindow, reserveTokens }
+      return { ok: true, percent, contextWindow: status.model?.contextWindow, reserveTokens }
     } catch (error) {
       return { ok: false, error: error instanceof Error ? error.message : String(error) }
     }
@@ -1485,7 +1487,9 @@ function registerIpc(): void {
    * `/autocompact 500000`: compact once the context passes that many tokens.
    *
    * The number is stored as a ratio of the window, so a later model switch recomputes it instead of
-   * keeping a token count that no longer means anything.
+   * keeping a token count that no longer means anything. Setting a threshold also turns compaction
+   * back on: the window's meter and the settings row read `autoCompactPercent`, so leaving
+   * `autoCompactEnabled` false here made the UI keep claiming "已关闭 / 90%".
    */
   ipcMain.handle('pi:set-compact-threshold', async (_event, tokens: number) => {
     try {
@@ -1496,10 +1500,54 @@ function registerIpc(): void {
       const target = Math.max(1000, Math.round(tokens))
       const reserveTokens = Math.max(0, contextWindow - target)
       await providers.setCompactionSettings({ enabled: true, reserveTokens })
-      await saveConfig({ autoCompact: { ratio: Math.min(0.99, target / contextWindow) } })
+      const ratio = Math.min(0.99, target / contextWindow)
+      await saveConfig({ autoCompact: { ratio } })
+      autoCompactEnabled = true
+      broadcastStatus()
       if (btwActive) await closeSideChat()
       await startPi(status.cwd, sessionArgs())
-      return { ok: true, contextWindow, reserveTokens }
+      return {
+        ok: true,
+        contextWindow,
+        reserveTokens,
+        percent: Math.round(autoCompactRatio() * 100)
+      }
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) }
+    }
+  })
+
+  /**
+   * The settings row: auto-compaction starts at this percentage of the model's window.
+   *
+   * Stored as a ratio (like `/autocompact`) so switching to a model with a different window keeps
+   * the same *proportion*; the reserve is recomputed with it. A threshold is only meaningful while
+   * compaction is on, so setting one turns it back on.
+   */
+  ipcMain.handle('pi:set-auto-compact-ratio', async (_event, percent: number) => {
+    const value = Math.round(Number(percent))
+    if (!Number.isFinite(value) || value < 10 || value > 99) {
+      return { ok: false, error: '自动压缩阈值要在 10% 和 99% 之间' }
+    }
+    try {
+      await saveConfig({ autoCompact: { ratio: value / 100 } })
+      autoCompactEnabled = true
+      await providers.setCompactionSettings({ enabled: true })
+      // `syncAutoCompact` only restarts when the reserve changes, so make the switch effective for
+      // the process that is running right now (it may have been left with compaction off).
+      if (rpc.running) {
+        await rpc.request('set_auto_compaction', { enabled: true }, 10_000).catch(() => undefined)
+      }
+      broadcastStatus()
+      const reserveTokens = await syncAutoCompact({ restart: true })
+      if (reserveTokens === undefined) {
+        return {
+          ok: true,
+          percent: value,
+          warning: '当前模型没有上下文窗口信息，阈值会在切到有窗口的模型后生效'
+        }
+      }
+      return { ok: true, percent: value, contextWindow: status.model?.contextWindow, reserveTokens }
     } catch (error) {
       return { ok: false, error: error instanceof Error ? error.message : String(error) }
     }

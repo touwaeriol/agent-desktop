@@ -42,6 +42,9 @@ type Tab = 'providers' | 'custom' | 'mcp' | 'agents' | 'general'
 
 const THINKING_LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
 
+/** Trigger points offered in the auto-compaction row; any 10–99 value is accepted by the backend. */
+const COMPACT_PERCENT_PRESETS = [50, 60, 70, 75, 80, 85, 90, 95]
+
 /** `349K` / `1M` — the same shape the composer's context meter uses. */
 function formatTokens(value: number): string {
   if (value >= 1_000_000) {
@@ -381,6 +384,9 @@ export function SettingsModal({
   const [modelConfig, setModelConfig] = useState<ModelConfigState>()
   const [webSearch, setWebSearch] = useState<McpWebState>()
   const [webBusy, setWebBusy] = useState(false)
+  /** Auto-compaction trigger as a percentage of the window; kept in sync with `status`. */
+  const [compactPercent, setCompactPercent] = useState('')
+  const [compactBusy, setCompactBusy] = useState(false)
   /** Provider whose endpoint editor is open, plus the draft value. */
   const [baseUrlEdit, setBaseUrlEdit] = useState<string>()
   const [baseUrlDraft, setBaseUrlDraft] = useState('')
@@ -513,7 +519,7 @@ export function SettingsModal({
             ? '自动压缩已关闭'
             : result.warning
               ? result.warning
-              : `自动压缩已开启：到 ${status.autoCompactPercent ?? 90}% 时压缩（保留 ${formatTokens(
+              : `自动压缩已开启：到 ${result.percent ?? status.autoCompactPercent ?? 90}% 时压缩（保留 ${formatTokens(
                   result.reserveTokens ?? 0
                 )} tokens）`
         )
@@ -531,6 +537,46 @@ export function SettingsModal({
     setModelsContent(file.content)
     setModelsDirty(false)
   }, [])
+
+  /**
+   * Set the auto-compaction trigger (percentage of the model's window).
+   *
+   * The main process stores it as a ratio, so switching to a model with a different window keeps
+   * the same proportion and recomputes pi's `reserveTokens`. While a run is in flight the restart is
+   * deferred, so the value shows up in `/autocompact` and the meter immediately and pi picks it up
+   * when the current turn settles.
+   */
+  const applyCompactPercent = useCallback(
+    async (value: number) => {
+      setCompactBusy(true)
+      try {
+        const result = await window.pi.setAutoCompactRatio(value)
+        if (!result.ok) {
+          setError(result.error ?? '设置失败')
+          return
+        }
+        setNotice(
+          result.warning ??
+            `自动压缩阈值：${result.percent ?? value}%（当前模型保留 ${formatTokens(
+              result.reserveTokens ?? 0
+            )} tokens）`
+        )
+        await loadSettings()
+      } catch (cause) {
+        setError(cause instanceof Error ? cause.message : String(cause))
+      } finally {
+        setCompactBusy(false)
+      }
+    },
+    [loadSettings]
+  )
+
+  // Broadcasts carry the effective threshold, so the select follows `/autocompact 500000` too.
+  useEffect(() => {
+    if (typeof status.autoCompactPercent === 'number') {
+      setCompactPercent(String(status.autoCompactPercent))
+    }
+  }, [status.autoCompactPercent])
 
   useEffect(() => {
     if (!open) return
@@ -643,6 +689,17 @@ export function SettingsModal({
     for (const model of models) map.set(model.provider, model.providerName)
     return [...map.entries()].map(([id, name]) => ({ id, name }))
   }, [models])
+
+  /** Common trigger points, plus whatever `/autocompact <tokens>` happened to produce. */
+  const compactOptions = useMemo(() => {
+    const values = [...COMPACT_PERCENT_PRESETS]
+    const current = Number(compactPercent)
+    if (Number.isFinite(current) && current > 0 && !values.includes(current)) {
+      values.push(current)
+      values.sort((a, b) => a - b)
+    }
+    return values
+  }, [compactPercent])
 
   const filteredModels = useMemo(
     () => models.filter((model) => !defaultProvider || model.provider === defaultProvider),
@@ -1194,18 +1251,44 @@ export function SettingsModal({
                   <span className="field-inline">
                     {settings?.compaction?.enabled === false
                       ? '已关闭：上下文满了会直接报错'
-                      : `到 ${status.autoCompactPercent ?? 90}% 时自动压缩`}
-                    {settings?.compaction?.enabled !== false &&
-                      status.model?.contextWindow &&
-                      `（约 ${formatTokens(
-                        Math.round(((status.autoCompactPercent ?? 90) / 100) * status.model.contextWindow)
-                      )} / 窗口 ${formatTokens(status.model.contextWindow)}）`}
+                      : `到 ${compactPercent || status.autoCompactPercent || 90}% 时自动压缩`}
                   </span>
                 </div>
                 <p className="field-hint">
                   阈值按当前模型的上下文窗口换算成 pi 的 <code>reserveTokens</code>
-                  ，换模型时会重新计算（需要重启 pi 才生效）。没有窗口信息的自定义模型请先补上
+                  ，按比例保存，换模型时会重新计算。没有窗口信息的自定义模型请先补上
                   <code>contextWindow</code>。
+                </p>
+              </div>
+
+              <div className="field">
+                <label>自动压缩阈值</label>
+                <select
+                  value={compactPercent || String(status.autoCompactPercent ?? 90)}
+                  disabled={compactBusy || settings?.compaction?.enabled === false}
+                  onChange={(event) => {
+                    const next = Number(event.target.value)
+                    setCompactPercent(String(next))
+                    void applyCompactPercent(next)
+                  }}
+                >
+                  {compactOptions.map((percent) => (
+                    <option key={percent} value={percent}>
+                      窗口的 {percent}%
+                    </option>
+                  ))}
+                </select>
+                <p className="field-hint">
+                  {status.model?.contextWindow
+                    ? `当前模型窗口 ${formatTokens(status.model.contextWindow)}，到约 ${formatTokens(
+                        Math.round(
+                          ((Number(compactPercent) || status.autoCompactPercent || 90) / 100) *
+                            status.model.contextWindow
+                        )
+                      )} tokens 时压缩；剩下的余量留给下一轮回复。`
+                    : '当前模型没有上下文窗口信息，切到有窗口的模型后自动换算。'}
+                  正在运行时可改，pi 会在本轮结束后重启生效；也能用{' '}
+                  <code>/autocompact 500000</code> 按 token 数设置。
                 </p>
               </div>
 
