@@ -22,7 +22,7 @@ export interface AgentWorkspace {
  * engine can be added without touching the window or the IPC layer.
  *
  * Deliberately narrow: an engine runs turns against a session, owns the run state (`busy` /
- * `compacting`, which is what unblocks the message queue), and exposes the raw request channel.
+ * `compacting`, which is what unblocks the message queue).
  * Everything that is app policy — MCP servers, `/btw` forks, compaction thresholds, speed tiers,
  * config, profiles — stays in the app, not in the engine.
  */
@@ -84,13 +84,6 @@ export interface AgentEngine {
   /** Fork the current session; resolves to the new session file when the engine reports one. */
   clone(): Promise<string | undefined>
   abort(): Promise<void>
-
-  /** Raw command channel; `type` is the engine's own command name. */
-  request<T = Record<string, unknown>>(
-    type: string,
-    payload?: Record<string, unknown>,
-    timeoutMs?: number
-  ): Promise<T>
 
   /** Re-read the run state from the engine (authoritative `busy`). */
   refresh(): Promise<void>

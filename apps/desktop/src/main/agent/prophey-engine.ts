@@ -154,10 +154,6 @@ export class PropheyEngine implements AgentEngine {
     throw new Error(`Prophey 引擎 v1 还不支持${what}（请切回 pi 引擎）`)
   }
 
-  request<T = Record<string, unknown>>(): Promise<T> {
-    this.unimplemented('引擎命令通道')
-  }
-
   models(): Promise<Record<string, unknown>[]> {
     this.unimplemented('模型目录查询')
   }
