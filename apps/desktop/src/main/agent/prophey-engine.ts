@@ -2,6 +2,7 @@ import type { Model } from '@earendil-works/pi-ai'
 import type { PiModel, PiStatus, PromptImage, PromptResult } from '@shared/types'
 import * as providers from '../providers'
 import type { TranscriptStore } from '../transcript-store'
+import { loadMcpTools } from './mcp-client'
 import {
   bridgeContext,
   loadSubagentTools,
@@ -56,6 +57,10 @@ export class PropheyEngine implements AgentEngine {
       bridge?: () => { url: string; token: string } | undefined
       /** Directory holding `subagent.mjs`; absent when subagents are off. */
       subagentModulePath?: string
+      /** The app's MCP endpoints (`/mcp/<key>` on the bridge), configured for this workspace. */
+      mcpEndpoints?: (
+        workspace: AgentWorkspace
+      ) => Promise<Array<{ name: string; url: string; token: string; description?: string }>>
     }
   ) {}
 
@@ -386,7 +391,10 @@ ${text.trim()}`,
       bridge && subagentPath
         ? await loadSubagentTools(subagentPath, bridgeContext(bridge)).catch(() => [])
         : []
-    this.tools = [...workspace, ...subagents]
+    // MCP servers (codegraph / warpgrep / web) over the same bridge endpoints pi connects to.
+    const endpoints = await this.options.mcpEndpoints?.(this.workspace()).catch(() => [])
+    const mcp = endpoints && endpoints.length > 0 ? await loadMcpTools(endpoints).catch(() => []) : []
+    this.tools = [...workspace, ...subagents, ...mcp]
     return this.tools
   }
 

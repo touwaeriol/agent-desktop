@@ -136,7 +136,8 @@ npm run typecheck    # node + web 两个 tsconfig 分别检查
 - **压缩**：`compact()` 让模型把对话压成一段结构化中文摘要（目标/决定/改过的文件/未完成/继续所需事实），摘要作为唯一一条 user 消息替换 transcript；`shouldCompact()` 在**每轮开始前**按 `contextWindow × 比例` 判断是否自动压缩（配置来自窗口同一个阈值设置，不重启），并发 `compaction_start/end`。`stats()` 用 transcript 估算 token（~4 字符/token）填 `contextUsage`，所以用量环和自动压缩阈值在 Prophey 引擎下也工作。
 - **子代理**：Prophey 引擎把 `packages/mcp-core/tools/subagent.mjs` 也加载进来，但**不走 MCP**——`agent/core-tools.ts` 的 `bridgeContext()` 直接对桥接的 JSON API 发请求（同一个 token、同一批端点），所以子代理管理器只有一份实现。
 - **`/btw` 也通了**：`clone()` 把 transcript 复制成新 id 并返回它的路径，`switchSession()` 按路径载入，所以 `pi:btw-start` 那套「记住原会话 → fork → 关闭时切回」的记账不用改就成立（实测：起侧边对话 → 追问 → 关闭后 sessionFile 回到原值）。
-- Prophey 引擎还缺：**MCP 服务器**（codegraph / warpgrep / web / ask_user_question 都经 pi 的 MCP 客户端接入）、速度档位（要改请求体，pi-ai 只暴露 `transformHeaders`）、扩展钩子（`<project>` 段等）。所以默认引擎仍是 `pi`。切换引擎是热替换（`desktop:set-engine` 重建引擎对象并重启会话），不需要退出应用。
+- **MCP 也通了**：`agent/mcp-client.ts` 直接连桥接的 `/mcp/<key>`（streamable HTTP，`initialize` + `tools/list` + `tools/call`），工具名保持 `mcp__<server>__<tool>`，和 pi 完全一致。端点由 `mcpEndpointsFor(workspace)` 生成（同一套 `buildEngineTargets` / `buildEngineRegistrations`，所以多根仓库的 `codegraph__<repo>` 也在）。实测：Prophey 引擎下调 `mcp__codegraph__codegraph_search` 拿到了真实路径。
+- Prophey 引擎还缺：速度档位（要改请求体，pi-ai 只暴露 `transformHeaders`）、`ask_user_question`（走 mcp-core 的 stdio 服务器）、扩展钩子。所以默认引擎仍是 `pi`。切换引擎是热替换（`desktop:set-engine` 重建引擎对象并重启会话），不需要退出应用。
 - 改名说明：产品名是 Prophey，但 `app.setName('agent-desktop')` **故意保留**——它决定 `%APPDATA%/agent-desktop`，改了等于丢失用户的配置、会话、项目和凭据。
 - 还没搬完的部分：`/btw` 的 clone/switch、压缩阈值同步、登录消息、MCP 启动参数装配（`prepare` 仍由 `index.ts` 提供，这是刻意的）。
 

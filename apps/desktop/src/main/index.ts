@@ -162,7 +162,8 @@ function createEngine(): AgentEngine {
         const token = desktopConfig.mcp?.bridgeToken
         return port && token ? { url: `http://127.0.0.1:${port}`, token } : undefined
       },
-      subagentModulePath: coreToolModule('subagent.mjs')
+      subagentModulePath: coreToolModule('subagent.mjs'),
+      mcpEndpoints: (workspace) => mcpEndpointsFor(workspace)
     })
   }
   return new PiEngine({
@@ -497,6 +498,46 @@ function coreToolModule(name: string): string | undefined {
 
 function coreToolsModule(): string | undefined {
   return coreToolModule('workspace.mjs')
+}
+
+/**
+ * Configure the MCP gateways for a workspace and describe their endpoints.
+ *
+ * pi reaches them through its own MCP client; the Prophey engine calls the same endpoints itself,
+ * so both engines end up with the same servers for the same project.
+ */
+async function mcpEndpointsFor(
+  workspace: AgentWorkspace
+): Promise<Array<{ name: string; url: string; token: string; description?: string }>> {
+  if (!mcpSettings().enabled) return []
+  const port = desktopConfig.mcp?.bridgePort
+  const token = desktopConfig.mcp?.bridgeToken
+  if (!port || !token) return []
+  const roots = [
+    { path: workspace.primary, name: path.basename(workspace.primary) || workspace.primary, primary: true },
+    ...workspace.additional.map((root) => ({ path: root, name: path.basename(root) || root }))
+  ]
+  const targets = await engines.buildEngineTargets({
+    roots,
+    config: engineConfig(),
+    morphApiKey: desktopConfig.mcp?.morphApiKey,
+    webAvailable: webReady()
+  })
+  // The endpoints must exist before anything connects to them.
+  gateway.configure(targets)
+  return engines
+    .buildEngineRegistrations({
+      baseUrl: `http://127.0.0.1:${port}`,
+      token,
+      targets,
+      toggles: toolToggles()
+    })
+    .map((registration) => ({
+      name: registration.name,
+      url: registration.url,
+      token,
+      description: registration.description
+    }))
 }
 
 function desktopToolAvailable(): boolean {
