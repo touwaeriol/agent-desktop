@@ -1,3 +1,4 @@
+import { engineLabel } from '@shared/engine'
 import type { PiStatus } from '@shared/types'
 import { BranchIcon, CloseIcon, PanelIcon, PlusIcon, SparkIcon } from './Icons'
 
@@ -40,7 +41,11 @@ export function TabBar({
       <div className="tabbar-right">
         {status.phase !== 'ready' && (
           <span className={`connection ${status.phase}`}>
-            {status.phase === 'starting' ? '连接 pi…' : status.phase === 'error' ? 'pi 未连接' : '已停止'}
+            {status.phase === 'starting'
+              ? '连接 ' + engineLabel(status.engine) + '…'
+              : status.phase === 'error'
+                ? engineLabel(status.engine) + ' 未连接'
+                : '已停止'}
           </span>
         )}
         <button

@@ -1,3 +1,5 @@
+import type { EngineCapabilities, EngineCommand } from '../../shared/engine'
+export type { EngineCapabilities } from '../../shared/engine'
 import type { PiModel, PiStatus, PromptImage, PromptResult } from '@shared/types'
 
 /**
@@ -15,37 +17,22 @@ export interface AgentWorkspace {
 }
 
 /**
- * What an engine can do.
- *
- * The window uses this to hide what the engine cannot answer, instead of letting the user press a
- * button that comes back as "not supported". A CLI engine owns its own loop, so compaction, the side
- * chat and thinking levels are its business, not ours.
- */
-export interface EngineCapabilities {
-  /** Rewriting the context: the compact command and the auto-compaction threshold. */
-  compact: boolean
-  /** Forking the session for the side chat. */
-  fork: boolean
-  /** Thinking levels beyond the model default. */
-  thinking: boolean
-  /** A model catalogue the picker can list. */
-  models: boolean
-}
-
-/**
  * What the window needs from an agent engine.
  *
- * The desktop app is moving to "our own agent, with a swappable engine underneath". pi is engine #1
- * and the only implementation so far; this file is the contract it has to satisfy, so a second
- * engine can be added without touching the window or the IPC layer.
+ * The desktop app is moving to "our own agent, with a swappable engine underneath". all four implementations share this contract. Protocol-specific details stay in their adapter.
  *
  * Deliberately narrow: an engine runs turns against a session, owns the run state (`busy` /
  * `compacting`, which is what unblocks the message queue).
  * Everything that is app policy — MCP servers, `/btw` forks, compaction thresholds, speed tiers,
  * config, profiles — stays in the app, not in the engine.
  */
+export interface EngineStartOptions {
+  session?: string
+  model?: { provider: string; id: string }
+}
+
 export interface AgentEngine {
-  /** Stable id, shown in diagnostics; `pi` for the current implementation. */
+  /** Stable engine id, shared with session storage and the renderer. */
   readonly id: string
 
   /** Run state as the window sees it. The app decorates this before broadcasting. */
@@ -61,10 +48,13 @@ export interface AgentEngine {
 
   /** What this engine supports; see {@link EngineCapabilities}. */
   capabilities(): EngineCapabilities
+  nativeCommands?(): Promise<EngineCommand[]>
+  executeCommand?(name: string, args: string): Promise<{ text?: string }>
+  discardSession?(sessionPath: string): Promise<void>
   /** Directories this session works on. */
   workspace(): AgentWorkspace
   /** Start (or restart) the session; resolves once the engine answers `get_state`. */
-  start(workspace?: string | AgentWorkspace, extraArgs?: string[]): Promise<PiStatus>
+  start(workspace?: string | AgentWorkspace, options?: EngineStartOptions): Promise<PiStatus>
   /** True while a start is in flight, so a restart never runs over it. */
   starting(): boolean
   stop(): void

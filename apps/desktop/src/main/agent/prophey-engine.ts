@@ -1,3 +1,5 @@
+import type { EngineStartOptions } from './engine'
+import { engineCapabilities } from '../../shared/engine'
 import type { Model } from '@earendil-works/pi-ai'
 import type { PiModel, PiStatus, PromptImage, PromptResult } from '@shared/types'
 import * as providers from '../providers'
@@ -14,20 +16,7 @@ import {
 } from './core-tools'
 import type { AgentEngine, AgentWorkspace, EngineCapabilities } from './engine'
 
-/**
- * Prophey — our own engine, v1.
- *
- * This is the first step of replacing pi's loop: the same contract, driven by our own call to the
- * provider layer (`ModelRuntime.streamSimple`) instead of a child process speaking JSONL. It exists
- * so the seam is real rather than theoretical; it is **not** a replacement yet:
- *
- * - no tool execution (pi's tools and our root-aware tools are not wired in)
- * - no compaction, retries, subagents, `/btw`, sessions or extensions
- * - no persistence: the transcript lives in memory for the life of the process
- *
- * Everything it cannot do throws a clear "not implemented" instead of pretending, and it is only
- * selected when `config.engine` is `own`. The default engine stays pi.
- */
+/** Provider-backed engine with owned tool execution, transcripts and compaction. */
 export class PropheyEngine implements AgentEngine {
   readonly id = 'prophey'
 
@@ -41,6 +30,7 @@ export class PropheyEngine implements AgentEngine {
   /** Auto-compaction: enabled plus the percentage of the window that triggers it. */
   private autoCompact: { enabled: boolean; percent: number } = { enabled: false, percent: 50 }
   private loaded = false
+  private controller?: AbortController
 
   constructor(
     private readonly options: {
@@ -77,11 +67,11 @@ export class PropheyEngine implements AgentEngine {
   }
 
   busy(): boolean {
-    return this.isBusy
+    return this.isBusy || this.compacting()
   }
 
   compacting(): boolean {
-    return false
+    return !!this.snapshot.compacting
   }
 
   running(): boolean {
@@ -93,7 +83,7 @@ export class PropheyEngine implements AgentEngine {
   }
 
   capabilities(): EngineCapabilities {
-    return { compact: true, fork: true, thinking: false, models: true }
+    return engineCapabilities('prophey')
   }
 
   workspace(): AgentWorkspace {
@@ -104,12 +94,16 @@ export class PropheyEngine implements AgentEngine {
     return false
   }
 
-  async start(workspace?: string | AgentWorkspace): Promise<PiStatus> {
+  async start(
+    workspace?: string | AgentWorkspace,
+    options: EngineStartOptions = {}
+  ): Promise<PiStatus> {
     const wanted =
       typeof workspace === 'string'
         ? { primary: workspace, additional: [] }
-        : workspace ?? this.roots
+        : (workspace ?? this.roots)
     this.roots = { primary: wanted.primary, additional: [...wanted.additional] }
+    this.tools = undefined
     this.snapshot = { phase: 'ready', cwd: wanted.primary, isStreaming: false, compacting: false }
     this.options.onStatus(this.snapshot)
     // Pick a model up front: the window reads it from the status, and an unset model shows as
@@ -117,13 +111,14 @@ export class PropheyEngine implements AgentEngine {
     if (!this.model) await this.pickModel().catch(() => undefined)
     const compaction = this.options.autoCompact?.()
     if (compaction) this.autoCompact = compaction
-    await this.resume()
+    if (options.session) await this.switchSession(options.session)
+    else await this.resume()
     this.setStatus({ sessionFile: this.transcriptPath() })
     return this.snapshot
   }
 
   stop(): void {
-    this.isBusy = false
+    this.controller?.abort()
     this.snapshot = { ...this.snapshot, phase: 'stopped' }
     this.options.onStatus(this.snapshot)
   }
@@ -147,18 +142,15 @@ export class PropheyEngine implements AgentEngine {
 
   async waitForSettle(timeoutMs: number): Promise<boolean> {
     const deadline = Date.now() + timeoutMs
-    while (this.isBusy && Date.now() < deadline) {
+    while (this.busy() && Date.now() < deadline) {
       await new Promise((resolve) => setTimeout(resolve, 100))
     }
-    return !this.isBusy
+    return !this.busy()
   }
 
   waitForIdle(timeoutMs: number): Promise<boolean> {
     return this.waitForSettle(timeoutMs)
   }
-
-  // --- not implemented yet ---------------------------------------------------------------------
-  // Each of these is a real gap, not an oversight: they are what pi still provides.
 
   private unimplemented(what: string): never {
     throw new Error(`Prophey 引擎 v1 还不支持${what}（请切回 pi 引擎）`)
@@ -191,7 +183,7 @@ export class PropheyEngine implements AgentEngine {
   }
 
   setThinkingLevel(): Promise<void> {
-    return Promise.resolve()
+    return Promise.reject(new Error('当前引擎不支持独立设置思考等级'))
   }
 
   /**
@@ -225,14 +217,19 @@ export class PropheyEngine implements AgentEngine {
     const last = [...this.transcript].reverse().find((entry) => entry.role === 'assistant')
     const content = Array.isArray(last?.content) ? (last?.content as unknown[]) : []
     const text = content
-      .map((block) => (block && typeof block === 'object' && 'text' in block ? String(block.text) : ''))
+      .map((block) =>
+        block && typeof block === 'object' && 'text' in block ? String(block.text) : ''
+      )
       .join('')
     return Promise.resolve(text || null)
   }
 
   async setAutoCompaction(options: { enabled: boolean; reserveTokens?: number }): Promise<void> {
     // Nothing to configure in the engine: the limit comes from the model window and the app's ratio.
-    this.autoCompact = { ...this.autoCompact, enabled: options.enabled }
+    this.autoCompact = {
+      ...(this.options.autoCompact?.() ?? this.autoCompact),
+      enabled: options.enabled
+    }
     this.setStatus({ autoCompactPercent: options.enabled ? this.autoCompact.percent : undefined })
   }
 
@@ -243,6 +240,7 @@ export class PropheyEngine implements AgentEngine {
    * so the next turn starts with room to work instead of replaying everything.
    */
   async compact(instructions?: string): Promise<{ summary?: string }> {
+    this.controller ??= new AbortController()
     const model = this.model ?? (await this.pickModel())
     if (!model) throw new Error('没有可用的模型，无法压缩')
     if (this.transcript.length === 0) return {}
@@ -257,12 +255,14 @@ export class PropheyEngine implements AgentEngine {
             '你在压缩一段编码会话的上下文。输出一段中文摘要，保留：用户的目标、已做出的决定、' +
             '改过/读过的文件与其作用、未完成的工作、以及继续工作需要的具体事实（路径、命令、' +
             '错误信息）。不要寒暄，不要复述工具输出全文。' +
-            (instructions?.trim() ? `
+            (instructions?.trim()
+              ? `
 
-用户额外要求：${instructions.trim()}` : ''),
-          messages: this.transcript as never
+用户额外要求：${instructions.trim()}`
+              : ''),
+          messages: [...this.transcript] as never
         },
-        {}
+        { signal: this.controller.signal }
       )
       let text = ''
       let partial: Record<string, unknown> | undefined
@@ -270,7 +270,8 @@ export class PropheyEngine implements AgentEngine {
         if (event.type === 'text_delta') {
           partial = event.partial as Record<string, unknown>
         }
-        if (event.type === 'text_end') text = String((event as { content?: unknown }).content ?? text)
+        if (event.type === 'text_end')
+          text = String((event as { content?: unknown }).content ?? text)
         if (event.type === 'error') throw new Error(describeError(event.error))
       }
       if (!text.trim() && partial) text = textOf(partial)
@@ -288,6 +289,11 @@ ${text.trim()}`,
       return { summary: text.trim() }
     } finally {
       this.setStatus({ compacting: false })
+      if (!this.isBusy) {
+        this.controller = undefined
+        this.options.onEvent({ type: 'agent_settled' })
+        this.options.onSettled()
+      }
     }
   }
 
@@ -324,21 +330,25 @@ ${text.trim()}`,
   async switchSession(sessionPath: string): Promise<void> {
     const store = this.options.transcripts
     if (!store) this.unimplemented('切换会话')
-    const id = sessionPath.split(/[\\/]/).pop()?.replace(/\.jsonl$/, '')
+    const id = sessionPath
+      .split(/[\\/]/)
+      .pop()
+      ?.replace(/\.jsonl$/, '')
     if (!id) throw new Error(`无法识别的会话：${sessionPath}`)
     const stored = await store.load(id)
+    if (!stored) throw new Error('会话不存在：' + sessionPath)
+    this.loaded = true
     this.sessionId = id
-    this.transcript = stored?.messages ?? []
+    this.transcript = stored.messages
     this.setStatus({ sessionFile: this.transcriptPath() })
     for (const message of this.transcript) {
       this.options.onEvent({ type: 'message_end', message })
     }
   }
 
-  abort(): Promise<void> {
-    this.isBusy = false
-    this.setStatus({ isStreaming: false })
-    return Promise.resolve()
+  async abort(): Promise<void> {
+    this.controller?.abort()
+    await this.waitForSettle(15_000)
   }
 
   async send(message: string): Promise<void> {
@@ -348,6 +358,7 @@ ${text.trim()}`,
 
   /** True when auto-compaction is on and the transcript is past the trigger point. */
   private shouldCompact(): boolean {
+    this.autoCompact = this.options.autoCompact?.() ?? this.autoCompact
     const window = this.model?.contextWindow
     if (!this.autoCompact.enabled || !window || this.transcript.length === 0) return false
     return estimateTokens(this.transcript) >= (window * this.autoCompact.percent) / 100
@@ -417,7 +428,8 @@ ${text.trim()}`,
     const ask = context && askPath ? await loadAskTool(askPath, context).catch(() => []) : []
     // MCP servers (codegraph / warpgrep / web) over the same bridge endpoints pi connects to.
     const endpoints = await this.options.mcpEndpoints?.(this.workspace()).catch(() => [])
-    const mcp = endpoints && endpoints.length > 0 ? await loadMcpTools(endpoints).catch(() => []) : []
+    const mcp =
+      endpoints && endpoints.length > 0 ? await loadMcpTools(endpoints).catch(() => []) : []
     this.tools = [...workspace, ...subagents, ...ask, ...mcp]
     return this.tools
   }
@@ -440,77 +452,58 @@ ${text.trim()}`,
     options: { behavior?: 'steer' | 'followUp'; images?: PromptImage[] } = {}
   ): Promise<PromptResult> {
     if (this.snapshot.phase !== 'ready') return { ok: false, error: '引擎未就绪' }
-    if (this.isBusy) return { ok: false, error: '上一轮还没结束' }
-    const runtime = await providers.getRuntime()
-    let model = this.model
-    if (!model) {
-      // No model chosen yet: take the first one whose provider actually has credentials, so the
-      // engine does not fail on an unconfigured provider's catalogue entry.
-      const choices = await providers.listModelChoices({ includeUnconfigured: false })
-      const first = choices[0]
-      if (!first) return { ok: false, error: '没有已配置的服务商，请先在设置里登录' }
-      model = runtime.getModel(first.provider, first.id) as Model<string> | undefined
-      if (model) {
-        this.model = model
-        // The window reads the model from the status; without this it shows "无可用模型".
-        this.setStatus({ model: modelInfo(model) })
-      }
-    }
-    if (!model) return { ok: false, error: '没有可用的模型' }
-    const tools = await this.toolSet()
-    // Auto-compaction happens before the turn, never in the middle of one: a summary request in the
-    // middle of a tool loop would throw away the results the model is about to use.
-    if (this.shouldCompact()) {
-      await this.compact().catch(() => undefined)
-    }
-
-    const user: Record<string, unknown> = {
-      role: 'user',
-      content: options.images?.length
-        ? [
-            { type: 'text', text: message },
-            ...options.images.map((image) => ({
-              type: 'image',
-              mimeType: image.mimeType,
-              data: image.data
-            }))
-          ]
-        : message,
-      timestamp: Date.now()
-    }
-    this.transcript.push(user)
-    this.persist()
+    if (this.busy()) return { ok: false, error: '上一轮还没结束' }
+    this.controller = new AbortController()
+    const signal = this.controller.signal
     this.isBusy = true
     this.setStatus({ isStreaming: true })
     this.options.onEvent({ type: 'agent_start' })
-    this.options.onEvent({ type: 'message_start', message: user })
-
     try {
-      // One round = one model response. A round that asks for tools is followed by another round,
-      // which is the whole loop: think, call, read the result, continue.
-      for (let round = 0; round < MAX_ROUNDS; round += 1) {
+      const runtime = await providers.getRuntime()
+      const model = this.model ?? (await this.pickModel())
+      if (!model) throw new Error('没有已配置的服务商，请先登录')
+      const tools = await this.toolSet()
+      signal.throwIfAborted()
+      if (this.shouldCompact()) await this.compact()
+      signal.throwIfAborted()
+      const user: Record<string, unknown> = {
+        role: 'user',
+        content: options.images?.length
+          ? [{ type: 'text', text: message }, ...options.images]
+          : message,
+        timestamp: Date.now()
+      }
+      this.transcript.push(user)
+      this.persist()
+      this.options.onEvent({ type: 'message_start', message: user })
+      for (let round = 0; round < MAX_ROUNDS; round++) {
+        signal.throwIfAborted()
         const answer = await this.streamRoundWithRetry(runtime, model, tools)
-        if (!answer.ok) {
-          this.finishWithError(answer.error)
-          return { ok: false, error: answer.error }
-        }
+        if (!answer.ok) throw new Error(answer.error)
         const calls = toolCallsOf(answer.message)
-        if (calls.length === 0) break
+        if (!calls.length) break
         for (const call of calls) {
+          signal.throwIfAborted()
           this.transcript.push(await this.runTool(call, tools))
           this.persist()
         }
       }
+      return { ok: true, disposition: 'started' }
+    } catch (error) {
+      const text = signal.aborted ? '已停止' : describeError(error)
+      if (!signal.aborted)
+        this.options.onEvent({
+          type: 'message_end',
+          message: { role: 'assistant', content: [{ type: 'text', text }], stopReason: 'error' }
+        })
+      return { ok: false, error: text }
+    } finally {
       this.isBusy = false
-      this.setStatus({ isStreaming: false })
+      this.controller = undefined
+      this.setStatus({ isStreaming: false, compacting: false })
       this.options.onEvent({ type: 'agent_end' })
       this.options.onEvent({ type: 'agent_settled' })
       this.options.onSettled()
-      return { ok: true, disposition: 'started' }
-    } catch (error) {
-      const text = describeError(error)
-      this.finishWithError(text)
-      return { ok: false, error: text }
     }
   }
 
@@ -527,6 +520,7 @@ ${text.trim()}`,
   ): Promise<{ ok: true; message: Record<string, unknown> } | { ok: false; error: string }> {
     let lastError = ''
     for (let attempt = 0; attempt < RETRY_DELAYS_MS.length; attempt += 1) {
+      this.controller?.signal.throwIfAborted()
       const result = await this.streamRound(runtime, model, tools)
       if (result.ok) return result
       lastError = result.error
@@ -573,6 +567,7 @@ ${text.trim()}`,
                 }
               : {})
           }
+    this.options.onEvent({ type: 'message_start', message: { role: 'assistant' } })
     const stream = runtime.streamSimple(
       model,
       {
@@ -582,7 +577,7 @@ ${text.trim()}`,
         messages: [...this.transcript] as never,
         tools: toolDeclarations(tools)
       },
-      fastOptions
+      { ...fastOptions, signal: this.controller?.signal }
     )
     let partial: Record<string, unknown> | undefined
     for await (const event of stream as AsyncIterable<Record<string, unknown>>) {
@@ -593,7 +588,11 @@ ${text.trim()}`,
         event.type === 'thinking_end'
       ) {
         partial = event.partial as Record<string, unknown>
-        this.options.onEvent({ type: 'message_update', message: partial })
+        this.options.onEvent({
+          type: 'message_update',
+          message: partial,
+          assistantMessageEvent: { type: event.type, delta: event.delta }
+        })
       }
       if (event.type === 'error') {
         return { ok: false, error: describeError(event.error) }
@@ -627,7 +626,7 @@ ${text.trim()}`,
       result = { content: [{ type: 'text', text: `未知工具：${call.name}` }], isError: true }
     } else {
       try {
-        result = await tool.call(call.arguments ?? {})
+        result = await tool.call(call.arguments ?? {}, this.controller?.signal)
       } catch (error) {
         result = { content: [{ type: 'text', text: describeError(error) }], isError: true }
       }
@@ -676,7 +675,9 @@ function textOf(message: Record<string, unknown>): string {
   const content = Array.isArray(message.content) ? message.content : []
   return content
     .map((block) =>
-      block && typeof block === 'object' && 'text' in block ? String((block as { text: unknown }).text) : ''
+      block && typeof block === 'object' && 'text' in block
+        ? String((block as { text: unknown }).text)
+        : ''
     )
     .join('')
 }
@@ -750,4 +751,3 @@ function toolCallsOf(message: Record<string, unknown>): Array<{
   }
   return calls
 }
-

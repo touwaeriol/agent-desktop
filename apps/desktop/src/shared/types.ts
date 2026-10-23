@@ -1,3 +1,4 @@
+import type { EngineCapabilities, EngineCommand, EngineId } from './engine'
 export interface PiModel {
   provider: string
   id: string
@@ -27,6 +28,8 @@ export interface PiSpeedState {
 }
 
 export interface PiStatus {
+  engine?: EngineId
+  capabilities?: EngineCapabilities
   phase: 'starting' | 'ready' | 'error' | 'stopped'
   cwd: string
   model?: PiModel
@@ -261,13 +264,9 @@ export interface DesktopConfig {
   engine?: 'pi' | 'prophey' | 'claude' | 'codex'
   /** Tools disabled for a CLI engine (its own tool names). */
   engineTools?: { claude?: string[]; codex?: string[] }
+  codexSandbox?: 'read-only' | 'workspace-write'
   /** What the active engine supports, so the window can hide the rest. */
-  capabilities?: {
-    compact: boolean
-    fork: boolean
-    thinking: boolean
-    models: boolean
-  }
+  capabilities?: EngineCapabilities
 }
 
 export type AppUpdateStatus =
@@ -520,6 +519,14 @@ export interface PiBridge {
   /** Restart pi on the project's primary repository (undefined clears the selection). */
   activateProject(id?: string): Promise<PiStatus | { ok: false; error: string }>
   openSession(sessionPath: string, cwd: string): Promise<PiStatus>
+  getEngineCommands(): Promise<EngineCommand[]>
+  executeEngineCommand(
+    name: string,
+    args: string
+  ): Promise<{ ok: boolean; text?: string; error?: string }>
+  setEngineSandbox(
+    mode: 'read-only' | 'workspace-write' | 'default'
+  ): Promise<{ ok: boolean; error?: string }>
   getDesktopConfig(): Promise<DesktopConfig>
   setSessionMode(mode: 'shared' | 'isolated'): Promise<PiStatus>
   /** Switch the engine; the main process rebuilds it and restarts the session. */
@@ -572,7 +579,10 @@ export interface PiBridge {
   /** Processing tier for the active model; restarts pi so the extension picks up the new value. */
   setSpeedMode(mode: SpeedMode): Promise<{ ok: boolean; error?: string; speed?: PiSpeedState }>
   listProviderModels(providerId: string): Promise<ProviderModelOption[]>
-  setProviderModels(providerId: string, enabledIds: string[]): Promise<{ ok: boolean; error?: string }>
+  setProviderModels(
+    providerId: string,
+    enabledIds: string[]
+  ): Promise<{ ok: boolean; error?: string }>
   /** `null` clears the override and puts the provider back on its default endpoint. */
   setProviderBaseUrl(
     providerId: string,
@@ -638,7 +648,9 @@ export interface PiBridge {
   startSideChat(question: string): Promise<SideChatResult>
   askSideChat(question: string): Promise<SideChatResult>
   closeSideChat(): Promise<{ ok: boolean }>
-  saveAgentPreset(draft: AgentPresetDraft): Promise<{ ok: boolean; error?: string; state?: McpState }>
+  saveAgentPreset(
+    draft: AgentPresetDraft
+  ): Promise<{ ok: boolean; error?: string; state?: McpState }>
   deleteAgentPreset(id: string): Promise<{ ok: boolean; error?: string; state?: McpState }>
   refreshMcpEngines(): Promise<McpState>
   buildMcpIndex(): Promise<{ ok: boolean; message: string }>
@@ -658,7 +670,11 @@ export interface PiBridge {
   listSubagents(): Promise<SubagentView[]>
   getSubagent(id: string): Promise<SubagentView | null>
   stopSubagent(id: string): Promise<boolean>
-  promptSubagent(id: string, text: string, mode: 'interrupt' | 'steer' | 'follow-up'): Promise<boolean>
+  promptSubagent(
+    id: string,
+    text: string,
+    mode: 'interrupt' | 'steer' | 'follow-up'
+  ): Promise<boolean>
   revealSubagentSession(file: string): Promise<boolean>
   onSubagentUpdate(listener: (record: SubagentView) => void): () => void
 }

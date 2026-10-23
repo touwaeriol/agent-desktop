@@ -1,3 +1,4 @@
+import type { EngineCapabilities, EngineCommand } from '@shared/engine'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type {
   AppUpdateSnapshot,
@@ -329,9 +330,26 @@ export default function App(): React.JSX.Element {
   const [activeProjectId, setActiveProjectId] = useState<string>()
   const [recentRepos, setRecentRepos] = useState<string[]>([])
   /** What the active engine supports; the composer hides the rest. */
-  const [capabilities, setCapabilities] = useState<
-    { compact: boolean; fork: boolean; thinking: boolean; models: boolean } | undefined
-  >(undefined)
+  const [capabilities, setCapabilities] = useState<EngineCapabilities | undefined>(undefined)
+
+  const [commandOutput, setCommandOutput] = useState<{ title: string; text: string }>()
+  const [engineCommands, setEngineCommands] = useState<EngineCommand[]>([])
+  useEffect(() => {
+    let stale = false
+    setEngineCommands([])
+    setCapabilities(status.capabilities)
+    if (status.phase === 'ready') {
+      void window.pi
+        .getEngineCommands()
+        .then((commands) => {
+          if (!stale) setEngineCommands(commands)
+        })
+        .catch(() => undefined)
+    }
+    return () => {
+      stale = true
+    }
+  }, [status.engine, status.phase, status.sessionFile, status.isStreaming])
 
   const loadProjects = useCallback(async () => {
     try {
@@ -419,162 +437,175 @@ export default function App(): React.JSX.Element {
     }
   }, [])
 
-  const handleEvent = useCallback((record: Record<string, unknown>) => {
-    const type = String(record.type ?? '')
-    switch (type) {
-      case 'agent_start':
-        setRun({ startedAt: Date.now(), runningTools: 0 })
-        break
-      case 'message_start': {
-        const message = record.message as { role?: string } | undefined
-        if (message?.role === 'user') {
-          setItems((prev) => {
-            const index = prev.map((item) => item.role === 'user' && item.pending).lastIndexOf(true)
-            if (index === -1) return prev
-            const next = prev.slice()
-            next[index] = { ...next[index], pending: false }
-            return next
-          })
-        } else if (message?.role === 'assistant') {
-          setItems((prev) => [
-            ...prev,
-            {
-              id: `assistant-${Date.now()}-${prev.length}`,
-              role: 'assistant',
-              text: '',
-              thinking: '',
-              toolCalls: [],
-              streaming: true
-            }
-          ])
-        }
-        break
-      }
-      case 'message_update': {
-        const event = record.assistantMessageEvent as
-          | { type?: string; delta?: string; toolCall?: ToolCallPayload }
-          | undefined
-        if (!event) break
-        if (event.type === 'text_delta' && event.delta) {
-          setItems((prev) => appendDelta(prev, 'text', event.delta!))
-        } else if (event.type === 'thinking_delta' && event.delta) {
-          setItems((prev) => appendDelta(prev, 'thinking', event.delta!))
-        } else if (event.type === 'toolcall_end' && event.toolCall) {
-          const call = partialToolCall(event.toolCall, { status: 'running' })
-          setItems((prev) => upsertTool(prev, call))
-        }
-        break
-      }
-      case 'message_end': {
-        const message = record.message as
-          | { role?: string; content?: unknown; customType?: string }
-          | undefined
-        if (message?.role === 'custom') {
-          if (message.customType !== NOTICE_TYPE) break
-          const text = noticeText(textFromBlocks(message.content))
-          if (!text) break
-          setItems((prev) => [
-            ...prev,
-            {
-              id: `notice-${Date.now()}-${prev.length}`,
-              role: 'system',
-              text,
-              toolCalls: []
-            }
-          ])
+  const handleEvent = useCallback(
+    (record: Record<string, unknown>) => {
+      const type = String(record.type ?? '')
+      switch (type) {
+        case 'agent_start':
+          setRun({ startedAt: Date.now(), runningTools: 0 })
+          break
+        case 'message_start': {
+          const message = record.message as { role?: string } | undefined
+          if (message?.role === 'user') {
+            setItems((prev) => {
+              const index = prev
+                .map((item) => item.role === 'user' && item.pending)
+                .lastIndexOf(true)
+              if (index === -1) return prev
+              const next = prev.slice()
+              next[index] = { ...next[index], pending: false }
+              return next
+            })
+          } else if (message?.role === 'assistant') {
+            setItems((prev) => [
+              ...prev,
+              {
+                id: `assistant-${Date.now()}-${prev.length}`,
+                role: 'assistant',
+                text: '',
+                thinking: '',
+                toolCalls: [],
+                streaming: true
+              }
+            ])
+          }
           break
         }
-        if (message?.role === 'assistant') {
-          setItems((prev) =>
-            patchLastAssistant(prev, (item) => {
-              const calls = toolCallsFromBlocks(message.content)
-              return {
-                ...item,
-                text: textFromBlocks(message.content) || item.text,
-                thinking: thinkingFromBlocks(message.content) || item.thinking,
-                toolCalls:
-                  calls.length > 0
-                    ? calls.map((call) => {
-                        const existing = item.toolCalls.find((entry) => entry.id === call.id)
-                        return existing ? mergeCall(call, existing) : call
-                      })
-                    : item.toolCalls,
-                streaming: false
-              }
-            })
-          )
-        } else if (message?.role === 'user') {
-          setItems((prev) => {
-            const index = prev.map((item) => item.role === 'user' && item.pending).lastIndexOf(true)
-            if (index === -1) return prev
-            const next = prev.slice()
-            const images = imagesFromBlocks(message.content)
-            next[index] = {
-              ...next[index],
-              text: textFromBlocks(message.content) || next[index].text,
-              images: images.length > 0 ? images : next[index].images,
-              pending: false
-            }
-            return next
-          })
+        case 'message_update': {
+          const event = record.assistantMessageEvent as
+            | { type?: string; delta?: string; toolCall?: ToolCallPayload }
+            | undefined
+          if (!event) break
+          if (event.type === 'text_delta' && event.delta) {
+            setItems((prev) => appendDelta(prev, 'text', event.delta!))
+          } else if (event.type === 'thinking_delta' && event.delta) {
+            setItems((prev) => appendDelta(prev, 'thinking', event.delta!))
+          } else if (event.type === 'toolcall_end' && event.toolCall) {
+            const call = partialToolCall(event.toolCall, { status: 'running' })
+            setItems((prev) => upsertTool(prev, call))
+          }
+          break
         }
-        break
-      }
-      case 'tool_execution_start': {
-        setRun((prev) => ({ ...prev, runningTools: prev.runningTools + 1 }))
-        const call = partialToolCall(record as ToolCallPayload, { status: 'running' })
-        setItems((prev) => upsertTool(prev, call))
-        break
-      }
-      case 'tool_execution_update': {
-        const payload = record as ToolCallPayload & { partialResult?: unknown }
-        const call = partialToolCall(payload, {
-          status: 'running',
-          result: typeof payload.partialResult === 'string' ? payload.partialResult : undefined
-        })
-        setItems((prev) => upsertTool(prev, call))
-        break
-      }
-      case 'tool_execution_end': {
-        setRun((prev) => ({ ...prev, runningTools: Math.max(0, prev.runningTools - 1) }))
-        const payload = record as ToolCallPayload & { result?: unknown; isError?: boolean; durationMs?: number }
-        const call = partialToolCall(payload, {
-          status: payload.isError ? 'error' : 'done',
-          result: resultText(payload.result),
-          durationMs: payload.durationMs
-        })
-        setItems((prev) => upsertTool(prev, call))
-        break
-      }
-      case 'agent_settled':
-        setItems((prev) => prev.map((item) => ({ ...item, streaming: false })))
-        setRun((prev) => ({ ...prev, endedAt: Date.now(), runningTools: 0 }))
-        void window.pi
-          .getSessionStats()
-          .then((stats) => {
-            setRun((prev) => ({ ...prev, tokens: stats.tokens?.total }))
-            setContextUsage(stats.contextUsage)
+        case 'message_end': {
+          const message = record.message as
+            | { role?: string; content?: unknown; customType?: string }
+            | undefined
+          if (message?.role === 'custom') {
+            if (message.customType !== NOTICE_TYPE) break
+            const text = noticeText(textFromBlocks(message.content))
+            if (!text) break
+            setItems((prev) => [
+              ...prev,
+              {
+                id: `notice-${Date.now()}-${prev.length}`,
+                role: 'system',
+                text,
+                toolCalls: []
+              }
+            ])
+            break
+          }
+          if (message?.role === 'assistant') {
+            setItems((prev) =>
+              patchLastAssistant(prev, (item) => {
+                const calls = toolCallsFromBlocks(message.content)
+                return {
+                  ...item,
+                  text: textFromBlocks(message.content) || item.text,
+                  thinking: thinkingFromBlocks(message.content) || item.thinking,
+                  toolCalls:
+                    calls.length > 0
+                      ? calls.map((call) => {
+                          const existing = item.toolCalls.find((entry) => entry.id === call.id)
+                          return existing ? mergeCall(call, existing) : call
+                        })
+                      : item.toolCalls,
+                  streaming: false
+                }
+              })
+            )
+          } else if (message?.role === 'user') {
+            setItems((prev) => {
+              const index = prev
+                .map((item) => item.role === 'user' && item.pending)
+                .lastIndexOf(true)
+              if (index === -1) return prev
+              const next = prev.slice()
+              const images = imagesFromBlocks(message.content)
+              next[index] = {
+                ...next[index],
+                text: textFromBlocks(message.content) || next[index].text,
+                images: images.length > 0 ? images : next[index].images,
+                pending: false
+              }
+              return next
+            })
+          }
+          break
+        }
+        case 'tool_execution_start': {
+          setRun((prev) => ({ ...prev, runningTools: prev.runningTools + 1 }))
+          const call = partialToolCall(record as ToolCallPayload, { status: 'running' })
+          setItems((prev) => upsertTool(prev, call))
+          break
+        }
+        case 'tool_execution_update': {
+          const payload = record as ToolCallPayload & { partialResult?: unknown }
+          const call = partialToolCall(payload, {
+            status: 'running',
+            result: typeof payload.partialResult === 'string' ? payload.partialResult : undefined
           })
-          .catch(() => undefined)
-        void loadSessions()
-        break
-      case 'auto_retry_start':
-        setToast(`模型请求失败，${String(record.delayMs ?? 0)}ms 后重试`)
-        break
-      case 'auto_retry_end':
-        if (record.success === false) setToast(String(record.finalError ?? '重试失败'))
-        break
-      case 'extension_error':
-        setToast(`扩展错误：${String(record.error ?? '未知错误')}`)
-        break
-      case 'speed_unsupported':
-        // The main process already dropped the setting back to `standard` and restarted pi.
-        setToast('这个账号不能使用该速度档位，已回退标准（需要 API 计费或支持该档位的套餐），请重新发送')
-        break
-      default:
-        break
-    }
-  }, [loadSessions])
+          setItems((prev) => upsertTool(prev, call))
+          break
+        }
+        case 'tool_execution_end': {
+          setRun((prev) => ({ ...prev, runningTools: Math.max(0, prev.runningTools - 1) }))
+          const payload = record as ToolCallPayload & {
+            result?: unknown
+            isError?: boolean
+            durationMs?: number
+          }
+          const call = partialToolCall(payload, {
+            status: payload.isError ? 'error' : 'done',
+            result: resultText(payload.result),
+            durationMs: payload.durationMs
+          })
+          setItems((prev) => upsertTool(prev, call))
+          break
+        }
+        case 'agent_settled':
+          setItems((prev) => prev.map((item) => ({ ...item, streaming: false })))
+          setRun((prev) => ({ ...prev, endedAt: Date.now(), runningTools: 0 }))
+          void window.pi
+            .getSessionStats()
+            .then((stats) => {
+              setRun((prev) => ({ ...prev, tokens: stats.tokens?.total }))
+              setContextUsage(stats.contextUsage)
+            })
+            .catch(() => undefined)
+          void loadSessions()
+          break
+        case 'auto_retry_start':
+          setToast(`模型请求失败，${String(record.delayMs ?? 0)}ms 后重试`)
+          break
+        case 'auto_retry_end':
+          if (record.success === false) setToast(String(record.finalError ?? '重试失败'))
+          break
+        case 'extension_error':
+          setToast(`扩展错误：${String(record.error ?? '未知错误')}`)
+          break
+        case 'speed_unsupported':
+          // The main process already dropped the setting back to `standard` and restarted pi.
+          setToast(
+            '这个账号不能使用该速度档位，已回退标准（需要 API 计费或支持该档位的套餐），请重新发送'
+          )
+          break
+        default:
+          break
+      }
+    },
+    [loadSessions]
+  )
 
   useEffect(() => {
     void window.pi.getUpdateSnapshot().then(setUpdate)
@@ -701,7 +732,11 @@ export default function App(): React.JSX.Element {
   }, [])
 
   const deliver = useCallback(
-    async (text: string, images: DraftImage[], behavior?: 'steer' | 'followUp'): Promise<boolean> => {
+    async (
+      text: string,
+      images: DraftImage[],
+      behavior?: 'steer' | 'followUp'
+    ): Promise<boolean> => {
       // pi is parked on the `/btw` fork while that panel is open; nothing may go there by accident.
       if (btwChatRef.current) {
         setToast('先关闭侧边提问窗口')
@@ -792,7 +827,7 @@ export default function App(): React.JSX.Element {
       // flush put the item back instead of running a session command mid-run.
       if (options.queued && piBusy()) return false
       const text = raw.trim()
-      const space = text.indexOf(' ')
+      const space = text.search(/\s/)
       const name = (space === -1 ? text : text.slice(0, space)).toLowerCase()
       const arg = space === -1 ? '' : text.slice(space + 1).trim()
       /** True when the command has to wait for the current run to end. */
@@ -801,8 +836,26 @@ export default function App(): React.JSX.Element {
         queueCommand(text)
         return true
       }
-      switch (name) {
-        case '/clear': {
+      if (!text.startsWith('/')) return false
+      const command = engineCommands.find((entry) => entry.name.toLowerCase() === name)
+      if (!command) {
+        setToast('当前引擎没有此命令：' + name)
+        return true
+      }
+      if (['native', 'model', 'thinking', 'status'].includes(command.action)) {
+        if (defer()) return true
+        if (btwChatRef.current) {
+          setToast('先关闭侧边提问')
+          return true
+        }
+        const result = await window.pi.executeEngineCommand(command.name, arg)
+        if (result.ok && result.text) setCommandOutput({ title: command.name, text: result.text })
+        else setToast(result.ok ? '命令已执行' : result.error || '命令失败')
+        await loadMessages()
+        return true
+      }
+      switch (command.action) {
+        case 'clear': {
           if (defer()) return true
           // A session switch drops the `/btw` fork on the main side; close the panel with it.
           await closeBtw()
@@ -810,7 +863,7 @@ export default function App(): React.JSX.Element {
           setToast('已清空当前会话')
           return true
         }
-        case '/compact': {
+        case 'compact': {
           if (defer()) return true
           await closeBtw()
           setToast(arg ? `正在压缩（自定义提示词：${arg}）…` : '正在压缩上下文…')
@@ -823,14 +876,18 @@ export default function App(): React.JSX.Element {
           setToast('上下文已压缩')
           return true
         }
-        case '/autocompact': {
+        case 'autocompact': {
           if (!arg) {
             setToast('用法：/autocompact 500000（阈值 token 数）或 /autocompact off')
             return true
           }
           if (arg === 'off' || arg === 'on') {
             const result = await window.pi.setAutoCompact(arg === 'on')
-            setToast(result.ok ? `自动压缩已${arg === 'on' ? '开启' : '关闭'}` : (result.error ?? '设置失败'))
+            setToast(
+              result.ok
+                ? `自动压缩已${arg === 'on' ? '开启' : '关闭'}`
+                : (result.error ?? '设置失败')
+            )
             return true
           }
           const tokens = Number(arg.replace(/[^0-9]/g, ''))
@@ -848,13 +905,13 @@ export default function App(): React.JSX.Element {
           )
           return true
         }
-        case '/mcp': {
+        case 'mcp': {
           // Local: reads the current MCP state and opens the panel. Never waits for the run.
           setMcpState(await window.pi.getMcpState())
           setMcpOpen(true)
           return true
         }
-        case '/btw': {
+        case 'btw': {
           if (!arg) {
             setToast('用法：/btw <问题>')
             return true
@@ -882,7 +939,7 @@ export default function App(): React.JSX.Element {
           return false
       }
     },
-    [closeBtw, loadMessages, newSession, piBusy, queueCommand]
+    [closeBtw, loadMessages, newSession, piBusy, queueCommand, engineCommands]
   )
 
   /**
@@ -987,7 +1044,7 @@ export default function App(): React.JSX.Element {
         return
       }
       const streaming = piBusy()
-      if (streaming && mode === 'send') {
+      if (streaming && (mode === 'send' || !capabilities?.steer)) {
         setQueued((prev) => [
           ...prev,
           {
@@ -1004,7 +1061,7 @@ export default function App(): React.JSX.Element {
       setDraftImages([])
       await deliver(text, draftImages, streaming ? 'steer' : undefined)
     },
-    [draft, draftImages, deliver, runCommand]
+    [draft, draftImages, deliver, runCommand, capabilities?.steer]
   )
   const selectSession = useCallback(
     async (session: SessionSummary, options: { remember?: boolean } = {}) => {
@@ -1098,9 +1155,7 @@ export default function App(): React.JSX.Element {
   }, [newSession])
 
   const title =
-    status.sessionName ||
-    sessions.find((session) => session.path === activePath)?.title ||
-    '新会话'
+    status.sessionName || sessions.find((session) => session.path === activePath)?.title || '新会话'
 
   return (
     <div className={`app ${sidebarOpen ? '' : 'sidebar-collapsed'}`}>
@@ -1172,18 +1227,20 @@ export default function App(): React.JSX.Element {
         {status.phase === 'error' && (
           <div className="banner error">
             <div>
-              <strong>pi 未连接</strong>
+              <strong>引擎未连接</strong>
               <span>{status.error}</span>
-              {status.stderrTail && <code>{status.stderrTail.split('\n').slice(-3).join('\n')}</code>}
+              {status.stderrTail && (
+                <code>{status.stderrTail.split('\n').slice(-3).join('\n')}</code>
+              )}
             </div>
             <button onClick={() => void restart()}>重试</button>
           </div>
         )}
 
-        {status.phase === 'ready' && !status.model && (
+        {status.phase === 'ready' && capabilities?.providerSettings && !status.model && (
           <div className="banner warn">
             <div>
-              <strong>pi 尚未登录</strong>
+              <strong>尚未配置模型</strong>
               <span>在设置里登录 Anthropic、OpenAI 等服务商，或配置自定义端点。</span>
             </div>
             <div className="banner-actions">
@@ -1195,7 +1252,7 @@ export default function App(): React.JSX.Element {
               >
                 去登录
               </button>
-              <button onClick={() => void restart()}>重启 pi</button>
+              <button onClick={() => void restart()}>重启引擎</button>
             </div>
           </div>
         )}
@@ -1233,96 +1290,101 @@ export default function App(): React.JSX.Element {
         <div className="main-body">
           <div className="chat-column">
             <div className="chat-area">
-          <div
-            className="scroll"
-            ref={scrollRef}
-            onScroll={(event) => {
-              const element = event.currentTarget
-              const distance = element.scrollHeight - element.scrollTop - element.clientHeight
-              setStick(distance < 80)
-              updateActiveUser()
-            }}
-          >
-            <Conversation
-              items={items}
-              workspace={status.cwd}
-              connected={status.phase === 'ready'}
-              loggedIn={Boolean(status.model)}
-              subagents={subagents}
-              onOpenSubagent={openSubagents}
-              onSuggestion={(text) => {
-                setDraft(text)
-                requestAnimationFrame(() => {
-                  const textarea = document.querySelector<HTMLTextAreaElement>('.composer textarea')
-                  textarea?.focus()
-                })
-              }}
-            />
-          </div>
-          {items.length > 0 && (
-            <SessionNavigator
-              items={items}
-              outline={outline}
-              activeUserIndex={activeUserIndex}
-              activeOutlineId={activeOutlineId}
-              onJump={jumpToMessage}
-            />
-          )}
-        </div>
+              <div
+                className="scroll"
+                ref={scrollRef}
+                onScroll={(event) => {
+                  const element = event.currentTarget
+                  const distance = element.scrollHeight - element.scrollTop - element.clientHeight
+                  setStick(distance < 80)
+                  updateActiveUser()
+                }}
+              >
+                <Conversation
+                  items={items}
+                  workspace={status.cwd}
+                  connected={status.phase === 'ready'}
+                  loggedIn={Boolean(status.model)}
+                  subagents={subagents}
+                  onOpenSubagent={openSubagents}
+                  onSuggestion={(text) => {
+                    setDraft(text)
+                    requestAnimationFrame(() => {
+                      const textarea =
+                        document.querySelector<HTMLTextAreaElement>('.composer textarea')
+                      textarea?.focus()
+                    })
+                  }}
+                />
+              </div>
+              {items.length > 0 && (
+                <SessionNavigator
+                  items={items}
+                  outline={outline}
+                  activeUserIndex={activeUserIndex}
+                  activeOutlineId={activeOutlineId}
+                  onJump={jumpToMessage}
+                />
+              )}
+            </div>
 
-        {ask && (
-          <AskQuestionPanel
-            request={ask}
-            queued={askQueue.length - 1}
-            onSubmit={answerAsk}
-            onCancel={cancelAsk}
-          />
-        )}
-
-        <Composer
-          capabilities={capabilities}
-          value={draft}
-          onChange={setDraft}
-          images={draftImages}
-          onImagesChange={setDraftImages}
-          queued={queued}
-          contextUsage={contextUsage}
-          autoCompactPercent={status.autoCompactPercent}
-          onQueueRemove={(id) => setQueued((prev) => prev.filter((item) => item.id !== id))}
-          onQueueEdit={(id) => {
-            const target = queued.find((item) => item.id === id)
-            if (!target) return
-            setQueued((prev) => prev.filter((item) => item.id !== id))
-            setDraft(target.text)
-            setDraftImages(target.images)
-          }}
-          onQueueSteer={(id) => {
-            const target = queued.find((item) => item.id === id)
-            if (!target || target.command) return
-            setQueued((prev) => prev.filter((item) => item.id !== id))
-            void deliver(target.text, target.images, 'steer')
-          }}
-          onNotice={setToast}
-          onSend={(mode) => void send(mode)}
-          onStop={() => void window.pi.abort()}
-          streaming={Boolean(status.isStreaming || status.compacting)}
-          disabled={status.phase !== 'ready' || Boolean(btwChat)}
-          status={status}
-          onChooseWorkspace={() => void chooseWorkspace()}
-          statusBar={
-            runStatus?.active || subagents.some(isSubagentRunning) ? (
-              <RunStatusBar
-                active={Boolean(runStatus?.active)}
-                elapsedMs={runStatus?.elapsedMs ?? 0}
-                tokens={runStatus?.tokens}
-                runningTools={runStatus?.runningTools ?? 0}
-                subagents={subagents}
-                onOpenSubagent={openSubagents}
+            {ask && (
+              <AskQuestionPanel
+                request={ask}
+                queued={askQueue.length - 1}
+                onSubmit={answerAsk}
+                onCancel={cancelAsk}
               />
-            ) : undefined
-          }
-        />
+            )}
 
+            <Composer
+              capabilities={capabilities}
+              commands={engineCommands}
+              value={draft}
+              onChange={setDraft}
+              images={draftImages}
+              onImagesChange={setDraftImages}
+              queued={queued}
+              contextUsage={contextUsage}
+              autoCompactPercent={status.autoCompactPercent}
+              onQueueRemove={(id) => setQueued((prev) => prev.filter((item) => item.id !== id))}
+              onQueueEdit={(id) => {
+                const target = queued.find((item) => item.id === id)
+                if (!target) return
+                setQueued((prev) => prev.filter((item) => item.id !== id))
+                setDraft(target.text)
+                setDraftImages(target.images)
+              }}
+              onQueueSteer={(id) => {
+                const target = queued.find((item) => item.id === id)
+                if (!target || target.command) return
+                if (!capabilities?.steer) {
+                  setToast('当前引擎不支持运行中引导')
+                  return
+                }
+                setQueued((prev) => prev.filter((item) => item.id !== id))
+                void deliver(target.text, target.images, 'steer')
+              }}
+              onNotice={setToast}
+              onSend={(mode) => void send(mode)}
+              onStop={() => void window.pi.abort()}
+              streaming={Boolean(status.isStreaming || status.compacting)}
+              disabled={status.phase !== 'ready' || Boolean(btwChat)}
+              status={status}
+              onChooseWorkspace={() => void chooseWorkspace()}
+              statusBar={
+                runStatus?.active || subagents.some(isSubagentRunning) ? (
+                  <RunStatusBar
+                    active={Boolean(runStatus?.active)}
+                    elapsedMs={runStatus?.elapsedMs ?? 0}
+                    tokens={runStatus?.tokens}
+                    runningTools={runStatus?.runningTools ?? 0}
+                    subagents={subagents}
+                    onOpenSubagent={openSubagents}
+                  />
+                ) : undefined
+              }
+            />
           </div>
 
           {subagentsOpen && (
@@ -1470,6 +1532,32 @@ export default function App(): React.JSX.Element {
           </button>
         )}
 
+        {commandOutput && (
+          <div className="mcp-overlay" onClick={() => setCommandOutput(undefined)}>
+            <div
+              className="mcp-overlay-card"
+              onClick={(event) => event.stopPropagation()}
+              role="dialog"
+              aria-label="命令结果"
+            >
+              <header className="mcp-overlay-head">
+                <strong>{commandOutput.title}</strong>
+                <button onClick={() => setCommandOutput(undefined)}>关闭</button>
+              </header>
+              <pre
+                style={{
+                  whiteSpace: 'pre-wrap',
+                  overflowWrap: 'anywhere',
+                  padding: 20,
+                  maxHeight: '65vh',
+                  overflow: 'auto'
+                }}
+              >
+                {commandOutput.text}
+              </pre>
+            </div>
+          </div>
+        )}
         {toast && (
           <div className="toast" onClick={() => setToast(null)}>
             {toast}

@@ -1,3 +1,4 @@
+import type { EngineId } from '../shared/engine'
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import type { SessionSummary } from '../shared/types'
@@ -14,6 +15,7 @@ import type { SessionSummary } from '../shared/types'
  * listed, sorted or grouped.
  */
 export interface SessionRecord {
+  engine?: EngineId
   /** App-level id, stable across engine swaps. */
   id: string
   /** Engine-private location; empty until the engine reports where it wrote. */
@@ -45,6 +47,9 @@ function readRecord(value: unknown): SessionRecord | undefined {
     : []
   return {
     id,
+    engine: ['pi', 'prophey', 'claude', 'codex'].includes(String(raw.engine))
+      ? (raw.engine as EngineId)
+      : undefined,
     path: filePath,
     cwd,
     additional,
@@ -111,18 +116,21 @@ export class SessionStore {
    * `patch` only carries what the caller actually knows (the engine may report a file before a title
    * exists), so an update never wipes a title or timestamps that are already recorded.
    */
-  async upsert(patch: Partial<SessionRecord> & { path?: string; cwd?: string }): Promise<SessionRecord> {
+  async upsert(
+    patch: Partial<SessionRecord> & { path?: string; cwd?: string }
+  ): Promise<SessionRecord> {
     await this.load()
     const existing =
       (patch.id ? this.get(patch.id) : undefined) ??
       (patch.path ? this.byPath(patch.path) : undefined)
     const now = Date.now()
     const record: SessionRecord = {
+      engine: patch.engine ?? existing?.engine,
       id: existing?.id ?? patch.id ?? `s_${Math.random().toString(16).slice(2, 14)}`,
       path: patch.path ?? existing?.path ?? '',
       cwd: patch.cwd ?? existing?.cwd ?? '',
       additional: patch.additional ?? existing?.additional ?? [],
-      ...(patch.projectId ?? existing?.projectId
+      ...((patch.projectId ?? existing?.projectId)
         ? { projectId: patch.projectId ?? existing?.projectId }
         : {}),
       title: patch.title || existing?.title || '',

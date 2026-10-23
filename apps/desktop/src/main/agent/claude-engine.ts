@@ -1,445 +1,507 @@
-import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
-import type { PiModel, PiStatus, PromptImage, PromptResult } from '@shared/types'
-import type { AgentEngine, AgentWorkspace, EngineCapabilities } from './engine'
+import type { EngineStartOptions } from './engine'
+import { randomUUID } from 'node:crypto'
+import type { Query, SDKUserMessage, ModelInfo, SlashCommand } from '@anthropic-ai/claude-agent-sdk'
+import type { PiStatus, PiModel, PromptImage, PromptResult } from '../../shared/types'
+import type { EngineCommand } from '../../shared/engine'
+import type { AgentWorkspace } from './engine'
+import { NativeEngine, type NativeOptions, textContent } from './native-engine'
 
-/**
- * Claude Code as an engine.
- *
- * `claude -p --output-format stream-json` runs the whole agent loop itself — its own tools, its own
- * session, its own subscription auth — and streams JSONL we translate into the same events the
- * window already understands. We are the host, not the loop: nothing here re-implements a turn.
- *
- * Deliberately v1: text, tool activity, multi-directory through `--add-dir`, and session resume.
- * Compaction, `/btw` and `ask_user_question` are the CLI's business and are reported as unsupported
- * rather than faked.
- */
-interface ClaudeOptions {
-  onStatus(next: PiStatus): void
-  onEvent(record: Record<string, unknown>): void
-  onSettled(): void
-  /** Absolute path of the `claude` executable (the packaged .exe, not the .cmd shim). */
+/** A closeable input stream keeps the official SDK control channel alive between turns. */
+class InputQueue implements AsyncIterable<SDKUserMessage> {
+  private queue: SDKUserMessage[] = []
+  private wake?: () => void
+  private closed = false
+  push(message: SDKUserMessage): void {
+    this.queue.push(message)
+    this.wake?.()
+  }
+  close(): void {
+    this.closed = true
+    this.wake?.()
+  }
+  async *[Symbol.asyncIterator](): AsyncGenerator<SDKUserMessage> {
+    while (!this.closed) {
+      if (this.queue.length) yield this.queue.shift()!
+      else
+        await new Promise<void>((resolve) => {
+          this.wake = resolve
+        })
+    }
+  }
+}
+interface ClaudeOptions extends NativeOptions {
   binary: string
-  /** Tool names to switch off (`--disallowedTools`); empty means the CLI default set. */
   disabledTools?: () => string[]
 }
-
-interface TurnResult {
-  sessionId?: string
-  cost?: number
-  usage?: { input?: number; output?: number; total?: number }
-}
-
-export class ClaudeCodeEngine implements AgentEngine {
-  readonly id = 'claude'
-
-  private snapshot: PiStatus = { phase: 'stopped', cwd: process.cwd() }
-  private roots: AgentWorkspace = { primary: process.cwd(), additional: [] }
-  private isBusy = false
-  private child: ChildProcessWithoutNullStreams | undefined
-  private sessionId: string | undefined
-  private model: string | undefined
-  private transcript: Array<Record<string, unknown>> = []
-  private last: TurnResult = {}
-
-  constructor(private readonly options: ClaudeOptions) {}
-
-  state(): PiStatus {
-    return this.snapshot
+export class ClaudeCodeEngine extends NativeEngine {
+  readonly id = 'claude' as const
+  private query?: Query
+  private input?: InputQueue
+  private sessionId?: string
+  private modelCatalog: ModelInfo[] = []
+  private commandCatalog: SlashCommand[] = []
+  private generation = 0
+  private compacted = false
+  private commandResult = ''
+  private toolNames = new Map<string, string>()
+  private launching?: Promise<PiStatus>
+  constructor(private readonly options: ClaudeOptions) {
+    super(options)
   }
 
-  busy(): boolean {
-    return this.isBusy
-  }
-
-  compacting(): boolean {
-    return false
-  }
-
-  running(): boolean {
-    return this.snapshot.phase === 'ready'
-  }
-
-  stderrTail(): string {
-    return ''
-  }
-
-  capabilities(): EngineCapabilities {
-    return { compact: false, fork: false, thinking: false, models: false }
-  }
-
-  workspace(): AgentWorkspace {
-    return { primary: this.roots.primary, additional: [...this.roots.additional] }
-  }
-
-  starting(): boolean {
-    return false
-  }
-
-  poll(): void {
-    // Each turn is its own process; there is no run state to poll.
-  }
-
-  setStatus(patch: Partial<PiStatus>): void {
-    this.snapshot = { ...this.snapshot, ...patch }
-    this.options.onStatus(this.snapshot)
-  }
-
-  async start(workspace?: string | AgentWorkspace): Promise<PiStatus> {
-    const wanted =
-      typeof workspace === 'string'
-        ? { primary: workspace, additional: [] }
-        : workspace ?? this.roots
-    this.roots = { primary: wanted.primary, additional: [...wanted.additional] }
-    this.setStatus({
-      phase: 'ready',
-      cwd: wanted.primary,
-      isStreaming: false,
-      model: { provider: 'claude-code', id: this.model ?? 'default', name: 'Claude Code' }
-    })
-    return this.snapshot
-  }
-
-  stop(): void {
-    this.child?.kill()
-    this.child = undefined
-    this.isBusy = false
-    this.setStatus({ phase: 'stopped', isStreaming: false })
-  }
-
-  dispose(): void {
-    this.stop()
-  }
-
-  async refresh(): Promise<void> {
-    // The CLI reports everything through the stream.
-  }
-
-  async waitForSettle(timeoutMs: number): Promise<boolean> {
-    const deadline = Date.now() + timeoutMs
-    while (this.isBusy && Date.now() < deadline) {
-      await new Promise((resolve) => setTimeout(resolve, 100))
+  async start(
+    workspace?: string | AgentWorkspace,
+    options: EngineStartOptions = {}
+  ): Promise<PiStatus> {
+    if (this.launching) return this.launching
+    const nextPrimary = typeof workspace === 'string' ? workspace : workspace?.primary
+    if (nextPrimary && nextPrimary !== this.roots.primary && !options.session) {
+      this.sessionId = undefined
+      this.transcript = []
+      this.usage = {}
+      this.setStatus({
+        sessionFile: undefined,
+        sessionName: undefined,
+        model: undefined,
+        thinkingLevel: undefined
+      })
     }
-    return !this.isBusy
+    this.configureWorkspace(workspace)
+    if (options.session) this.sessionId = this.parseRef(options.session)
+    this.launching = this.connect().finally(() => {
+      this.launching = undefined
+    })
+    return this.launching
   }
-
-  waitForIdle(timeoutMs: number): Promise<boolean> {
-    return this.waitForSettle(timeoutMs)
+  capabilities() {
+    const selected = this.modelCatalog.find(
+      (m) => m.value === this.snapshot.model?.id || m.resolvedModel === this.snapshot.model?.id
+    )
+    return {
+      ...super.capabilities(),
+      compact: this.commandCatalog.some((c) => c.name === 'compact'),
+      models: this.modelCatalog.length > 0,
+      thinking: !!selected?.supportedEffortLevels?.length
+    }
   }
-
-  // --- what the CLI owns, and we therefore do not pretend to do ----------------------------------
-
-  private unsupported(what: string): never {
-    throw new Error(`Claude Code 引擎不支持${what}（这是 CLI 自己的功能）`)
+  private parseRef(ref: string): string {
+    if (!/^claude:[a-zA-Z0-9-]+$/.test(ref)) throw new Error('不是 Claude Code 会话')
+    return ref.slice(7)
   }
-
+  private async connect(): Promise<PiStatus> {
+    this.disconnect()
+    const generation = this.generation
+    this.setStatus({ phase: 'starting', cwd: this.roots.primary, isStreaming: false })
+    try {
+      const sdk = await import('@anthropic-ai/claude-agent-sdk')
+      this.input = new InputQueue()
+      const q = sdk.query({
+        prompt: this.input,
+        options: {
+          pathToClaudeCodeExecutable: this.options.binary,
+          cwd: this.roots.primary,
+          additionalDirectories: this.roots.additional,
+          settingSources: ['user', 'project', 'local'],
+          resume: this.sessionId,
+          model: this.sessionId ? undefined : this.snapshot.model?.id || undefined,
+          disallowedTools: (this.options.disabledTools?.() ?? []).filter(
+            (t) => t !== 'WebFetch' && t !== 'WebSearch'
+          ),
+          includePartialMessages: true,
+          stderr: (text) => {
+            this.stderr = (this.stderr + text).slice(-4000)
+          },
+          canUseTool: async (name, input) => {
+            if (name === 'AskUserQuestion' && Array.isArray(input.questions)) {
+              const answer = await this.ask(input.questions, name)
+              if (answer.cancelled) return { behavior: 'deny', message: '用户已取消' }
+              const answers = Object.fromEntries(
+                answer.answers.map((a) => [
+                  a.question,
+                  [...a.selected, ...(a.other ? [a.other] : [])].join(', ')
+                ])
+              )
+              return { behavior: 'allow', updatedInput: { ...input, answers } }
+            }
+            const answer = await this.ask(
+              [
+                {
+                  question: '允许 Claude Code 执行 ' + name + '？\n' + JSON.stringify(input),
+                  options: [{ label: '拒绝' }, { label: '允许本次' }]
+                }
+              ],
+              name
+            )
+            return !answer.cancelled && answer.answers[0]?.selected.includes('允许本次')
+              ? { behavior: 'allow', updatedInput: input }
+              : { behavior: 'deny', message: '用户拒绝或取消' }
+          }
+        }
+      })
+      this.query = q
+      void this.consume(q, generation)
+      ;[this.modelCatalog, this.commandCatalog] = await Promise.all([
+        q.supportedModels(),
+        q.supportedCommands()
+      ])
+      if (this.sessionId) await this.readHistory()
+      if (!this.snapshot.model)
+        this.setStatus({ model: { provider: 'claude-code', id: '', name: 'CLI 默认模型' } })
+      if (generation !== this.generation) throw new Error('启动已取消')
+      this.setStatus({
+        phase: 'ready',
+        sessionFile: this.sessionId ? 'claude:' + this.sessionId : undefined
+      })
+      return this.snapshot
+    } catch (error) {
+      this.disconnect()
+      this.setStatus({ phase: 'error', error: String(error) })
+      throw error
+    }
+  }
+  private async consume(q: Query, generation: number): Promise<void> {
+    try {
+      for await (const message of q) {
+        if (generation !== this.generation) return
+        this.handle(message as unknown as Record<string, any>)
+      }
+      if (generation === this.generation) {
+        this.query = undefined
+        this.finish(this.busy() ? 'Claude Code 连接提前结束' : undefined)
+        this.setStatus({ phase: 'stopped' })
+      }
+    } catch (error) {
+      if (generation !== this.generation) return
+      this.query = undefined
+      this.finish(String(error))
+      this.setStatus({ phase: 'error', error: String(error) })
+    }
+  }
+  private disconnect(): void {
+    this.generation++
+    this.input?.close()
+    this.query?.close()
+    this.input = undefined
+    this.query = undefined
+  }
+  stop(): void {
+    this.disconnect()
+    this.finish(this.busy() ? '会话已停止' : undefined)
+    this.setStatus({ phase: 'stopped' })
+  }
+  async abort(): Promise<void> {
+    if (!this.busy()) return
+    await this.query?.interrupt()
+    if (!(await this.waitForSettle(5000))) {
+      this.disconnect()
+      this.finish('已停止')
+      this.setStatus({ phase: 'stopped' })
+    }
+  }
+  private async readHistory(): Promise<void> {
+    if (!this.sessionId) {
+      this.transcript = []
+      return
+    }
+    const sdk = await import('@anthropic-ai/claude-agent-sdk')
+    const messages = await sdk.getSessionMessages(this.sessionId, { dir: this.roots.primary })
+    this.transcript = normalizeClaudeHistory(messages)
+  }
+  async newSession(): Promise<{ cancelled?: boolean }> {
+    if (this.busy()) throw new Error('请先停止当前回合')
+    this.sessionId = undefined
+    this.transcript = []
+    this.usage = {}
+    this.setStatus({ sessionFile: undefined, sessionName: undefined })
+    await this.connect()
+    return { cancelled: false }
+  }
+  async switchSession(ref: string): Promise<void> {
+    if (this.busy()) throw new Error('请先停止当前回合')
+    const id = this.parseRef(ref)
+    const sdk = await import('@anthropic-ai/claude-agent-sdk')
+    if (!(await sdk.getSessionInfo(id, { dir: this.roots.primary })))
+      throw new Error('Claude Code 会话不存在')
+    this.sessionId = id
+    this.setStatus({ model: undefined, thinkingLevel: undefined })
+    await this.connect()
+  }
+  async clone(): Promise<string> {
+    if (this.busy() || !this.sessionId) throw new Error('当前会话还不能分叉')
+    const sdk = await import('@anthropic-ai/claude-agent-sdk')
+    const fork = await sdk.forkSession(this.sessionId, { dir: this.roots.primary })
+    const ref = 'claude:' + fork.sessionId
+    await this.switchSession(ref)
+    return ref
+  }
+  async discardSession(ref: string): Promise<void> {
+    const id = this.parseRef(ref)
+    if (id === this.sessionId) throw new Error('不能删除当前会话')
+    const sdk = await import('@anthropic-ai/claude-agent-sdk')
+    await sdk.deleteSession(id, { dir: this.roots.primary })
+  }
   async models(): Promise<Record<string, unknown>[]> {
-    return []
+    return this.modelCatalog.map((m) => ({
+      provider: 'claude-code',
+      id: m.value,
+      name: m.displayName
+    }))
   }
-
-  async setModel(_provider: string, modelId: string): Promise<PiModel | undefined> {
-    // `--model` is passed on the next turn; the CLI decides what it accepts.
-    this.model = modelId
-    const info: PiModel = { provider: 'claude-code', id: modelId, name: modelId }
+  async setModel(_provider: string, model: string): Promise<PiModel> {
+    if (!this.query) throw new Error('Claude Code 未连接')
+    await this.query.setModel(model)
+    const info = {
+      provider: 'claude-code',
+      id: model,
+      name: this.modelCatalog.find((m) => m.value === model)?.displayName ?? model
+    }
     this.setStatus({ model: info })
     return info
   }
-
-  thinkingLevels(): Promise<string[]> {
-    return Promise.resolve([])
+  async thinkingLevels(): Promise<string[]> {
+    const model = this.modelCatalog.find(
+      (m) => m.value === this.snapshot.model?.id || m.resolvedModel === this.snapshot.model?.id
+    )
+    return model?.supportedEffortLevels ?? []
   }
-
-  setThinkingLevel(): Promise<void> {
-    return Promise.resolve()
+  async setThinkingLevel(level: string): Promise<void> {
+    if (!(await this.thinkingLevels()).includes(level))
+      throw new Error('当前模型不支持思考等级 ' + level)
+    if (!this.query) throw new Error('Claude Code 未连接')
+    await this.query.applyFlagSettings({
+      effortLevel: level as 'low' | 'medium' | 'high' | 'xhigh' | 'max'
+    })
+    this.setStatus({ thinkingLevel: level })
   }
-
-  async stats(): Promise<{
-    tokens?: { input?: number; output?: number; total?: number }
-    cost?: number
-    contextUsage?: { tokens?: number | null; contextWindow?: number; percent?: number | null }
-  }> {
-    return { tokens: this.last.usage, cost: this.last.cost }
+  async nativeCommands(): Promise<EngineCommand[]> {
+    if (this.query) this.commandCatalog = await this.query.supportedCommands()
+    return this.commandCatalog.flatMap((c) =>
+      [c.name, ...(c.aliases ?? [])].map((name) => ({
+        name: '/' + name,
+        args: c.argumentHint ?? '',
+        hint: c.description,
+        action:
+          c.builtin && c.name === 'clear'
+            ? ('clear' as const)
+            : c.builtin && c.name === 'effort'
+              ? ('thinking' as const)
+              : ('native' as const),
+        source: 'engine' as const
+      }))
+    )
   }
-
-  async messages(): Promise<unknown[]> {
-    return [...this.transcript]
+  async executeCommand(name: string, args: string): Promise<{ text?: string }> {
+    if (!(await this.nativeCommands()).some((c) => c.name === name))
+      throw new Error('当前引擎没有命令 ' + name)
+    await this.runInput(name + (args ? ' ' + args : ''), [], true)
+    return { text: this.commandResult || undefined }
   }
-
-  async lastAssistantText(): Promise<string | null> {
-    const last = [...this.transcript].reverse().find((entry) => entry.role === 'assistant')
-    const content = Array.isArray(last?.content) ? (last?.content as Array<{ text?: string }>) : []
-    return content.map((block) => block.text ?? '').join('') || null
+  async compact(instructions?: string): Promise<{ summary?: string }> {
+    if (!this.sessionId) throw new Error('当前会话没有可压缩的历史')
+    this.compacted = false
+    await this.runInput(
+      '/compact' + (instructions?.trim() ? ' ' + instructions.trim() : ''),
+      [],
+      true,
+      true
+    )
+    if (!this.compacted) throw new Error(this.commandResult || '当前历史不足以压缩')
+    await this.readHistory()
+    return { summary: this.commandResult || '压缩完成' }
   }
-
-  compact(): Promise<{ summary?: string }> {
-    this.unsupported('上下文压缩（用 CLI 自己的 /compact）')
-  }
-
-  setAutoCompaction(): Promise<void> {
-    return Promise.resolve()
-  }
-
-  async newSession(): Promise<{ cancelled?: boolean }> {
-    this.sessionId = undefined
-    this.transcript = []
-    this.setStatus({ sessionFile: undefined, sessionName: undefined })
-    return { cancelled: false }
-  }
-
-  switchSession(): Promise<void> {
-    this.unsupported('切换会话（会话 id 由 CLI 管理）')
-  }
-
-  clone(): Promise<string | undefined> {
-    this.unsupported('会话分叉（/btw）')
-  }
-
-  abort(): Promise<void> {
-    this.child?.kill()
-    this.child = undefined
-    this.isBusy = false
-    this.setStatus({ isStreaming: false })
-    return Promise.resolve()
-  }
-
-  async send(message: string): Promise<void> {
-    await this.prompt(message)
-  }
-
-  // --- one turn = one `claude -p` process --------------------------------------------------------
-
   async prompt(
     message: string,
     options: { behavior?: 'steer' | 'followUp'; images?: PromptImage[] } = {}
   ): Promise<PromptResult> {
-    if (this.snapshot.phase !== 'ready') return { ok: false, error: '引擎未就绪' }
-    if (this.isBusy) return { ok: false, error: '上一轮还没结束' }
-
-    const args = ['-p', '--output-format', 'stream-json', '--verbose']
-    for (const root of this.roots.additional) args.push('--add-dir', root)
-    if (this.model) args.push('--model', this.model)
-    if (this.sessionId) args.push('--resume', this.sessionId)
-    // The CLI owns its tool set; these are the switches that trim it without replacing it.
-    const disabled = this.options.disabledTools?.() ?? []
-    if (disabled.length > 0) args.push('--disallowedTools', disabled.join(','))
-
-
-    const user: Record<string, unknown> = {
-      role: 'user',
-      content: options.images?.length
-        ? [
-            { type: 'text', text: message },
-            ...options.images.map((image) => ({
-              type: 'image',
-              mimeType: image.mimeType,
-              data: image.data
-            }))
-          ]
-        : message,
-      timestamp: Date.now()
-    }
-    this.transcript.push(user)
-    this.isBusy = true
-    this.setStatus({ isStreaming: true })
-    this.options.onEvent({ type: 'agent_start' })
-    this.options.onEvent({ type: 'message_start', message: user })
-
-    const failure = await this.run(args, this.stdinText(message))
-    this.isBusy = false
-    this.setStatus({ isStreaming: false })
-    if (failure) {
-      this.options.onEvent({
-        type: 'message_end',
-        message: { role: 'assistant', content: [{ type: 'text', text: failure }], stopReason: 'error' }
-      })
-      this.options.onEvent({ type: 'agent_end' })
-      this.options.onEvent({ type: 'agent_settled' })
-      this.options.onSettled()
-      return { ok: false, error: failure }
-    }
-    this.options.onEvent({ type: 'agent_end' })
-    this.options.onEvent({ type: 'agent_settled' })
-    this.options.onSettled()
-    return { ok: true, disposition: 'started' }
-  }
-
-  /** Spawn one turn, translate its JSONL, and resolve with an error message when it failed. */
-  private run(args: string[], input: string): Promise<string | undefined> {
-    return new Promise((resolve) => {
-      // The prompt travels on stdin: a shell-free spawn cannot carry arbitrary text in argv, and
-      // stdin keeps quoting out of the picture entirely.
-      const child = spawn(this.options.binary, args, {
-        cwd: this.roots.primary,
-        env: process.env,
-        windowsHide: true
-      })
-      child.stdin.end(input)
-      this.child = child
-      let buffer = ''
-      let stderr = ''
-      let failed: string | undefined
-
-      child.stdout.setEncoding('utf8')
-      child.stdout.on('data', (chunk: string) => {
-        buffer += chunk
-        let index = buffer.indexOf('\n')
-        while (index !== -1) {
-          const line = buffer.slice(0, index).trim()
-          buffer = buffer.slice(index + 1)
-          if (line) failed = this.handle(line) ?? failed
-          index = buffer.indexOf('\n')
-        }
-      })
-      child.stderr.setEncoding('utf8')
-      child.stderr.on('data', (chunk: string) => {
-        stderr = `${stderr}${chunk}`.slice(-4000)
-      })
-      child.on('error', (error) => {
-        failed = `无法启动 Claude Code：${error.message}`
-      })
-      child.on('close', (code) => {
-        this.child = undefined
-        if (code !== 0 && !failed) {
-          failed = `Claude Code 退出码 ${code}${stderr.trim() ? `：${stderr.trim().slice(-300)}` : ''}`
-        }
-        resolve(failed)
-      })
-    })
-  }
-
-  /** One JSONL line; returns an error message when the line reports a failure. */
-  private handle(line: string): string | undefined {
-    let event: Record<string, unknown>
+    if (this.busy()) return { ok: false, error: 'Claude Code 当前回合尚未结束，请排队发送' }
     try {
-      event = JSON.parse(line) as Record<string, unknown>
-    } catch {
-      return undefined
+      await this.runInput(message, options.images ?? [])
+      return { ok: true, disposition: 'started' }
+    } catch (error) {
+      return { ok: false, error: String(error) }
     }
-    const type = String(event.type ?? '')
-
-    if (type === 'system' && event.subtype === 'init') {
-      if (typeof event.session_id === 'string') {
-        this.sessionId = event.session_id
-        // A session id is not a file; the window uses it to label the session.
-        this.setStatus({ sessionFile: `claude:${event.session_id}`, sessionName: undefined })
-      }
-      const model = typeof event.model === 'string' ? event.model : undefined
-      if (model) {
-        this.model = model.replace(/\[.*\]$/, '')
-        this.setStatus({ model: { provider: 'claude-code', id: this.model, name: this.model } })
-      }
-      return undefined
+  }
+  private async runInput(
+    text: string,
+    images: PromptImage[],
+    command = false,
+    compact = false
+  ): Promise<void> {
+    if (!this.query) await this.connect()
+    const done = this.begin(compact)
+    this.commandResult = ''
+    // Attach a rejection handler immediately: stream errors may arrive before the input call returns.
+    const observed = done.catch((error) => {
+      throw error
+    })
+    void observed.catch(() => undefined)
+    if (!command)
+      this.emitMessage({
+        role: 'user',
+        content: [{ type: 'text', text }, ...images],
+        timestamp: Date.now()
+      })
+    const content: any[] = [
+      { type: 'text', text },
+      ...images.map((i) => ({
+        type: 'image',
+        source: { type: 'base64', media_type: i.mimeType, data: i.data }
+      }))
+    ]
+    this.input!.push({
+      type: 'user',
+      uuid: randomUUID(),
+      session_id: this.sessionId ?? '',
+      parent_tool_use_id: null,
+      message: { role: 'user', content }
+    })
+    await observed
+  }
+  private handle(m: Record<string, any>): void {
+    if (m.type === 'system' && m.subtype === 'api_retry') {
+      this.callbacks.onEvent({
+        type: 'auto_retry_start',
+        attempt: m.attempt,
+        delayMs: m.retry_delay_ms,
+        error: 'Claude Code 上游请求失败：' + (m.error_status ?? m.error ?? 'unknown')
+      })
+      return
     }
-
-    if (type === 'assistant') {
-      const message = (event.message ?? {}) as {
-        content?: Array<{ type?: string; text?: string; name?: string; input?: unknown }>
-        usage?: { input_tokens?: number; output_tokens?: number }
+    if (m.parent_tool_use_id) return
+    if (m.type === 'stream_event') {
+      const event = m.event
+      if (event?.type === 'message_start')
+        this.callbacks.onEvent({ type: 'message_start', message: { role: 'assistant' } })
+      if (event?.type === 'content_block_delta') {
+        const d = event.delta
+        if (d?.type === 'text_delta' || d?.type === 'thinking_delta')
+          this.callbacks.onEvent({
+            type: 'message_update',
+            assistantMessageEvent: { type: d.type, delta: d.text ?? d.thinking ?? '' }
+          })
       }
-      const blocks = Array.isArray(message.content) ? message.content : []
-      const text = blocks.filter((block) => block.type === 'text').map((block) => block.text ?? '').join('')
-      if (text) {
-        const assistant: Record<string, unknown> = {
-          role: 'assistant',
-          content: [{ type: 'text', text }],
-          timestamp: Date.now()
-        }
-        this.transcript.push(assistant)
-        this.options.onEvent({ type: 'message_end', message: assistant })
-      }
-      for (const block of blocks) {
-        if (block.type === 'tool_use') {
-          this.options.onEvent({
+      return
+    }
+    if (m.type === 'system' && m.subtype === 'init') {
+      this.sessionId = m.session_id
+      this.setStatus({
+        sessionFile: 'claude:' + m.session_id,
+        model: { provider: 'claude-code', id: m.model, name: m.model },
+        thinkingLevel: m.effort ?? undefined
+      })
+    } else if (m.type === 'system' && m.subtype === 'local_command_output') {
+      this.commandResult = m.content ?? ''
+    } else if (m.type === 'system' && m.subtype === 'compact_boundary') {
+      this.compacted = true
+      this.callbacks.onEvent({ type: 'compaction_end' })
+    } else if (m.type === 'system' && m.subtype === 'status' && m.compact_result === 'failed') {
+      this.finish(m.compact_error || 'Claude Code 原生压缩失败')
+    } else if (m.type === 'system' && m.subtype === 'status' && m.status === 'compacting') {
+      this.setStatus({ compacting: true })
+      this.callbacks.onEvent({ type: 'compaction_start', reason: 'auto' })
+    } else if (m.type === 'assistant') {
+      const blocks = m.message?.content ?? []
+      this.emitMessage({
+        ...m.message,
+        role: 'assistant',
+        content: blocks.map((b: any) =>
+          b.type === 'tool_use'
+            ? { type: 'toolCall', id: b.id, name: b.name, arguments: b.input }
+            : b
+        ),
+        timestamp: Date.now()
+      })
+      for (const b of blocks)
+        if (b.type === 'tool_use') {
+          this.toolNames.set(b.id, b.name)
+          this.callbacks.onEvent({
             type: 'tool_execution_start',
-            toolCallId: `claude_${block.name}_${Date.now()}`,
-            toolName: block.name,
-            args: block.input
+            toolCallId: b.id,
+            toolName: b.name,
+            args: b.input
           })
         }
-      }
-      if (message.usage) {
-        this.last = {
-          ...this.last,
-          usage: {
-            input: message.usage.input_tokens,
-            output: message.usage.output_tokens,
-            total: (message.usage.input_tokens ?? 0) + (message.usage.output_tokens ?? 0)
-          }
+    } else if (m.type === 'user') {
+      for (const b of Array.isArray(m.message?.content) ? m.message.content : [])
+        if (b.type === 'tool_result') {
+          const name = this.toolNames.get(b.tool_use_id) ?? 'tool'
+          const content =
+            typeof b.content === 'string' ? [{ type: 'text', text: b.content }] : b.content
+          this.emitMessage({
+            role: 'toolResult',
+            toolCallId: b.tool_use_id,
+            toolName: name,
+            content,
+            isError: b.is_error
+          })
+          this.callbacks.onEvent({
+            type: 'tool_execution_end',
+            toolCallId: b.tool_use_id,
+            toolName: name,
+            result: { content },
+            isError: b.is_error
+          })
         }
+    } else if (m.type === 'result') {
+      this.commandResult = m.result ?? ''
+      const u = m.usage ?? {}
+      const models = Object.values(m.modelUsage ?? {}) as any[]
+      const window = models[0]?.contextWindow
+      this.usage = {
+        tokens: {
+          input: u.input_tokens,
+          output: u.output_tokens,
+          total: (u.input_tokens ?? 0) + (u.output_tokens ?? 0)
+        },
+        cost: m.total_cost_usd,
+        contextUsage: window ? { contextWindow: window, tokens: null, percent: null } : undefined
       }
-      return undefined
+      this.finish(
+        m.is_error || m.subtype !== 'success'
+          ? m.errors?.join('\n') || m.result || m.subtype
+          : undefined
+      )
     }
-
-    if (type === 'user') {
-      // Tool results arrive as user messages with `tool_result` blocks.
-      const message = (event.message ?? {}) as {
-        content?: Array<{ type?: string; tool_use_id?: string; content?: unknown }>
-      }
-      for (const block of Array.isArray(message.content) ? message.content : []) {
-        if (block.type !== 'tool_result') continue
-        this.options.onEvent({
-          type: 'tool_execution_end',
-          toolCallId: block.tool_use_id,
-          toolName: 'tool',
-          result: { content: [{ type: 'text', text: stringify(block.content) }] }
-        })
-      }
-      return undefined
-    }
-
-    if (type === 'result') {
-      if (typeof event.total_cost_usd === 'number') this.last.cost = event.total_cost_usd
-      if (typeof event.session_id === 'string') this.sessionId = event.session_id
-      const usage = event.usage as { input_tokens?: number; output_tokens?: number } | undefined
-      if (usage) {
-        this.last.usage = {
-          input: usage.input_tokens,
-          output: usage.output_tokens,
-          total: (usage.input_tokens ?? 0) + (usage.output_tokens ?? 0)
-        }
-      }
-      if (event.is_error || event.subtype !== 'success') {
-        return typeof event.result === 'string' && event.result
-          ? event.result
-          : `Claude Code 结束：${String(event.subtype ?? 'unknown')}`
-      }
-      return undefined
-    }
-
-    return undefined
-  }
-
-  /**
-   * What goes on stdin: the message, preceded by the workspace block when there is more than one
-   * directory (the CLI has no `--add-dir` equivalent for *describing* the extra roots).
-   */
-  private stdinText(message: string): string {
-    const context = this.workspaceNote()
-    return context ? `${context}
-
-${message}` : message
-  }
-
-  /** The workspace block prepended to a multi-directory turn. */
-  private workspaceNote(): string {
-    const lines = [`工作目录：${this.roots.primary}`]
-    if (this.roots.additional.length > 0) {
-      lines.push(`这个会话还覆盖：${this.roots.additional.join('、')}`)
-      lines.push('跨目录用绝对路径；每条 bash 都是新 shell，cd 不保留。')
-    }
-    return lines.join('\n')
   }
 }
 
-function stringify(value: unknown): string {
-  if (typeof value === 'string') return value
-  if (Array.isArray(value)) {
-    return value
-      .map((block) =>
-        block && typeof block === 'object' && 'text' in block
-          ? String((block as { text: unknown }).text)
-          : JSON.stringify(block)
-      )
-      .join('\n')
+/** Native history has tool_result in user messages; the renderer uses dedicated toolResult rows. */
+export function normalizeClaudeHistory(
+  messages: Array<{
+    type: string
+    message: unknown
+    uuid?: string
+    parent_tool_use_id?: string | null
+  }>
+): Array<Record<string, unknown>> {
+  const out: Array<Record<string, unknown>> = []
+  const tools = new Map<string, string>()
+  for (const entry of messages) {
+    if (entry.parent_tool_use_id) continue
+    const m = entry.message as { content?: any }
+    if (!m) continue
+    if (!Array.isArray(m.content)) {
+      out.push({ ...m, role: entry.type, id: entry.uuid })
+      continue
+    }
+    const content = []
+    for (const b of m.content) {
+      if (b.type === 'tool_use') {
+        tools.set(b.id, b.name)
+        content.push({ type: 'toolCall', id: b.id, name: b.name, arguments: b.input })
+      } else if (b.type === 'tool_result') {
+        out.push({
+          role: 'toolResult',
+          toolCallId: b.tool_use_id,
+          toolName: tools.get(b.tool_use_id) ?? 'tool',
+          content: typeof b.content === 'string' ? [{ type: 'text', text: b.content }] : b.content,
+          isError: b.is_error
+        })
+      } else if (b.type === 'image' && b.source?.type === 'base64')
+        content.push({ type: 'image', mimeType: b.source.media_type, data: b.source.data })
+      else content.push(b)
+    }
+    if (content.length) out.push({ ...m, role: entry.type, content, id: entry.uuid })
   }
-  return JSON.stringify(value ?? '')
+  return out
 }

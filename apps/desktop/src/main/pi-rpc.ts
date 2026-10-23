@@ -76,7 +76,13 @@ export class PiRpcClient extends EventEmitter {
   start(cwd: string, extraArgs: string[] = [], extraEnv: NodeJS.ProcessEnv = {}): void {
     this.stop()
     const pi = resolvePi()
-    console.log('[pi-rpc] spawning', pi.command, [...pi.args, '--mode', 'rpc', ...extraArgs], 'cwd=', cwd)
+    console.log(
+      '[pi-rpc] spawning',
+      pi.command,
+      [...pi.args, '--mode', 'rpc', ...extraArgs],
+      'cwd=',
+      cwd
+    )
     this.stderr = ''
     this.buffer = ''
     const child = spawn(pi.command, [...pi.args, '--mode', 'rpc', ...extraArgs], {
@@ -142,6 +148,10 @@ export class PiRpcClient extends EventEmitter {
       // ignore
     }
     killTree(child, true)
+  }
+
+  notify(record: Record<string, unknown>): void {
+    this.child?.stdin.write(JSON.stringify(record) + '\n')
   }
 
   request<T = Record<string, unknown>>(

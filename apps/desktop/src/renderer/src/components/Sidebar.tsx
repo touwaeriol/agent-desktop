@@ -1,3 +1,4 @@
+import { engineLabel } from '@shared/engine'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { ProjectSwitcher } from './ProjectSwitcher'
 import type { PiStatus, Project, RepoInfo, SessionSummary } from '@shared/types'
@@ -109,7 +110,9 @@ function loadArchived(): Set<string> {
 function loadPinned(): string[] {
   try {
     const raw = JSON.parse(localStorage.getItem(PINNED_KEY) ?? '[]') as unknown
-    return Array.isArray(raw) ? raw.filter((value): value is string => typeof value === 'string') : []
+    return Array.isArray(raw)
+      ? raw.filter((value): value is string => typeof value === 'string')
+      : []
   } catch {
     return []
   }
@@ -454,7 +457,7 @@ export function Sidebar({
       const key = isProject ? cwd : `folder:${cwd}`
       const view = applyProjectView(key, list)
       const primary = isProject
-        ? activeProject?.roots.find((root) => root.primary) ?? activeProject?.roots[0]
+        ? (activeProject?.roots.find((root) => root.primary) ?? activeProject?.roots[0])
         : undefined
       return {
         key,
@@ -462,7 +465,7 @@ export function Sidebar({
           ? `${activeProject?.name ?? '项目'} · ${activeProject?.roots.length ?? 0} 个仓库`
           : baseName(cwd) || '未命名目录',
         // "+ new session" and the branch badge use the primary repository.
-        cwd: isProject ? primary?.path ?? cwd : cwd,
+        cwd: isProject ? (primary?.path ?? cwd) : cwd,
         sessions: view.sessions,
         total: view.total,
         searching: view.searching,
@@ -474,21 +477,13 @@ export function Sidebar({
       prefs.sort === 'name' ? a.label.localeCompare(b.label, 'zh-CN') : b.latest - a.latest
     )
     return result
-  }, [
-    sessions,
-    pinned,
-    prefs,
-    archived,
-    projectStatus,
-    projectQueries,
-    status.cwd,
-    activeProject
-  ])
-
+  }, [sessions, pinned, prefs, archived, projectStatus, projectQueries, status.cwd, activeProject])
 
   useEffect(() => {
     if (!activePath) return
-    const group = groups.find((item) => item.sessions.some((session) => session.path === activePath))
+    const group = groups.find((item) =>
+      item.sessions.some((session) => session.path === activePath)
+    )
     if (!group) return
     setCollapsed((prev) => {
       if (!prev.has(group.key)) return prev
@@ -601,12 +596,7 @@ export function Sidebar({
           <PanelIcon size={14} />
         </button>
         <div className="toolbar-spacer" />
-        <button
-          className="icon-btn"
-          title="上一个会话"
-          disabled={!canGoBack}
-          onClick={onBack}
-        >
+        <button className="icon-btn" title="上一个会话" disabled={!canGoBack} onClick={onBack}>
           <ArrowLeftIcon size={14} />
         </button>
         <button
@@ -673,11 +663,7 @@ export function Sidebar({
               </span>
             </button>
           )}
-          <button
-            className="filter-row disabled"
-            disabled
-            title="pi 会话没有 PR 元数据"
-          >
+          <button className="filter-row disabled" disabled title="pi 会话没有 PR 元数据">
             <span>显示 PR 状态</span>
             <span className="filter-option-tag">不支持</span>
           </button>
@@ -709,7 +695,10 @@ export function Sidebar({
           <span className="nav-label">自定义</span>
         </button>
         <div className="nav-more" ref={moreRef}>
-          <button className={`nav-row ${moreOpen ? 'open' : ''}`} onClick={() => setMoreOpen((v) => !v)}>
+          <button
+            className={`nav-row ${moreOpen ? 'open' : ''}`}
+            onClick={() => setMoreOpen((v) => !v)}
+          >
             <span className="nav-glyph">
               <ChevronIcon size={12} className={moreOpen ? 'open' : ''} />
             </span>
@@ -782,7 +771,7 @@ export function Sidebar({
                   onRestart()
                 }}
               >
-                重启 pi
+                重启引擎
               </button>
             </div>
           )}
@@ -925,9 +914,7 @@ export function Sidebar({
                     <button
                       className="project-search-clear"
                       title="清空"
-                      onClick={() =>
-                        setProjectQueries((prev) => ({ ...prev, [group.key]: '' }))
-                      }
+                      onClick={() => setProjectQueries((prev) => ({ ...prev, [group.key]: '' }))}
                     >
                       <CloseIcon size={11} />
                     </button>
@@ -988,7 +975,10 @@ export function Sidebar({
                             )}
                           </span>
                         </div>
-                        <div className="session-menu-wrap" ref={sessionMenu === session.path ? sessionMenuRef : undefined}>
+                        <div
+                          className="session-menu-wrap"
+                          ref={sessionMenu === session.path ? sessionMenuRef : undefined}
+                        >
                           <button
                             className={`session-menu-btn ${sessionMenu === session.path ? 'open' : ''}`}
                             title="更多操作"
@@ -1002,7 +992,10 @@ export function Sidebar({
                             <EllipsisIcon size={13} />
                           </button>
                           {sessionMenu === session.path && (
-                            <div className="session-menu" onClick={(event) => event.stopPropagation()}>
+                            <div
+                              className="session-menu"
+                              onClick={(event) => event.stopPropagation()}
+                            >
                               <button
                                 className="session-menu-item"
                                 onClick={() => {
@@ -1050,7 +1043,9 @@ export function Sidebar({
           <span className={`status-dot ${status.phase}`} />
         </button>
         <div className="status-line">
-          <span>pi {STATUS_TEXT[status.phase]}</span>
+          <span>
+            {engineLabel(status.engine)} {STATUS_TEXT[status.phase]}
+          </span>
           {status.model && <span className="status-model">{status.model.id}</span>}
         </div>
       </div>

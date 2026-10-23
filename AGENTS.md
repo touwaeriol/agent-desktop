@@ -148,15 +148,18 @@ npm run typecheck    # node + web 两个 tsconfig 分别检查
 - 改名说明：产品名是 Prophey，但 `app.setName('agent-desktop')` **故意保留**——它决定 `%APPDATA%/agent-desktop`，改了等于丢失用户的配置、会话、项目和凭据。
 - 还没搬完的部分：`/btw` 的 clone/switch、压缩阈值同步、登录消息、MCP 启动参数装配（`prepare` 仍由 `index.ts` 提供，这是刻意的）。
 
-## CLI 引擎（Claude Code / Codex）
+## CLI 引擎与统一能力
 
-- `agent/claude-engine.ts`：一轮 = 一次 `claude -p --output-format stream-json --verbose` 子进程。解析 `system/init`（`session_id`、model）、`assistant`（文本 + `tool_use`）、`user`（`tool_result`）、`result`（`total_cost_usd`、usage、subtype）→ 翻译成窗口认识的事件。续接用 `--resume <session_id>`，多目录用 `--add-dir`。
-- `agent/codex-engine.ts`：一轮 = 一次 `codex exec --json -C <primary> -`；事件只有 `thread.started` / `item.completed` / `turn.completed`，**没有 token 级流式**，所以消息是"完成即出现"，不假装打字机。续接用 `codex exec resume <thread_id>`。
-- **提示词走 stdin，不进 argv**：Windows 上它们的 npm 入口是 `.cmd`，spawn 需要 shell，而 shell 会把提示词拼进命令行。所以直接调无 shell 的入口：Claude Code 用包内的 `bin/claude.exe`，Codex 用 `ELECTRON_RUN_AS_NODE=1` + `bin/codex.js`（`process.execPath` 就是 Electron 的 node）。
-- 两个引擎都不提供：压缩、`/btw`、`ask_user_question`、`thinkingLevels`、模型目录——一律抛「不支持（这是 CLI 自己的功能）」，不假装。多目录只靠 `--add-dir`（Claude）或 sandbox（Codex），我们的 root 工具对它们无效。
-- **能力声明**：`AgentEngine.capabilities()` → `{ compact, fork, thinking, models }`，随 `desktop:config` 一起给窗口。渲染层据此隐藏：不支持的引擎看不到 `/compact`、`/autocompact`、`/btw`、模型 pill、思考 pill。**不要**让用户点了按钮再收到"不支持"。
-- **禁用 CLI 自己的工具**：`config.engineTools = { claude: string[], codex: string[] }`。Claude Code 加 `--disallowedTools A,B`（工具名就是它 init 事件里列的那些：Bash/Write/Edit/WebFetch/WebSearch/Task…）；Codex 加 `-c tools.<name>=false`。设置页在引擎选中 CLI 时显示开关，改完**不用重启**（参数是每次调用拼的）。实测禁用 Bash 后模型回答「工具里没有 Bash，只有 PowerShell」。
-- Prophey 的 `models()` 返回服务商全量目录（`providers.listModelChoices`），否则默认引擎的模型选择器是空的；`thinkingLevels()` 返回空数组（它不建模思考等级）。
+- 共享能力和命令描述在 `src/shared/engine.ts`；引擎契约在 `src/main/agent/engine.ts`。界面与 IPC 使用同一份描述，不按引擎名各写一套判断。
+- `EngineStartOptions` 使用中立的 `session/model` 字段；只有 PiEngine 将其转换为 pi 命令行参数。会话记录保存 engine，原生 `claude:/codex:` 标识不是文件，不能用 existsSync 清理。
+- ClaudeCodeEngine 使用官方 Claude Agent SDK 驱动本机 CLI；CodexEngine 使用本机 `codex app-server` 的 JSON-RPC。两者保留自己的登录、工具、网络搜索和原生自动压缩。禁止注入桌面 web 工具，禁止再传退休的 WebFetch/WebSearch/web_search 禁用项。
+- 手动压缩走原生接口：Claude 的 /compact，Codex 的 thread/compact/start。Codex 请求返回只代表接受，必须等完成事件；Claude 只有 compact_boundary 才能证明成功。不要将普通摘要回答当成原生压缩。
+- 自动压缩分 configurable/native/none。原生管理时隐藏桌面阈值，后端也拒绝覆写 pi 配置。未知上下文用量不能显示成 0%，原生自动压缩不能显示成已关闭。
+- 命令来源：桌面公共命令 + pi get_commands / Claude supportedCommands / Codex skills/list 与 review/start。未知命令明确拒绝，不作为普通提示词。重名时由公共适配入口处理。
+- 运行中引导只对支持 steer 的引擎开放；其他引擎排队。原生审批和提问复用 ask 回调与桌面问答队列，缺少 UI 时拒绝，不静默授权。
+- Claude 初始化可发现模型/命令目录；实际默认模型在首轮 init 才报告。此前显示 CLI 默认模型，不误报未登录。
+- 本机 Codex 0.163.0 生成了 thread/items/list 类型但运行时返回 not supported；保留 thread/read/恢复响应历史的兼容路径，不能仅凭 schema 推断运行时能力。
+- 验证使用 npm test + npm run typecheck + npm run build。真实 CLI 验证使用系统代理，与主应用一致；不修改用户现有配置。
 
 ## 会话存储（我们自己的）
 

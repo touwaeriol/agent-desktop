@@ -1,3 +1,4 @@
+import { engineCommands, isNativeSessionReference, type EngineId } from '../shared/engine'
 import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron'
 import { randomUUID } from 'node:crypto'
 import { existsSync, promises as fs, unlinkSync } from 'node:fs'
@@ -93,24 +94,43 @@ async function importPiSessions(): Promise<void> {
 
 /** Record (or refresh) the session the engine is currently running. */
 async function rememberSession(extra: { title?: string } = {}): Promise<void> {
-  if (!sessionStore) return
-  const file = status.sessionFile
+  if (!sessionStore || btwActive) return
+  const owner = currentEngine
+  const snapshot = { ...status }
+  const file = snapshot.sessionFile
   if (!file) return
-  let title = status.sessionName ?? extra.title
-  // A brand-new session has no name yet; the first user message is what the sidebar shows, and the
-  // engine's file head is the cheapest place to find it.
+  // Native IDs can exist before a durable session is materialized. Do not save an empty ID.
+  if (isNativeSessionReference(file) && (await owner.messages()).length === 0) return
+  const engineId = owner.id as EngineId
+  const workspace = owner.workspace()
+  const projectId = desktopConfig.activeProject
+  if (desktopConfig.engineSessions?.[engineId] !== file)
+    await saveConfig({ engineSessions: { ...desktopConfig.engineSessions, [engineId]: file } })
+  let title = snapshot.sessionName ?? extra.title
   const known = sessionStore.byPath(file)
   if (!title && (!known || !known.title)) {
-    const summary = await readSummary(file).catch(() => null)
-    if (summary) title = summary.title
+    if (isNativeSessionReference(file)) {
+      const messages = await owner.messages().catch(() => [])
+      const first = messages.find((m: any) => m?.role === 'user') as
+        | { content?: string | Array<{ text?: string }> }
+        | undefined
+      title = (
+        typeof first?.content === 'string'
+          ? first.content
+          : first?.content?.map((b) => b.text ?? '').join('')
+      )
+        ?.trim()
+        .slice(0, 80)
+    } else title = (await readSummary(file).catch(() => null))?.title
   }
   await sessionStore
     .upsert({
+      engine: engineId,
       path: file,
-      cwd: status.cwd,
+      cwd: snapshot.cwd,
       ...(title ? { title } : {}),
-      additional: currentEngine.workspace().additional,
-      ...(desktopConfig.activeProject ? { projectId: desktopConfig.activeProject } : {}),
+      additional: workspace.additional,
+      ...(projectId ? { projectId } : {}),
       updatedAt: Date.now()
     })
     .catch(() => undefined)
@@ -163,21 +183,29 @@ function codexLaunch(): { command: string; script?: string } {
   return existsSync(script) ? { command: process.execPath, script } : { command: 'codex' }
 }
 
+let engineGeneration = 0
+
 /** Engine factory: Prophey is the default; `pi` stays available as the other engine. */
 function createEngine(): AgentEngine {
+  const generation = ++engineGeneration
   const shared = {
+    ask: bridge.askEngine,
     onStatus: (next: PiStatus) => {
+      if (generation !== engineGeneration) return
       const previous = status
       status = next
+      if (currentEngine) broadcastStatus()
       if (next.sessionFile && next.sessionFile !== previous.sessionFile) void rememberSession()
       else if (next.sessionName && next.sessionName !== previous.sessionName) void rememberSession()
     },
     onEvent: (record: Record<string, unknown>) => {
+      if (generation !== engineGeneration) return
       // While the /btw panel is open the window must not see the fork's transcript.
       if (btwActive) return
       mainWindow?.webContents.send('pi:event', record)
     },
     onSettled: () => {
+      if (generation !== engineGeneration) return
       void rememberSession()
       if (!configPending) return
       configPending = false
@@ -203,8 +231,7 @@ function createEngine(): AgentEngine {
       ...shared,
       binary: command,
       script,
-      disabledTools: () =>
-        (desktopConfig.engineTools?.codex ?? []).filter((tool) => tool !== 'web_search')
+      sandbox: () => desktopConfig.codexSandbox
     })
   }
   if (desktopConfig.engine !== 'pi') {
@@ -340,7 +367,7 @@ interface DesktopConfig {
   sessionMode?: SessionMode
   mcp?: McpConfig
   /** Auto-compaction policy; `ratio` is the fraction of the window that triggers it. */
-  autoCompact?: { ratio?: number }
+  autoCompact?: { ratio?: number; enabled?: boolean }
   /** Processing tier sent with each request; only applied when the active model offers it. */
   speed?: { mode?: SpeedMode }
   /** Project the window is working in; sessions still start on its primary repository. */
@@ -354,6 +381,8 @@ interface DesktopConfig {
   propheySessionId?: string
   /** Tools switched off for a CLI engine (its own tool names). */
   engineTools?: { claude?: string[]; codex?: string[] }
+  engineSessions?: Partial<Record<EngineId, string>>
+  codexSandbox?: 'read-only' | 'workspace-write'
   /** Repositories the user worked in, most recent first (sidebar "切换仓库" menu). */
   recentRepos?: string[]
   /** Per-repository defaults applied to a new session in that repository. */
@@ -361,7 +390,6 @@ interface DesktopConfig {
   /** `shared` uses the pi CLI's `~/.pi/agent`; `desktop` keeps its own copy under userData. */
   profile?: 'shared' | 'desktop'
 }
-
 
 function configPath(): string {
   return path.join(app.getPath('userData'), 'config.json')
@@ -398,9 +426,7 @@ function currentProfile(): 'shared' | 'desktop' {
 
 /** Point every module at the profile the config asks for. Safe to call more than once. */
 function applyProfile(): void {
-  profile.setAgentDir(
-    currentProfile() === 'desktop' ? desktopProfileDir() : profile.CLI_AGENT_DIR
-  )
+  profile.setAgentDir(currentProfile() === 'desktop' ? desktopProfileDir() : profile.CLI_AGENT_DIR)
   providers.invalidateCache()
 }
 
@@ -433,6 +459,7 @@ function reserveFor(window: number, ratio: number): number {
  * settled on, or undefined when auto-compaction is off or the model has no window.
  */
 async function syncAutoCompact(options: { restart?: boolean } = {}): Promise<number | undefined> {
+  if (currentEngine.id !== 'pi') return undefined
   const settings = await providers.getAppSettings().catch(() => undefined)
   if (!settings?.compaction?.enabled) return undefined
   const window = status.model?.contextWindow
@@ -509,7 +536,8 @@ function webRouteLabel(config: web.WebConfig): string {
   if (route.backend === 'native') return `${route.provider} 原生搜索`
   // `mode: native` refuses to fall back, so say so instead of pretending Brave will answer.
   if (config.mode === 'native') return `不可用（${route.reason ?? '当前服务商没有原生搜索'}）`
-  if (config.mode === 'brave') return config.braveApiKey ? 'Brave Search API' : 'Brave（未配置 Key）'
+  if (config.mode === 'brave')
+    return config.braveApiKey ? 'Brave Search API' : 'Brave（未配置 Key）'
   if (route.reason) return `Brave（${route.reason}）`
   return config.braveApiKey ? 'Brave Search API' : 'Brave（未配置 Key）'
 }
@@ -592,7 +620,11 @@ async function mcpEndpointsFor(
   const token = desktopConfig.mcp?.bridgeToken
   if (!port || !token) return []
   const roots = [
-    { path: workspace.primary, name: path.basename(workspace.primary) || workspace.primary, primary: true },
+    {
+      path: workspace.primary,
+      name: path.basename(workspace.primary) || workspace.primary,
+      primary: true
+    },
     ...workspace.additional.map((root) => ({ path: root, name: path.basename(root) || root }))
   ]
   const targets = await engines.buildEngineTargets({
@@ -635,7 +667,8 @@ function subagentManager(): SubagentManager {
   if (!subagents) {
     subagents = new SubagentManager({
       userData: app.getPath('userData'),
-      onUpdate: (record) => mainWindow?.webContents.send('subagents:update', serializeSubagent(record)),
+      onUpdate: (record) =>
+        mainWindow?.webContents.send('subagents:update', serializeSubagent(record)),
       onSettle: (record) => {
         bridge.publishEvent({
           type: 'subagent_settled',
@@ -740,7 +773,11 @@ async function mcpLaunch(
   // Several directories mean code search has to run per directory, so each root gets its own
   // endpoint (capped by the engine module).
   const roots = [
-    { path: workspace.primary, name: path.basename(workspace.primary) || workspace.primary, primary: true },
+    {
+      path: workspace.primary,
+      name: path.basename(workspace.primary) || workspace.primary,
+      primary: true
+    },
     ...workspace.additional.map((root) => ({ path: root, name: path.basename(root) || root }))
   ]
   const targets = await engines.buildEngineTargets({
@@ -875,9 +912,16 @@ async function listWorkspaceFiles(roots: string[]): Promise<string[]> {
   // The repository pi sits in is what the user is working on: it gets the larger share, and the
   // others split the rest instead of flooding the list (an installed tool directory can hold more
   // files than the whole project).
-  const ordered = [primary, ...all.map((root) => path.resolve(root)).filter((root) => root !== primary)]
-  const primaryBudget = ordered.length > 1 ? Math.floor(WORKSPACE_MAX_FILES * 0.6) : WORKSPACE_MAX_FILES
-  const otherBudget = ordered.length > 1 ? Math.floor((WORKSPACE_MAX_FILES - primaryBudget) / (ordered.length - 1)) : 0
+  const ordered = [
+    primary,
+    ...all.map((root) => path.resolve(root)).filter((root) => root !== primary)
+  ]
+  const primaryBudget =
+    ordered.length > 1 ? Math.floor(WORKSPACE_MAX_FILES * 0.6) : WORKSPACE_MAX_FILES
+  const otherBudget =
+    ordered.length > 1
+      ? Math.floor((WORKSPACE_MAX_FILES - primaryBudget) / (ordered.length - 1))
+      : 0
   const files: string[] = []
   for (const [index, absoluteRoot] of ordered.entries()) {
     const budget = index === 0 ? primaryBudget : Math.max(200, otherBudget)
@@ -963,8 +1007,7 @@ async function buildMcpState(): Promise<McpState> {
     toggles: toolToggles(),
     tools: toolCache,
     indexStatus: {
-      codegraph:
-        indexState ?? { state: codegraphIndexed ? 'indexed' : 'missing' }
+      codegraph: indexState ?? { state: codegraphIndexed ? 'indexed' : 'missing' }
     },
     gatewayErrors: {
       codegraph: gateway.gatewayError('codegraph'),
@@ -1072,8 +1115,15 @@ let autoCompactEnabled = true
 function statusSnapshot(): PiStatus {
   return {
     ...status,
-    autoCompactPercent: autoCompactEnabled ? Math.round(autoCompactRatio() * 100) : undefined,
-    speed: speed.speedState(status.model, currentSpeedMode()),
+    engine: currentEngineId(),
+    capabilities: currentEngine.capabilities(),
+    autoCompactPercent:
+      currentEngine.capabilities().autoCompaction === 'configurable' && autoCompactEnabled
+        ? Math.round(autoCompactRatio() * 100)
+        : undefined,
+    speed: currentEngine.capabilities().speed
+      ? speed.speedState(status.model, currentSpeedMode())
+      : { mode: 'standard', available: ['standard'] },
     repo: currentRepo
   }
 }
@@ -1141,17 +1191,25 @@ function currentWorkspace(cwd?: string): AgentWorkspace {
   }
   return {
     primary,
-    additional: project.roots
-      .map((root) => root.path)
-      .filter((root) => path.resolve(root) !== key)
+    additional: project.roots.map((root) => root.path).filter((root) => path.resolve(root) !== key)
   }
 }
 
 /** Start or restart the session; the engine hands the in-flight promise to a second caller. */
 async function startPi(cwd?: string, extraArgs: string[] = []): Promise<PiStatus> {
-  const next = await currentEngine.start(currentWorkspace(cwd), extraArgs)
+  const next = await currentEngine.start(currentWorkspace(cwd), {
+    session: extraArgs.includes('--session')
+      ? extraArgs[extraArgs.indexOf('--session') + 1]
+      : undefined,
+    model: extraArgs.includes('--model')
+      ? {
+          provider: extraArgs[extraArgs.indexOf('--provider') + 1],
+          id: extraArgs[extraArgs.indexOf('--model') + 1]
+        }
+      : undefined
+  })
   if (next.phase === 'ready') await afterStart(next.cwd, extraArgs)
-  return next
+  return statusSnapshot()
 }
 
 /**
@@ -1168,7 +1226,10 @@ async function afterStart(workspace: string, extraArgs: string[]): Promise<void>
   // silently only covered the primary root would be worse than no index at all.
   const roots = activeProject()?.roots.map((root) => root.path) ?? [workspace]
   for (const root of new Set([workspace, ...roots])) startCodegraphIndex(root)
-  const recent = [workspace, ...(desktopConfig.recentRepos ?? []).filter((dir) => dir !== workspace)]
+  const recent = [
+    workspace,
+    ...(desktopConfig.recentRepos ?? []).filter((dir) => dir !== workspace)
+  ]
   await saveConfig({ recentRepos: recent.slice(0, 12) })
   if (extraArgs.includes('--session')) return
   const defaults = desktopConfig.repoDefaults?.[workspace]
@@ -1208,7 +1269,7 @@ function noteSpeedRejection(errorMessage: string): void {
 function sessionArgs(): string[] {
   // While a `/btw` side chat is open the process sits on a fork; a restart must land back on the
   // real session, not on the throwaway branch.
-  const file = btwActive ? btwOriginal ?? status.sessionFile : status.sessionFile
+  const file = btwActive ? (btwOriginal ?? status.sessionFile) : status.sessionFile
   const args = file ? ['--session', file] : []
   // A session that has no messages yet has no file on disk, so the restart would otherwise come
   // back on the default model from settings.json — a model switch or a speed change would look
@@ -1243,7 +1304,11 @@ async function closeSideChat(): Promise<void> {
   } catch {
     // `refreshState` below re-syncs whatever pi ended up on.
   }
-  if (fork && fork !== original) await fs.unlink(fork).catch(() => undefined)
+  if (fork && fork !== original) {
+    if (currentEngine.discardSession)
+      await currentEngine.discardSession(fork).catch(() => undefined)
+    else await fs.unlink(fork).catch(() => undefined)
+  }
   await currentEngine.refresh()
   broadcastStatus()
 }
@@ -1265,6 +1330,11 @@ function submitPrompt(
   behavior?: 'steer' | 'followUp',
   images?: PromptImage[]
 ): Promise<PromptResult> {
+  const caps = currentEngine.capabilities()
+  if (images?.length && !caps.images)
+    return Promise.resolve({ ok: false, error: '当前引擎不支持图片' })
+  if (behavior === 'steer' && currentEngine.busy() && !caps.steer)
+    return Promise.resolve({ ok: false, error: '当前引擎不支持运行中引导，请排队发送' })
   return currentEngine.prompt(message, { behavior, images })
 }
 
@@ -1342,11 +1412,7 @@ function registerIpc(): void {
 
   ipcMain.handle(
     'projects:update',
-    async (
-      _event,
-      id: string,
-      patch: { name?: string; roots?: string[]; primary?: string }
-    ) => {
+    async (_event, id: string, patch: { name?: string; roots?: string[]; primary?: string }) => {
       if (!projectStore) return { ok: false, error: '项目存储未就绪' }
       try {
         const roots = patch.roots
@@ -1456,13 +1522,30 @@ function registerIpc(): void {
 
   ipcMain.handle('pi:open-session', async (_event, sessionPath: string, cwd: string) => {
     if (btwActive) await closeSideChat()
-    await saveConfig({ cwd })
+    if (currentEngine.busy()) throw new Error('请先停止当前回合')
+    const record = sessionStore?.byPath(sessionPath)
+    const id: EngineId =
+      record?.engine ??
+      (sessionPath.startsWith('claude:')
+        ? 'claude'
+        : sessionPath.startsWith('codex:')
+          ? 'codex'
+          : path.dirname(sessionPath) === path.join(app.getPath('userData'), 'transcripts')
+            ? 'prophey'
+            : 'pi')
+    if (id !== currentEngineId()) {
+      currentEngine.dispose()
+      await saveConfig({ engine: id, cwd, activeProject: record?.projectId })
+      currentEngine = createEngine()
+      currentEngine.poll()
+    } else await saveConfig({ cwd, activeProject: record?.projectId })
     return startPi(cwd, ['--session', sessionPath])
   })
 
   ipcMain.handle('desktop:config', () => ({
     engine: currentEngineId(),
     capabilities: currentEngine.capabilities(),
+    codexSandbox: desktopConfig.codexSandbox,
     engineTools: desktopConfig.engineTools ?? {},
     cwd: status.cwd,
     sessionMode: currentSessionMode(),
@@ -1511,19 +1594,24 @@ function registerIpc(): void {
   ipcMain.handle(
     'desktop:set-engine',
     async (_event, next: 'pi' | 'prophey' | 'claude' | 'codex') => {
-    if (btwActive) await closeSideChat()
-    const engine = ['pi', 'claude', 'codex'].includes(next) ? next : 'prophey'
-    await saveConfig({
-      engine,
-      ...(engine === 'prophey' && !desktopConfig.propheySessionId
-        ? { propheySessionId: `s_${Math.random().toString(16).slice(2, 14)}` }
-        : {})
-    })
-    // The engine object itself changes, so a restart is a rebuild, not a relaunch.
-    const previous = currentEngine
-    currentEngine = createEngine()
-    previous.dispose()
-    return startPi(status.cwd)
+      if (btwActive) await closeSideChat()
+      if (currentEngine.busy()) throw new Error('请先停止当前回合')
+      await rememberSession()
+      currentEngine.dispose()
+      const engine = (['pi', 'claude', 'codex'].includes(next) ? next : 'prophey') as EngineId
+      await saveConfig({
+        engine,
+        ...(engine === 'prophey' && !desktopConfig.propheySessionId
+          ? { propheySessionId: `s_${Math.random().toString(16).slice(2, 14)}` }
+          : {})
+      })
+      // The engine object itself changes, so a restart is a rebuild, not a relaunch.
+      currentEngine = createEngine()
+      currentEngine.poll()
+      const saved = desktopConfig.engineSessions?.[engine]
+      const record = saved ? sessionStore?.byPath(saved) : undefined
+      if (record) await saveConfig({ cwd: record.cwd, activeProject: record.projectId })
+      return startPi(record?.cwd ?? status.cwd, saved ? ['--session', saved] : [])
     }
   )
 
@@ -1535,7 +1623,7 @@ function registerIpc(): void {
         [engine]: Array.isArray(disabled) ? disabled.filter((name) => typeof name === 'string') : []
       }
       await saveConfig({ engineTools: next })
-      // The flags are per invocation, so nothing restarts: the next turn picks them up.
+      if (engine === currentEngineId()) await reloadPiConfig()
       return { ok: true, engineTools: next }
     }
   )
@@ -1616,7 +1704,9 @@ function registerIpc(): void {
     await sessionStore.load()
     await importPiSessions()
     // A session deleted from disk (or by another window) must not stay in the list.
-    await sessionStore.prune((file) => !existsSync(file)).catch(() => undefined)
+    await sessionStore
+      .prune((file) => !isNativeSessionReference(file) && !existsSync(file))
+      .catch(() => undefined)
     return sessionStore.list().map(toSummary)
   })
 
@@ -1660,7 +1750,9 @@ function registerIpc(): void {
   ipcMain.handle('mcp:state', () => buildMcpState())
 
   ipcMain.handle('subagents:list', () =>
-    subagentManager().list().map((record) => serializeSubagent(record))
+    subagentManager()
+      .list()
+      .map((record) => serializeSubagent(record))
   )
   ipcMain.handle('subagents:get', (_event, id: string) => {
     const record = subagentManager().get(id)
@@ -1751,20 +1843,17 @@ function registerIpc(): void {
     return result
   })
 
-  ipcMain.handle(
-    'mcp:set-tool',
-    async (_event, server: string, tool: string, enabled: boolean) => {
-      const toggles = { ...toolToggles() }
-      const next = { ...(toggles[server] ?? {}) }
-      if (enabled) delete next[tool]
-      else next[tool] = false
-      if (Object.keys(next).length === 0) delete toggles[server]
-      else toggles[server] = next
-      await saveConfig({ mcp: { ...desktopConfig.mcp, toolToggles: toggles } })
-      await reloadPiConfig()
-      return buildMcpState()
-    }
-  )
+  ipcMain.handle('mcp:set-tool', async (_event, server: string, tool: string, enabled: boolean) => {
+    const toggles = { ...toolToggles() }
+    const next = { ...(toggles[server] ?? {}) }
+    if (enabled) delete next[tool]
+    else next[tool] = false
+    if (Object.keys(next).length === 0) delete toggles[server]
+    else toggles[server] = next
+    await saveConfig({ mcp: { ...desktopConfig.mcp, toolToggles: toggles } })
+    await reloadPiConfig()
+    return buildMcpState()
+  })
 
   ipcMain.handle('mcp:set-morph-key', async (_event, key: string | null) => {
     const next = { ...desktopConfig.mcp }
@@ -1781,16 +1870,13 @@ function registerIpc(): void {
     return buildMcpState()
   })
 
-  ipcMain.handle(
-    'mcp:set-web-mode',
-    async (_event, mode: 'auto' | 'brave' | 'native') => {
-      const next = mode === 'brave' || mode === 'native' ? mode : 'auto'
-      // The route is resolved per call, so no restart is needed here.
-      await saveWebConfig({ mode: next })
-      void broadcastMcpState()
-      return buildMcpState()
-    }
-  )
+  ipcMain.handle('mcp:set-web-mode', async (_event, mode: 'auto' | 'brave' | 'native') => {
+    const next = mode === 'brave' || mode === 'native' ? mode : 'auto'
+    // The route is resolved per call, so no restart is needed here.
+    await saveWebConfig({ mode: next })
+    void broadcastMcpState()
+    return buildMcpState()
+  })
 
   ipcMain.handle(
     'mcp:set-provider-web-search',
@@ -1812,7 +1898,10 @@ function registerIpc(): void {
 
   ipcMain.handle('mcp:set-subagents', async (_event, enabled: boolean) => {
     await saveConfig({
-      mcp: { ...desktopConfig.mcp, subagents: { ...(desktopConfig.mcp?.subagents ?? {}), enabled: Boolean(enabled) } }
+      mcp: {
+        ...desktopConfig.mcp,
+        subagents: { ...(desktopConfig.mcp?.subagents ?? {}), enabled: Boolean(enabled) }
+      }
     })
     await reloadPiConfig()
     return buildMcpState()
@@ -1824,7 +1913,71 @@ function registerIpc(): void {
     return buildMcpState()
   })
 
+  ipcMain.handle('engine:commands', async () =>
+    engineCommands(
+      currentEngine.capabilities(),
+      (await currentEngine.nativeCommands?.().catch(() => [])) ?? []
+    )
+  )
+  ipcMain.handle('engine:sandbox', async (_event, mode: string) => {
+    if (!['default', 'read-only', 'workspace-write'].includes(mode))
+      return { ok: false, error: '无效的沙箱模式' }
+    await saveConfig({
+      codexSandbox: mode === 'default' ? undefined : (mode as 'read-only' | 'workspace-write')
+    })
+    if (currentEngineId() === 'codex') await reloadPiConfig()
+    return { ok: true }
+  })
+  ipcMain.handle('engine:command', async (_event, name: string, args: string) => {
+    try {
+      const commands = engineCommands(
+        currentEngine.capabilities(),
+        (await currentEngine.nativeCommands?.()) ?? []
+      )
+      const command = commands.find((c) => c.name === name)
+      if (!command) throw new Error('当前引擎不支持命令 ' + name)
+      if (currentEngine.busy()) throw new Error('请等当前回合结束')
+      if (command.action === 'native' && currentEngine.executeCommand)
+        return { ok: true, ...(await currentEngine.executeCommand(name, args)) }
+      if (command.action === 'model') {
+        if (!args)
+          return {
+            ok: true,
+            text: (await currentEngine.models())
+              .map((m) => String(m.provider) + '/' + String(m.id))
+              .join('\n')
+          }
+        const models = await currentEngine.models()
+        const model = models.find(
+          (m) => m.id === args || String(m.provider) + '/' + String(m.id) === args
+        )
+        if (!model) throw new Error('当前引擎模型目录中没有 ' + args)
+        await currentEngine.setModel(String(model.provider), String(model.id))
+        await syncAutoCompact({ restart: true })
+        return { ok: true, text: '模型已切换为 ' + String(model.id) }
+      }
+      if (command.action === 'thinking') {
+        if (!args) return { ok: true, text: (await currentEngine.thinkingLevels()).join(' / ') }
+        await currentEngine.setThinkingLevel(args)
+        return { ok: true, text: '思考等级：' + args }
+      }
+      if (command.action === 'status')
+        return {
+          ok: true,
+          text: JSON.stringify(
+            { engine: currentEngineId(), model: status.model, ...(await currentEngine.stats()) },
+            null,
+            2
+          )
+        }
+      throw new Error('此命令须从对应桌面入口执行')
+    } catch (error) {
+      return { ok: false, error: String(error) }
+    }
+  })
+
   ipcMain.handle('pi:compact', async (_event, instructions?: string) => {
+    if (!currentEngine.capabilities().compact) return { ok: false, error: '当前引擎不支持压缩' }
     // Compacting the fork would summarize the throwaway branch and leave the real session alone.
     if (btwActive) await closeSideChat()
     try {
@@ -1840,13 +1993,22 @@ function registerIpc(): void {
    * `AUTO_COMPACT_RATIO` of the current model's window, then restarts pi so it reads that value.
    */
   ipcMain.handle('pi:set-auto-compact', async (_event, enabled: boolean) => {
+    if (currentEngine.capabilities().autoCompaction !== 'configurable')
+      return { ok: false, error: '自动压缩由当前引擎原生管理' }
     try {
       await currentEngine.setAutoCompaction({ enabled })
-      await providers.setCompactionSettings({ enabled })
+      if (currentEngine.id === 'pi') await providers.setCompactionSettings({ enabled })
       autoCompactEnabled = enabled
+      await saveConfig({ autoCompact: { ...desktopConfig.autoCompact, enabled } })
       broadcastStatus()
       if (!enabled) return { ok: true }
       const reserveTokens = await syncAutoCompact({ restart: true })
+      if (currentEngine.id === 'prophey')
+        return {
+          ok: true,
+          percent: Math.round(autoCompactRatio() * 100),
+          contextWindow: status.model?.contextWindow
+        }
       const percent = Math.round(autoCompactRatio() * 100)
       if (reserveTokens === undefined) {
         return {
@@ -1870,6 +2032,8 @@ function registerIpc(): void {
    * `autoCompactEnabled` false here made the UI keep claiming "已关闭 / 90%".
    */
   ipcMain.handle('pi:set-compact-threshold', async (_event, tokens: number) => {
+    if (currentEngine.capabilities().autoCompaction !== 'configurable')
+      return { ok: false, error: '自动压缩由当前引擎原生管理' }
     try {
       const contextWindow = status.model?.contextWindow
       if (!contextWindow) {
@@ -1877,10 +2041,12 @@ function registerIpc(): void {
       }
       const target = Math.max(1000, Math.round(tokens))
       const reserveTokens = Math.max(0, contextWindow - target)
-      await providers.setCompactionSettings({ enabled: true, reserveTokens })
+      if (currentEngine.id === 'pi')
+        await providers.setCompactionSettings({ enabled: true, reserveTokens })
       const ratio = Math.min(0.99, target / contextWindow)
-      await saveConfig({ autoCompact: { ratio } })
+      await saveConfig({ autoCompact: { ratio, enabled: true } })
       autoCompactEnabled = true
+      await currentEngine.setAutoCompaction({ enabled: true, reserveTokens })
       broadcastStatus()
       if (btwActive) await closeSideChat()
       await startPi(status.cwd, sessionArgs())
@@ -1903,14 +2069,16 @@ function registerIpc(): void {
    * compaction is on, so setting one turns it back on.
    */
   ipcMain.handle('pi:set-auto-compact-ratio', async (_event, percent: number) => {
+    if (currentEngine.capabilities().autoCompaction !== 'configurable')
+      return { ok: false, error: '自动压缩由当前引擎原生管理' }
     const value = Math.round(Number(percent))
     if (!Number.isFinite(value) || value < 10 || value > 99) {
       return { ok: false, error: '自动压缩阈值要在 10% 和 99% 之间' }
     }
     try {
-      await saveConfig({ autoCompact: { ratio: value / 100 } })
+      await saveConfig({ autoCompact: { ratio: value / 100, enabled: true } })
       autoCompactEnabled = true
-      await providers.setCompactionSettings({ enabled: true })
+      if (currentEngine.id === 'pi') await providers.setCompactionSettings({ enabled: true })
       // `syncAutoCompact` only restarts when the reserve changes, so make the switch effective for
       // the process that is running right now (it may have been left with compaction off).
       if (currentEngine.running()) {
@@ -2069,9 +2237,16 @@ function registerIpc(): void {
     'providers:start-login',
     async (_event, providerId: string, type: 'api_key' | 'oauth', loginId: string) => {
       await applySystemProxy()
-      return providers.startLogin(providerId, type, loginId, sendLoginMessage, () => {
-        void reloadPiConfig()
-      }, { deviceId: await getDeviceId() })
+      return providers.startLogin(
+        providerId,
+        type,
+        loginId,
+        sendLoginMessage,
+        () => {
+          void reloadPiConfig()
+        },
+        { deviceId: await getDeviceId() }
+      )
     }
   )
 
@@ -2125,9 +2300,7 @@ function registerIpc(): void {
     'settings:save',
     async (
       _event,
-      patch: Partial<
-        Pick<AppSettings, 'defaultProvider' | 'defaultModel' | 'defaultThinkingLevel'>
-      >
+      patch: Partial<Pick<AppSettings, 'defaultProvider' | 'defaultModel' | 'defaultThinkingLevel'>>
     ) => {
       try {
         await providers.saveAppSettings(patch)
@@ -2153,7 +2326,9 @@ function registerIpc(): void {
       } catch {
         // provider display names are optional
       }
-      const patterns = await providers.getEnabledModelPatterns().catch(() => [])
+      const patterns = currentEngine.capabilities().providerSettings
+        ? await providers.getEnabledModelPatterns().catch(() => [])
+        : []
       return models
         .map((model) => {
           const provider = String(model.provider ?? '')
@@ -2305,7 +2480,11 @@ let shuttingDown = false
 
 function handleExit(): void {
   if (status.phase === 'stopped') return
-  setStatus({ phase: 'error', error: currentEngine.stderrTail() || 'pi 进程已退出', isStreaming: false })
+  setStatus({
+    phase: 'error',
+    error: currentEngine.stderrTail() || 'pi 进程已退出',
+    isStreaming: false
+  })
   if (shuttingDown) return
   // pi died on its own (a crashing extension, an OOM kill). Leaving the window dead means the next
   // message is lost with "pi 未运行", so bring it back on the same session.
@@ -2374,7 +2553,8 @@ app.whenReady().then(async () => {
     createApiHandler({
       agentSettings: () => agentSettings,
       subagents: () => subagentManager(),
-      listModels: (options) => providers.listModelChoices({ includeUnconfigured: !options.configuredOnly }),
+      listModels: (options) =>
+        providers.listModelChoices({ includeUnconfigured: !options.configuredOnly }),
       defaultMode: () => subagentConfig().defaultMode,
       desktopTools: () => subagentConfig().desktopTools,
       parentSession: () => status.sessionFile,
@@ -2403,11 +2583,19 @@ app.whenReady().then(async () => {
   void providers
     .getAppSettings()
     .then((settings) => {
-      autoCompactEnabled = settings.compaction?.enabled !== false
+      autoCompactEnabled =
+        currentEngine.id === 'pi'
+          ? settings.compaction?.enabled !== false
+          : desktopConfig.autoCompact?.enabled !== false
       broadcastStatus()
     })
     .catch(() => undefined)
-  void startPi(cwd).then(() => syncAutoCompact())
+  const savedSession = desktopConfig.engineSessions?.[currentEngineId()]
+  void startPi(cwd, savedSession ? ['--session', savedSession] : [])
+    .then(() => syncAutoCompact())
+    .catch((error) => {
+      setStatus({ phase: 'error', error: String(error) })
+    })
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()

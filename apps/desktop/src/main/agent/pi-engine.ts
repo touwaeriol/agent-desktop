@@ -1,3 +1,5 @@
+import type { EngineStartOptions } from './engine'
+import { engineCapabilities, type EngineCommand } from '../../shared/engine'
 import { existsSync } from 'node:fs'
 import os from 'node:os'
 import type { PiModel, PiStatus, PromptImage, PromptResult } from '@shared/types'
@@ -5,6 +7,7 @@ import { PiRpcClient } from '../pi-rpc'
 import type { AgentEngine, AgentWorkspace, EngineCapabilities } from './engine'
 
 export interface PiEngineOptions {
+  ask?: import('./native-engine').NativeOptions['ask']
   /**
    * Launch args and environment for a workspace (MCP servers, extension, profile, speed tier).
    *
@@ -48,6 +51,7 @@ export class PiEngine implements AgentEngine {
   /** Busy from `agent_start`/`compaction_start` until `agent_settled`. */
   private isBusy = false
   private isCompacting = false
+  private pollTimer?: ReturnType<typeof setInterval>
 
   constructor(private readonly options: PiEngineOptions) {
     this.attach()
@@ -104,7 +108,26 @@ export class PiEngine implements AgentEngine {
   }
 
   capabilities(): EngineCapabilities {
-    return { compact: true, fork: true, thinking: true, models: true }
+    return engineCapabilities('pi')
+  }
+
+  async nativeCommands(): Promise<EngineCommand[]> {
+    const response = await this.request<{
+      data?: { commands?: Array<{ name: string; description?: string }> }
+    }>('get_commands')
+    return (response.data?.commands ?? []).map((c) => ({
+      name: '/' + c.name,
+      args: '[参数]',
+      hint: c.description ?? c.name,
+      action: 'native',
+      source: 'engine'
+    }))
+  }
+
+  async executeCommand(name: string, args: string): Promise<{ text?: string }> {
+    const result = await this.prompt(name + (args ? ' ' + args : ''))
+    if (!result.ok) throw new Error(result.error)
+    return {}
   }
 
   workspace(): AgentWorkspace {
@@ -113,8 +136,12 @@ export class PiEngine implements AgentEngine {
 
   async start(
     workspace?: string | AgentWorkspace,
-    extraArgs: string[] = []
+    options: EngineStartOptions = {}
   ): Promise<PiStatus> {
+    const extraArgs = [
+      ...(options.session ? ['--session', options.session] : []),
+      ...(options.model ? ['--provider', options.model.provider, '--model', options.model.id] : [])
+    ]
     // A second caller while a start is running used to receive `phase: 'starting'` and wait forever;
     // hand it the same promise instead.
     if (this.startPromise) return this.startPromise
@@ -133,7 +160,7 @@ export class PiEngine implements AgentEngine {
     const wanted =
       typeof requested === 'string'
         ? { primary: requested, additional: [] }
-        : requested ?? this.roots
+        : (requested ?? this.roots)
     let workspace = wanted.primary || this.snapshot.cwd
     if (!existsSync(workspace)) {
       console.warn(`[pi] workspace does not exist, falling back to home: ${workspace}`)
@@ -179,6 +206,7 @@ export class PiEngine implements AgentEngine {
   }
 
   dispose(): void {
+    clearInterval(this.pollTimer)
     this.rpc.killNow()
   }
 
@@ -220,7 +248,8 @@ export class PiEngine implements AgentEngine {
       thinkingLevel:
         typeof data.thinkingLevel === 'string' ? data.thinkingLevel : this.snapshot.thinkingLevel,
       sessionName: typeof data.sessionName === 'string' ? data.sessionName : undefined,
-      sessionFile: typeof data.sessionFile === 'string' ? data.sessionFile : this.snapshot.sessionFile,
+      sessionFile:
+        typeof data.sessionFile === 'string' ? data.sessionFile : this.snapshot.sessionFile,
       isStreaming: this.isBusy,
       compacting: this.isCompacting
     }
@@ -250,7 +279,8 @@ export class PiEngine implements AgentEngine {
    * stranded behind it. `get_state` is cheap, so ask the engine and let the answer win.
    */
   poll(): void {
-    setInterval(() => {
+    clearInterval(this.pollTimer)
+    this.pollTimer = setInterval(() => {
       if (!this.isBusy || !this.rpc.running) return
       void this.refresh()
     }, 3000)
@@ -307,7 +337,9 @@ export class PiEngine implements AgentEngine {
       ...(behavior ? { streamingBehavior: behavior } : {}),
       ...(images && images.length > 0 ? { images } : {})
     }
-    const send = async (extra: Record<string, unknown> = {}): Promise<PromptResult['disposition']> => {
+    const send = async (
+      extra: Record<string, unknown> = {}
+    ): Promise<PromptResult['disposition']> => {
       const response = await this.rpc.request<{ data?: { disposition?: string } }>('prompt', {
         ...payload,
         ...extra
@@ -334,7 +366,11 @@ export class PiEngine implements AgentEngine {
       }
       if (/already processing/i.test(text) && !behavior) {
         try {
-          return { ok: true, disposition: await send({ streamingBehavior: 'followUp' }), queued: true }
+          return {
+            ok: true,
+            disposition: await send({ streamingBehavior: 'followUp' }),
+            queued: true
+          }
         } catch (retryError) {
           return fail(retryError)
         }
@@ -453,6 +489,44 @@ export class PiEngine implements AgentEngine {
   }
 
   private handleRecord(record: Record<string, unknown>): void {
+    if (
+      record.type === 'extension_ui_request' &&
+      ['select', 'confirm', 'input', 'editor'].includes(String(record.method))
+    ) {
+      const method = String(record.method)
+      const options =
+        method === 'confirm'
+          ? [{ label: '取消' }, { label: '确认' }]
+          : Array.isArray(record.options)
+            ? record.options.map((label) => ({ label: String(label) }))
+            : undefined
+      const response = this.options.ask?.(
+        [
+          {
+            question: [record.title, record.message, record.prefill].filter(Boolean).join('\n'),
+            options
+          }
+        ],
+        'pi 扩展命令'
+      )
+      void Promise.resolve(response)
+        .then((answer) => {
+          const value = answer && !answer.cancelled ? answer.answers[0] : undefined
+          this.rpc.notify({
+            type: 'extension_ui_response',
+            id: record.id,
+            ...(value && !value.skipped
+              ? method === 'confirm'
+                ? { confirmed: value.selected.includes('确认') }
+                : { value: value.other ?? value.selected[0] ?? '' }
+              : { cancelled: true })
+          })
+        })
+        .catch(() =>
+          this.rpc.notify({ type: 'extension_ui_response', id: record.id, cancelled: true })
+        )
+      return
+    }
     if (record.type === 'agent_start') {
       this.isBusy = true
       this.setStatus({ isStreaming: true })

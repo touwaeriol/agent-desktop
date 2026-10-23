@@ -42,8 +42,22 @@ type ToolKind = 'read' | 'write' | 'bash' | 'search' | 'other'
 function kindOf(name: string): ToolKind {
   const tool = name.replace(/^mcp__/, '').toLowerCase()
   if (tool === 'read' || tool === 'read_file' || tool === 'view') return 'read'
-  if (tool === 'write' || tool === 'edit' || tool === 'patch' || tool === 'multiedit') return 'write'
-  if (tool === 'bash' || tool === 'shell' || tool === 'exec') return 'bash'
+  if (
+    tool === 'write' ||
+    tool === 'edit' ||
+    tool === 'patch' ||
+    tool === 'multiedit' ||
+    tool === 'filechange'
+  )
+    return 'write'
+  if (
+    tool === 'bash' ||
+    tool === 'shell' ||
+    tool === 'exec' ||
+    tool === 'commandexecution' ||
+    tool === 'powershell'
+  )
+    return 'bash'
   if (tool === 'grep' || tool === 'glob' || tool === 'ls' || tool === 'search') return 'search'
   return 'other'
 }
@@ -176,7 +190,9 @@ function SubagentCard({
           {running && !record?.finalText && (
             <div className="subagent-card-live">
               <span className="pulse-dot" />
-              <span>{lastMessage ? lastMessage.replace(/\s+/g, ' ').slice(0, 240) : '正在处理…'}</span>
+              <span>
+                {lastMessage ? lastMessage.replace(/\s+/g, ' ').slice(0, 240) : '正在处理…'}
+              </span>
             </div>
           )}
           {record?.finalText && (
@@ -184,9 +200,7 @@ function SubagentCard({
               <Markdown>{record.finalText}</Markdown>
             </div>
           )}
-          {!record && !running && call.result && (
-            <pre className="tool-result">{call.result}</pre>
-          )}
+          {!record && !running && call.result && <pre className="tool-result">{call.result}</pre>}
           <div className="subagent-card-actions">
             <button className="ghost" onClick={() => onOpen(id)}>
               查看详细进程
@@ -198,7 +212,8 @@ function SubagentCard({
   )
 }
 
-function Thinking({ text }: { text: string }) {  const [open, setOpen] = useState(false)
+function Thinking({ text }: { text: string }) {
+  const [open, setOpen] = useState(false)
   return (
     <div className="thinking">
       <button className="thinking-head" onClick={() => setOpen((value) => !value)}>
@@ -259,14 +274,7 @@ function Message({
                 if (!hint.label) return undefined
                 return subagents.find((entry) => entry.label === hint.label)
               })()
-          return (
-            <SubagentCard
-              key={call.id}
-              call={call}
-              record={record}
-              onOpen={onOpenSubagent}
-            />
-          )
+          return <SubagentCard key={call.id} call={call} record={record} onOpen={onOpenSubagent} />
         })}
         {others.length > 0 && <Activity calls={others} />}
         {item.error && <div className="message-error">{item.error}</div>}
@@ -314,9 +322,9 @@ export function Conversation({
         <p className="empty-sub">
           当前工作目录 <code>{workspace}</code>
         </p>
-        {!connected && <p className="empty-warn">pi 尚未就绪，请查看顶部状态提示。</p>}
+        {!connected && <p className="empty-warn">引擎尚未就绪，请查看顶部状态提示。</p>}
         {connected && !loggedIn && (
-          <p className="empty-warn">pi 已连接，但还没有登录模型服务：打开设置 → 服务商完成登录。</p>
+          <p className="empty-warn">尚未配置模型服务：打开设置 → 服务商完成配置。</p>
         )}
         <div className="suggestions">
           {SUGGESTIONS.map((text) => (
@@ -332,12 +340,7 @@ export function Conversation({
   return (
     <div className="conversation">
       {items.map((item) => (
-        <Message
-          key={item.id}
-          item={item}
-          subagents={subagents}
-          onOpenSubagent={onOpenSubagent}
-        />
+        <Message key={item.id} item={item} subagents={subagents} onOpenSubagent={onOpenSubagent} />
       ))}
     </div>
   )

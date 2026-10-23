@@ -209,6 +209,16 @@ function respond(response: http.ServerResponse, status: number, payload: unknown
   response.end(body)
 }
 
+/** Internal engine approvals use the same cancellable queue as desktop tools. */
+export function askEngine(questions: AskQuestion[], tool: string): Promise<AskResult> {
+  if (!askListener) return Promise.resolve({ cancelled: true, reason: '窗口未就绪' })
+  const id = randomUUID()
+  return new Promise((resolve) => {
+    pending.set(id, { resolve })
+    askListener?.({ id, questions, tool, createdAt: Date.now() })
+  })
+}
+
 async function handleAsk(
   request: http.IncomingMessage,
   response: http.ServerResponse
@@ -519,7 +529,10 @@ export async function startBridge(options: {
   token = options.token
   if (server) {
     const address = server.address()
-    return { url: getBridgeUrl(), port: typeof address === 'object' && address ? address.port : port }
+    return {
+      url: getBridgeUrl(),
+      port: typeof address === 'object' && address ? address.port : port
+    }
   }
   const preferred = options.preferredPort && options.preferredPort > 0 ? options.preferredPort : 0
   const candidates =

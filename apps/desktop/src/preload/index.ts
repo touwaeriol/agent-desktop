@@ -38,6 +38,9 @@ const bridge: PiBridge = {
   activateProject: (id?: string) => ipcRenderer.invoke('projects:activate', id),
   openSession: (sessionPath: string, cwd: string) =>
     ipcRenderer.invoke('pi:open-session', sessionPath, cwd) as Promise<PiStatus>,
+  getEngineCommands: () => ipcRenderer.invoke('engine:commands'),
+  executeEngineCommand: (name, args) => ipcRenderer.invoke('engine:command', name, args),
+  setEngineSandbox: (mode) => ipcRenderer.invoke('engine:sandbox', mode),
   getDesktopConfig: () => ipcRenderer.invoke('desktop:config'),
   setEngine: (engine: 'pi' | 'prophey' | 'claude' | 'codex') =>
     ipcRenderer.invoke('desktop:set-engine', engine),
@@ -47,12 +50,10 @@ const bridge: PiBridge = {
     ipcRenderer.invoke('desktop:set-session-mode', mode) as Promise<PiStatus>,
   setProfile: (mode: 'shared' | 'desktop') => ipcRenderer.invoke('desktop:set-profile', mode),
   importCliConfig: () => ipcRenderer.invoke('providers:import-cli'),
-  getUpdateSnapshot: () =>
-    ipcRenderer.invoke('updates:snapshot') as Promise<AppUpdateSnapshot>,
+  getUpdateSnapshot: () => ipcRenderer.invoke('updates:snapshot') as Promise<AppUpdateSnapshot>,
   checkForUpdates: () => ipcRenderer.invoke('updates:check') as Promise<AppUpdateSnapshot>,
   installUpdate: () => ipcRenderer.invoke('updates:install') as Promise<AppUpdateSnapshot>,
-  cancelUpdateDownload: () =>
-    ipcRenderer.invoke('updates:cancel') as Promise<AppUpdateSnapshot>,
+  cancelUpdateDownload: () => ipcRenderer.invoke('updates:cancel') as Promise<AppUpdateSnapshot>,
   setAutoUpdateCheck: (enabled: boolean) =>
     ipcRenderer.invoke('updates:auto', enabled) as Promise<AppUpdateSnapshot>,
   onUpdate: (listener) => {
@@ -101,14 +102,14 @@ const bridge: PiBridge = {
     return () => ipcRenderer.removeListener('providers:login-message', handler)
   },
   getModelsJson: () => ipcRenderer.invoke('providers:models-json'),
-  saveModelsJson: (content: string) =>
-    ipcRenderer.invoke('providers:save-models-json', content),
+  saveModelsJson: (content: string) => ipcRenderer.invoke('providers:save-models-json', content),
   openModelsJson: () => ipcRenderer.invoke('providers:open-models-json') as Promise<void>,
   getAppSettings: () => ipcRenderer.invoke('settings:get'),
   saveAppSettings: (patch) => ipcRenderer.invoke('settings:save', patch),
   listModelChoices: () => ipcRenderer.invoke('settings:models'),
   getMcpState: () => ipcRenderer.invoke('mcp:state') as Promise<McpState>,
-  setMcpEnabled: (enabled: boolean) => ipcRenderer.invoke('mcp:set-enabled', enabled) as Promise<McpState>,
+  setMcpEnabled: (enabled: boolean) =>
+    ipcRenderer.invoke('mcp:set-enabled', enabled) as Promise<McpState>,
   setDesktopToolEnabled: (enabled: boolean) =>
     ipcRenderer.invoke('mcp:set-desktop-tool', enabled) as Promise<McpState>,
   setMcpEngineEnabled: (id: 'codegraph' | 'warpgrep' | 'web', enabled: boolean) =>
@@ -157,7 +158,8 @@ const bridge: PiBridge = {
   openMcpConfig: (which: 'user' | 'project') =>
     ipcRenderer.invoke('mcp:open-config', which) as Promise<void>,
   onAskRequest: (listener) => {
-    const handler = (_event: Electron.IpcRendererEvent, request: AskRequest): void => listener(request)
+    const handler = (_event: Electron.IpcRendererEvent, request: AskRequest): void =>
+      listener(request)
     ipcRenderer.on('ask:request', handler)
     return () => ipcRenderer.removeListener('ask:request', handler)
   },

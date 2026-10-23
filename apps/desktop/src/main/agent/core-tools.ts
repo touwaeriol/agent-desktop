@@ -14,7 +14,10 @@ export interface CoreTool {
   description: string
   /** JSON schema for the arguments; providers pass it through as-is. */
   parameters: Record<string, unknown>
-  call(args: Record<string, unknown>): Promise<{
+  call(
+    args: Record<string, unknown>,
+    signal?: AbortSignal
+  ): Promise<{
     content: Array<{ type: string; text?: string }>
     isError?: boolean
   }>
@@ -107,7 +110,10 @@ export async function loadSubagentTools(
       name: string
       description?: string
       inputSchema?: Record<string, unknown>
-      call(args?: Record<string, unknown>, ctx?: unknown): Promise<{
+      call(
+        args?: Record<string, unknown>,
+        ctx?: unknown
+      ): Promise<{
         content: Array<{ type: string; text?: string }>
         isError?: boolean
       }>
@@ -118,7 +124,7 @@ export async function loadSubagentTools(
     name: tool.name,
     description: tool.description ?? tool.name,
     parameters: tool.inputSchema ?? { type: 'object', properties: {} },
-    call: (args) => tool.call(args ?? {}, context)
+    call: (args, signal) => tool.call(args ?? {}, { ...context, signal })
   }))
 }
 
@@ -132,7 +138,10 @@ export async function loadAskTool(
       name: string
       description?: string
       inputSchema?: Record<string, unknown>
-      call(args?: Record<string, unknown>, ctx?: unknown): Promise<{
+      call(
+        args?: Record<string, unknown>,
+        ctx?: unknown
+      ): Promise<{
         content: Array<{ type: string; text?: string }>
         isError?: boolean
       }>
@@ -145,7 +154,7 @@ export async function loadAskTool(
       name: tool.name,
       description: tool.description ?? tool.name,
       parameters: tool.inputSchema ?? { type: 'object', properties: {} },
-      call: (args) => tool.call(args ?? {}, context)
+      call: (args, signal) => tool.call(args ?? {}, { ...context, signal })
     }
   ]
 }
@@ -157,7 +166,10 @@ export async function loadWorkspaceTools(modulePath: string): Promise<CoreTool[]
       name: string
       description?: string
       inputSchema?: Record<string, unknown>
-      call(args?: Record<string, unknown>, context?: unknown): Promise<{
+      call(
+        args?: Record<string, unknown>,
+        context?: unknown
+      ): Promise<{
         content: Array<{ type: string; text?: string }>
         isError?: boolean
       }>
@@ -168,6 +180,6 @@ export async function loadWorkspaceTools(modulePath: string): Promise<CoreTool[]
     name: tool.name,
     description: tool.description ?? tool.name,
     parameters: tool.inputSchema ?? { type: 'object', properties: {} },
-    call: (args) => tool.call(args ?? {}, {})
+    call: (args, signal) => tool.call(args ?? {}, { signal })
   }))
 }

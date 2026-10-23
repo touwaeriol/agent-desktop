@@ -31,7 +31,8 @@ async function rpc(
   endpoint: McpEndpoint,
   method: string,
   params: Record<string, unknown> = {},
-  timeoutMs = 60_000
+  timeoutMs = 60_000,
+  signal?: AbortSignal
 ): Promise<unknown> {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), timeoutMs)
@@ -44,7 +45,7 @@ async function rpc(
         authorization: `Bearer ${endpoint.token}`
       },
       body: JSON.stringify({ jsonrpc: '2.0', id: ++sequence, method, params }),
-      signal: controller.signal
+      signal: signal ? AbortSignal.any([controller.signal, signal]) : controller.signal
     })
     const text = await response.text()
     // The bridge answers plain JSON; a server-to-client stream would arrive as SSE, which these
@@ -82,7 +83,9 @@ function toContent(result: unknown): Array<{ type: string; text?: string }> {
   const content = (result as { content?: unknown } | undefined)?.content
   if (!Array.isArray(content)) return [{ type: 'text', text: JSON.stringify(result ?? {}) }]
   return content
-    .filter((block): block is { type?: string; text?: string } => Boolean(block && typeof block === 'object'))
+    .filter((block): block is { type?: string; text?: string } =>
+      Boolean(block && typeof block === 'object')
+    )
     .map((block) => ({
       type: block.type ?? 'text',
       ...(typeof block.text === 'string' ? { text: block.text } : {})
@@ -105,9 +108,15 @@ export async function loadMcpTools(endpoints: McpEndpoint[]): Promise<CoreTool[]
         name,
         description: tool.description ?? `${endpoint.name} 的 ${tool.name}`,
         parameters: tool.inputSchema ?? { type: 'object', properties: {} },
-        call: async (args) => {
+        call: async (args, signal) => {
           try {
-            const result = await rpc(endpoint, 'tools/call', { name: tool.name, arguments: args ?? {} })
+            const result = await rpc(
+              endpoint,
+              'tools/call',
+              { name: tool.name, arguments: args ?? {} },
+              60_000,
+              signal
+            )
             const content = toContent(result)
             const failed = Boolean((result as { isError?: boolean } | undefined)?.isError)
             return { content, ...(failed ? { isError: true } : {}) }
@@ -130,7 +139,11 @@ export async function loadMcpTools(endpoints: McpEndpoint[]): Promise<CoreTool[]
 export function mcpToolDeclarations(tools: CoreTool[]): Tool[] {
   return tools.map(
     (tool) =>
-      ({ name: tool.name, description: tool.description, parameters: tool.parameters as never }) as Tool
+      ({
+        name: tool.name,
+        description: tool.description,
+        parameters: tool.parameters as never
+      }) as Tool
   )
 }
 

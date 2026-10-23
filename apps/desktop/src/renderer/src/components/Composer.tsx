@@ -1,3 +1,4 @@
+import type { EngineCapabilities, EngineCommand } from '@shared/engine'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import type { ModelOption, PiStatus, SpeedMode } from '@shared/types'
@@ -24,14 +25,6 @@ function contextLabel(value?: number): string {
   }
   return `${Math.round(value / 1000)}K`
 }
-
-export const SLASH_COMMANDS = [
-  { name: '/clear', args: '', hint: '清空当前会话（开一个新会话）' },
-  { name: '/compact', args: '[提示词]', hint: '压缩上下文，可附加自定义提示词' },
-  { name: '/autocompact', args: '[token 数 | off | on]', hint: '自动压缩阈值，例如 /autocompact 500000' },
-  { name: '/mcp', args: '', hint: '查看所有 MCP 服务器与工具' },
-  { name: '/btw', args: '<问题>', hint: '侧边提问：基于当前会话开分支回答，不污染主线程' }
-] as const
 
 const THINKING_LABELS: Record<string, string> = {
   off: '关闭',
@@ -83,7 +76,8 @@ export function Composer({
   autoCompactPercent,
   onChooseWorkspace,
   statusBar,
-  capabilities
+  capabilities,
+  commands
 }: {
   value: string
   onChange: (value: string) => void
@@ -110,7 +104,8 @@ export function Composer({
    * What the active engine supports. A CLI engine owns its own loop, so compaction and the side chat
    * are its own commands — offering ours would only produce "not supported" after the click.
    */
-  capabilities?: { compact: boolean; fork: boolean; thinking: boolean; models: boolean }
+  capabilities?: EngineCapabilities
+  commands: EngineCommand[]
 }) {
   const ref = useRef<HTMLTextAreaElement>(null)
   const contextRef = useRef<HTMLDivElement>(null)
@@ -145,12 +140,7 @@ export function Composer({
       ? value.slice(1).toLowerCase()
       : undefined
   // Only offer what the engine can answer.
-  const availableCommands = SLASH_COMMANDS.filter((command) => {
-    if (!capabilities) return true
-    if (command.name === '/compact' || command.name === '/autocompact') return capabilities.compact
-    if (command.name === '/btw') return capabilities.fork
-    return true
-  })
+  const availableCommands = commands
   const slashMatches =
     slashQuery === undefined
       ? []
@@ -459,8 +449,7 @@ export function Composer({
   const speedOptions = SPEED_OPTIONS
   const activeLabel = status.model
     ? (models.find(
-        (model) =>
-          model.provider === status.model?.provider && model.id === status.model?.id
+        (model) => model.provider === status.model?.provider && model.id === status.model?.id
       )?.name ??
       status.model.name ??
       status.model.id)
@@ -481,6 +470,7 @@ export function Composer({
         ? Math.max(1, Math.round((autoCompactPercent / 100) * window))
         : window
     const used = typeof contextUsage?.tokens === 'number' ? contextUsage.tokens : undefined
+    if (used === undefined) return undefined
     const percent = used ? Math.round((used / ceiling) * 100) : 0
     const tone = percent >= 100 ? 'danger' : percent >= 85 ? 'warn' : ''
     return {
@@ -559,7 +549,7 @@ export function Composer({
                 <button className="queue-btn" title="删除" onClick={() => onQueueRemove(item.id)}>
                   <CloseIcon size={11} />
                 </button>
-                {!item.command && (
+                {!item.command && capabilities?.steer && (
                   <button
                     className="queue-btn"
                     title="立即发送（打断当前回合）"
@@ -582,8 +572,10 @@ export function Composer({
             status.compacting
               ? '正在压缩上下文，结束后会自动继续…'
               : streaming
-                ? '继续输入，Enter 排队，Ctrl+Enter 强制引导'
-                : '给 pi 发消息…（可直接粘贴图片）'
+                ? capabilities?.steer
+                  ? '继续输入，Enter 排队，Ctrl+Enter 强制引导'
+                  : '继续输入，Enter 排队'
+                : '发送消息…（可直接粘贴图片）'
           }
           onChange={(event) => {
             const next = event.target.value
@@ -622,7 +614,7 @@ export function Composer({
             if (event.shiftKey) return
             event.preventDefault()
             if (event.ctrlKey || event.metaKey) {
-              onSend('steer')
+              onSend(capabilities?.steer ? 'steer' : 'send')
             } else {
               onSend('send')
             }
@@ -696,176 +688,183 @@ export function Composer({
                   contextMeter.compacting
                     ? `上下文 ${contextMeter.usedLabel} / ${contextMeter.ceilingLabel}` +
                       `（窗口 ${contextMeter.windowLabel}，到 ${autoCompactPercent}% 自动压缩）`
-                    : `上下文 ${contextMeter.usedLabel} / ${contextMeter.windowLabel}（自动压缩已关闭）`
+                    : `上下文 ${contextMeter.usedLabel} / ${contextMeter.windowLabel}（${capabilities?.autoCompaction === 'native' ? '自动压缩由引擎管理' : '自动压缩已关闭'}）`
                 }
               >
-                <span className="context-ring" style={{ ['--p' as string]: `${contextMeter.percent}%` }} />
+                <span
+                  className="context-ring"
+                  style={{ ['--p' as string]: `${contextMeter.percent}%` }}
+                />
                 <span className="context-meter-value">{contextMeter.percent}%</span>
                 <span className="context-meter-sub">
                   {contextMeter.usedLabel} / {contextMeter.ceilingLabel}
                 </span>
               </div>
             )}
-            {capabilities?.models !== false && (
-            <div className="model-pill" ref={pickerRef}>
-              <button
-                className={`pill-seg model ${status.model ? '' : 'warn'} ${modelOpen ? 'open' : ''}`}
-                onClick={() => void openModelPicker()}
-                title="选择模型"
-              >
-                <span>{activeLabel}</span>
-              </button>
-              {capabilities?.thinking !== false && (
-                <>
-                  <span className="pill-sep" />
-                  <button
-                    className={`pill-seg thinking ${thinkingOpen ? 'open' : ''}`}
-                    onClick={() => void openThinkingPicker()}
-                    title="选择思考等级"
-                  >
-                    <span>
-                      {THINKING_LABELS[status.thinkingLevel ?? ''] ?? status.thinkingLevel ?? 'off'}
-                    </span>
-                    <ChevronIcon size={11} />
-                  </button>
-                </>
-              )}
+            {capabilities?.models && (
+              <div className="model-pill" ref={pickerRef}>
+                <button
+                  className={`pill-seg model ${status.model ? '' : 'warn'} ${modelOpen ? 'open' : ''}`}
+                  onClick={() => void openModelPicker()}
+                  title="选择模型"
+                >
+                  <span>{activeLabel}</span>
+                </button>
+                {capabilities?.thinking && (
+                  <>
+                    <span className="pill-sep" />
+                    <button
+                      className={`pill-seg thinking ${thinkingOpen ? 'open' : ''}`}
+                      onClick={() => void openThinkingPicker()}
+                      title="选择思考等级"
+                    >
+                      <span>
+                        {THINKING_LABELS[status.thinkingLevel ?? ''] ??
+                          status.thinkingLevel ??
+                          '默认'}
+                      </span>
+                      <ChevronIcon size={11} />
+                    </button>
+                  </>
+                )}
 
-              {speed && speed.available.length > 1 && (
-                <>
-                  <span className="pill-sep" />
-                  <button
-                    className={`pill-seg speed ${speed.mode !== 'standard' ? 'on' : ''} ${
-                      speedOpen ? 'open' : ''
-                    }`}
-                    onClick={() => {
-                      setSpeedOpen((open) => !open)
-                      setThinkingOpen(false)
-                      setSpeedError(undefined)
-                    }}
-                    title={
-                      speed.mode === 'standard'
-                        ? '请求按服务商默认档位处理'
-                        : `请求走 ${SPEED_LABELS[speed.mode]} 档位（按服务商计价）`
-                    }
-                  >
-                    <span>{SPEED_LABELS[speed.mode]}</span>
-                    <ChevronIcon size={11} />
-                  </button>
-                </>
-              )}
+                {speed && speed.available.length > 1 && (
+                  <>
+                    <span className="pill-sep" />
+                    <button
+                      className={`pill-seg speed ${speed.mode !== 'standard' ? 'on' : ''} ${
+                        speedOpen ? 'open' : ''
+                      }`}
+                      onClick={() => {
+                        setSpeedOpen((open) => !open)
+                        setThinkingOpen(false)
+                        setSpeedError(undefined)
+                      }}
+                      title={
+                        speed.mode === 'standard'
+                          ? '请求按服务商默认档位处理'
+                          : `请求走 ${SPEED_LABELS[speed.mode]} 档位（按服务商计价）`
+                      }
+                    >
+                      <span>{SPEED_LABELS[speed.mode]}</span>
+                      <ChevronIcon size={11} />
+                    </button>
+                  </>
+                )}
 
-              {modelOpen && (
-                <div className="model-picker">
-                  <div className="model-picker-search">
-                    <SearchIcon size={13} />
-                    <input
-                      ref={searchRef}
-                      value={modelQuery}
-                      onChange={(event) => setModelQuery(event.target.value)}
-                      placeholder="搜索模型或服务商"
-                      spellCheck={false}
-                    />
+                {modelOpen && (
+                  <div className="model-picker">
+                    <div className="model-picker-search">
+                      <SearchIcon size={13} />
+                      <input
+                        ref={searchRef}
+                        value={modelQuery}
+                        onChange={(event) => setModelQuery(event.target.value)}
+                        placeholder="搜索模型或服务商"
+                        spellCheck={false}
+                      />
+                    </div>
+
+                    <div className="model-picker-list">
+                      {modelLoading && <div className="model-picker-empty">加载模型列表…</div>}
+                      {!modelLoading && groups.length === 0 && (
+                        <div className="model-picker-empty">
+                          {models.length === 0
+                            ? '没有可用模型，请先在设置中登录服务商'
+                            : '没有匹配的模型'}
+                        </div>
+                      )}
+                      {groups.map(([providerName, list]) => (
+                        <section key={providerName}>
+                          <div className="model-group-label">{providerName}</div>
+                          {list.map((model) => {
+                            const active =
+                              status.model?.provider === model.provider &&
+                              status.model.id === model.id
+                            return (
+                              <button
+                                key={`${model.provider}/${model.id}`}
+                                className={`model-option ${active ? 'active' : ''}`}
+                                onClick={() => void chooseModel(model)}
+                              >
+                                <span className="model-option-name">
+                                  {model.name ?? model.id}
+                                  {active && <CheckIcon size={12} />}
+                                </span>
+                                <span className="model-option-meta">
+                                  {model.id}
+                                  {model.contextWindow
+                                    ? ` · ${contextLabel(model.contextWindow)}`
+                                    : ''}
+                                </span>
+                              </button>
+                            )
+                          })}
+                        </section>
+                      ))}
+                    </div>
+
+                    {modelError && <div className="model-picker-error">{modelError}</div>}
+                    <div className="model-picker-foot">
+                      {models.length} 个可用模型 · 在设置中登录更多服务商
+                    </div>
                   </div>
+                )}
 
-                  <div className="model-picker-list">
-                    {modelLoading && <div className="model-picker-empty">加载模型列表…</div>}
-                    {!modelLoading && groups.length === 0 && (
-                      <div className="model-picker-empty">
-                        {models.length === 0
-                          ? '没有可用模型，请先在设置中登录服务商'
-                          : '没有匹配的模型'}
-                      </div>
+                {thinkingOpen && (
+                  <div className="thinking-picker">
+                    <div className="thinking-picker-head">思考等级</div>
+                    {thinkingLoading && <div className="thinking-picker-empty">加载中…</div>}
+                    {!thinkingLoading &&
+                      levels.map((level) => {
+                        const active = level === status.thinkingLevel
+                        return (
+                          <button
+                            key={level}
+                            className={`thinking-option ${active ? 'active' : ''}`}
+                            onClick={() => void chooseThinking(level)}
+                          >
+                            <span className="thinking-option-label">
+                              {THINKING_LABELS[level] ?? level}
+                              <code>{level}</code>
+                            </span>
+                            {active && <CheckIcon size={12} />}
+                          </button>
+                        )
+                      })}
+                    {!thinkingLoading && levels.length === 0 && (
+                      <div className="thinking-picker-empty">当前模型没有可用的思考等级</div>
                     )}
-                    {groups.map(([providerName, list]) => (
-                      <section key={providerName}>
-                        <div className="model-group-label">{providerName}</div>
-                        {list.map((model) => {
-                          const active =
-                            status.model?.provider === model.provider &&
-                            status.model.id === model.id
-                          return (
-                            <button
-                              key={`${model.provider}/${model.id}`}
-                              className={`model-option ${active ? 'active' : ''}`}
-                              onClick={() => void chooseModel(model)}
-                            >
-                              <span className="model-option-name">
-                                {model.name ?? model.id}
-                                {active && <CheckIcon size={12} />}
-                              </span>
-                              <span className="model-option-meta">
-                                {model.id}
-                                {model.contextWindow ? ` · ${contextLabel(model.contextWindow)}` : ''}
-                              </span>
-                            </button>
-                          )
-                        })}
-                      </section>
-                    ))}
+                    {thinkingError && <div className="thinking-picker-error">{thinkingError}</div>}
                   </div>
+                )}
 
-                  {modelError && <div className="model-picker-error">{modelError}</div>}
-                  <div className="model-picker-foot">
-                    {models.length} 个可用模型 · 在设置中登录更多服务商
-                  </div>
-                </div>
-              )}
-
-              {thinkingOpen && (
-                <div className="thinking-picker">
-                  <div className="thinking-picker-head">思考等级</div>
-                  {thinkingLoading && <div className="thinking-picker-empty">加载中…</div>}
-                  {!thinkingLoading &&
-                    levels.map((level) => {
-                      const active = level === status.thinkingLevel
+                {speedOpen && speed && (
+                  <div className="thinking-picker speed-picker">
+                    <div className="thinking-picker-head">速度档位</div>
+                    {speedOptions.map((option) => {
+                      const active = option.mode === speed.mode
                       return (
                         <button
-                          key={level}
+                          key={option.mode}
                           className={`thinking-option ${active ? 'active' : ''}`}
-                          onClick={() => void chooseThinking(level)}
+                          disabled={speedBusy || !speed.available.includes(option.mode)}
+                          onClick={() => void chooseSpeed(option.mode)}
+                          title={option.hint}
                         >
                           <span className="thinking-option-label">
-                            {THINKING_LABELS[level] ?? level}
-                            <code>{level}</code>
+                            {option.label}
+                            <code>{option.mode}</code>
                           </span>
                           {active && <CheckIcon size={12} />}
                         </button>
                       )
                     })}
-                  {!thinkingLoading && levels.length === 0 && (
-                    <div className="thinking-picker-empty">当前模型没有可用的思考等级</div>
-                  )}
-                  {thinkingError && <div className="thinking-picker-error">{thinkingError}</div>}
-                </div>
-              )}
-
-              {speedOpen && speed && (
-                <div className="thinking-picker speed-picker">
-                  <div className="thinking-picker-head">速度档位</div>
-                  {speedOptions.map((option) => {
-                    const active = option.mode === speed.mode
-                    return (
-                      <button
-                        key={option.mode}
-                        className={`thinking-option ${active ? 'active' : ''}`}
-                        disabled={speedBusy || !speed.available.includes(option.mode)}
-                        onClick={() => void chooseSpeed(option.mode)}
-                        title={option.hint}
-                      >
-                        <span className="thinking-option-label">
-                          {option.label}
-                          <code>{option.mode}</code>
-                        </span>
-                        {active && <CheckIcon size={12} />}
-                      </button>
-                    )
-                  })}
-                  {speed.note && <div className="thinking-picker-empty">{speed.note}</div>}
-                  {speedError && <div className="thinking-picker-error">{speedError}</div>}
-                </div>
-              )}
-            </div>
+                    {speed.note && <div className="thinking-picker-empty">{speed.note}</div>}
+                    {speedError && <div className="thinking-picker-error">{speedError}</div>}
+                  </div>
+                )}
+              </div>
             )}
             {streaming ? (
               <button className="send-btn stop" onClick={onStop} title="中止当前运行">
