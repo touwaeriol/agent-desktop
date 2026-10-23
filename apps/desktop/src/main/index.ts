@@ -75,6 +75,13 @@ const engine = new PiEngine({
     const env = withRealBash({ ...launch.env })
     // Read by the extension's request hooks; it re-checks the model before touching the payload.
     env.AGENT_DESKTOP_SPEED = speed.resolveSpeedMode(status.model, currentSpeedMode())
+    // Root-aware file tools need the same list the model is told about, so both come from here.
+    if (workspace.additional.length > 0) {
+      env.AGENT_DESKTOP_ROOTS = JSON.stringify([
+        { name: path.basename(workspace.primary), path: workspace.primary, primary: true },
+        ...workspace.additional.map((root) => ({ name: path.basename(root), path: root }))
+      ])
+    }
     // Several directories need to be explained to the model; one directory is just a normal session
     // and gets no section.
     const project = activeProject()

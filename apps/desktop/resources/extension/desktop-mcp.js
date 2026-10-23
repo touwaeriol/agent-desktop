@@ -122,7 +122,11 @@ function projectSection(raw, engineSpecs) {
     '跨仓库搜索用 grep 工具的 `path` 参数指向仓库目录，不要用 `bash grep -rn` 扫整个磁盘。',
     ...(servers.length > 0
       ? ['', `代码搜索按仓库分成独立工具集，按仓库选对再搜：${servers.join('，')}。`]
-      : [])
+      : []),
+    '',
+    '跨目录读写文件优先用 `mcp__desktop__workspace_roots` / `mcp__desktop__read_file` / ' +
+      '`mcp__desktop__grep_files`：它们带 `root` 参数、路径相对该目录，越界会被拒绝，' +
+      '不会像绝对路径那样容易串到别的仓库。'
   ].join('\n')
 }
 
@@ -235,7 +239,9 @@ export default function desktopMcp(pi) {  const url = process.env.AGENT_DESKTOP_
         ELECTRON_RUN_AS_NODE: '1',
         AGENT_DESKTOP_MCP_URL: url,
         AGENT_DESKTOP_MCP_TOKEN: token,
-        AGENT_DESKTOP_SUBAGENTS: subagentsEnabled ? '1' : '0'
+        AGENT_DESKTOP_SUBAGENTS: subagentsEnabled ? '1' : '0',
+        // Root-aware read/grep tools only exist for a session that covers several directories.
+        AGENT_DESKTOP_ROOTS: process.env.AGENT_DESKTOP_ROOTS ?? ''
       },
       exposure: 'direct',
       // No timeout: pi skips arming its request timer when timeoutMs is not finite
