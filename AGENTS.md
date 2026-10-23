@@ -103,6 +103,13 @@ npm run typecheck    # node + web 两个 tsconfig 分别检查
 - 回合结束后自动按顺序发送队列里的下一条。**flush 的 effect 只能依赖 `status.isStreaming` / `status.compacting` / `status.phase`，不能依赖 `queued`**——否则加入第二条时会和第一条抢跑（`isStreaming` 还没变 true 就再发一次），实测第二条会被 pi 拒绝并丢失。
 - 发送失败时把该条放回队首并提示，避免静默丢消息。放回后必须**自己再排一次**（`restore()` 重新读 `pi:get-status` 并 2 秒后 `setQueueTick`）：条目出队又回队不产生任何状态变化，flush 不会重跑，否则排队项会永远躺在那里。
 
+## bash 工具（Windows）
+
+- pi 的 bash 工具用 `where bash.exe` 找 shell：先 `%ProgramFiles%\Git\bin\bash.exe`，再 PATH 里的第一个。**Git 装在别处（按用户安装、`D:\app\Git`）时，PATH 里的第一个是 `%LOCALAPPDATA%\Microsoft\WindowsApps\bash.exe`——那是 WSL 的 App Execution Alias，没装发行版时它永远不返回**。表现是每条 bash 都 `Command timed out after N seconds`，连 `echo hi` 也一样，从记录里完全看不出 shell 根本没启动。
+- 所以 `shell.ts` 的 `withRealBash()` 会在**每个 pi 子进程**（主进程 `runStart`、子代理 `SubagentManager.start`）的环境里把真实 Git Bash 的目录放到 PATH 最前面（`%LOCALAPPDATA%\Programs\Git\bin`、`%ProgramFiles%\Git\bin`、以及从 PATH 里的 `git.exe` 反推的 `…\Git\bin`），WindowsApps 里的 stub 一律跳过。
+- 注意 `withRealBash(env)` 的 `env` 只是**要追加的变量**（`launch.env` 通常没有 PATH），PATH 必须从 `process.env` 取；写成从 `env` 取会把整条 PATH 换成单个目录，`where.exe` 自己就找不到了（表现成 `No bash shell found`）。合并后只保留一种大小写（`PATH` / `Path` 同时出现时 Windows 取哪个是不确定的）。
+- 用户在 `settings.json` 里写 `shellPath` 时仍然优先（pi 先看它），不要覆盖。
+
 ## 运行状态（busy）
 
 - **`agent_end` 不是空闲**：自动重试、溢出恢复、压缩重试和队列消息都可能再开一轮，pi 在这段时间里会拒绝 `prompt`（`Agent is already processing…` / `Cannot submit a prompt while compaction is in progress`）。主进程只在 `agent_settled` 把 `busy` 置 false，`agent_start` / `compaction_start` 置 true；`get_state` 的 `isStreaming` / `isCompacting` 是权威值（`applyState` 会同步覆盖）。

@@ -12,6 +12,7 @@ import { existsSync, readFileSync } from 'node:fs'
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import { PiRpcClient } from './pi-rpc'
+import { withRealBash } from './shell'
 import type { AgentMode, AgentPreset } from './agents'
 
 export type SubagentStatus = 'starting' | 'idle' | 'streaming' | 'error' | 'stopped'
@@ -305,7 +306,7 @@ export class SubagentManager {
     if (appendPrompt) args.push('--append-system-prompt', appendPrompt)
 
     await fs.mkdir(this.sessionDir(), { recursive: true })
-    rpc.start(cwd, args, {})
+    rpc.start(cwd, args, withRealBash({}))
     record.startedAt = Date.now()
     this.emit(record)
 

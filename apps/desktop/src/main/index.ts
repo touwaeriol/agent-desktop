@@ -17,6 +17,7 @@ import { createApiHandler } from './api'
 import * as bridge from './bridge'
 import { applySystemProxy, getProxyInfo } from './proxy'
 import * as profile from './profile'
+import { withRealBash } from './shell'
 import type {
   AppSettings,
   AskAnswer,
@@ -827,7 +828,7 @@ async function runStart(cwd?: string, extraArgs: string[] = []): Promise<PiStatu
     const launch = await mcpLaunch(workspace)
     // An isolated profile is just this variable: pi then reads auth/models/settings/mcp/sessions
     // from the desktop directory instead of the CLI's.
-    const env = { ...launch.env }
+    const env = withRealBash({ ...launch.env })
     if (profile.isIsolatedProfile()) env.PI_CODING_AGENT_DIR = profile.agentDir()
     rpc.start(workspace, [...extraArgs, ...sessionDirArgs(), ...launch.args], env)
     const data = await waitForReady()
