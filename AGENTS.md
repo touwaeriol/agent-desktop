@@ -148,6 +148,13 @@ npm run typecheck    # node + web 两个 tsconfig 分别检查
 - 改名说明：产品名是 Prophey，但 `app.setName('agent-desktop')` **故意保留**——它决定 `%APPDATA%/agent-desktop`，改了等于丢失用户的配置、会话、项目和凭据。
 - 还没搬完的部分：`/btw` 的 clone/switch、压缩阈值同步、登录消息、MCP 启动参数装配（`prepare` 仍由 `index.ts` 提供，这是刻意的）。
 
+## CLI 引擎（Claude Code / Codex）
+
+- `agent/claude-engine.ts`：一轮 = 一次 `claude -p --output-format stream-json --verbose` 子进程。解析 `system/init`（`session_id`、model）、`assistant`（文本 + `tool_use`）、`user`（`tool_result`）、`result`（`total_cost_usd`、usage、subtype）→ 翻译成窗口认识的事件。续接用 `--resume <session_id>`，多目录用 `--add-dir`。
+- `agent/codex-engine.ts`：一轮 = 一次 `codex exec --json -C <primary> -`；事件只有 `thread.started` / `item.completed` / `turn.completed`，**没有 token 级流式**，所以消息是"完成即出现"，不假装打字机。续接用 `codex exec resume <thread_id>`。
+- **提示词走 stdin，不进 argv**：Windows 上它们的 npm 入口是 `.cmd`，spawn 需要 shell，而 shell 会把提示词拼进命令行。所以直接调无 shell 的入口：Claude Code 用包内的 `bin/claude.exe`，Codex 用 `ELECTRON_RUN_AS_NODE=1` + `bin/codex.js`（`process.execPath` 就是 Electron 的 node）。
+- 两个引擎都不提供：压缩、`/btw`、`ask_user_question`、`thinkingLevels`、模型目录——一律抛「不支持（这是 CLI 自己的功能）」，不假装。多目录只靠 `--add-dir`（Claude）或 sandbox（Codex），我们的 root 工具对它们无效。
+
 ## 会话存储（我们自己的）
 
 - `src/main/session-store.ts`：`SessionStore` 拥有会话列表（`%APPDATA%/agent-desktop/sessions.json`：`id / path / cwd / additional / projectId / title / createdAt / updatedAt`）。**窗口只读这个 store**，pi 的 JSONL 只是 `path` 这个引擎私有字段，换引擎时列表、排序、分组都不用动。

@@ -3,6 +3,8 @@ import { randomUUID } from 'node:crypto'
 import { existsSync, promises as fs, unlinkSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import { ClaudeCodeEngine } from './agent/claude-engine'
+import { CodexEngine } from './agent/codex-engine'
 import { PropheyEngine } from './agent/prophey-engine'
 import { PiEngine } from './agent/pi-engine'
 import { listSessions, readSummary } from './sessions'
@@ -122,6 +124,45 @@ function activeProject(): projects.Project | undefined {
 
 let desktopConfig: DesktopConfig = {}
 
+/** The engine id the window should show as selected. */
+function currentEngineId(): 'pi' | 'prophey' | 'claude' | 'codex' {
+  const wanted = desktopConfig.engine
+  return wanted === 'pi' || wanted === 'claude' || wanted === 'codex' ? wanted : 'prophey'
+}
+
+/**
+ * Where the CLIs live.
+ *
+ * Their npm shims are `.cmd` files, and spawning those needs a shell — which would put the prompt
+ * into a command line. Both packages ship a shell-free entry instead: Claude Code a real `.exe`,
+ * Codex a `.js` we run with our own node.
+ */
+function claudeBinary(): string {
+  const packaged = path.join(
+    process.env.APPDATA ?? '',
+    'npm',
+    'node_modules',
+    '@anthropic-ai',
+    'claude-code',
+    'bin',
+    process.platform === 'win32' ? 'claude.exe' : 'claude'
+  )
+  return existsSync(packaged) ? packaged : 'claude'
+}
+
+function codexLaunch(): { command: string; script?: string } {
+  const script = path.join(
+    process.env.APPDATA ?? '',
+    'npm',
+    'node_modules',
+    '@openai',
+    'codex',
+    'bin',
+    'codex.js'
+  )
+  return existsSync(script) ? { command: process.execPath, script } : { command: 'codex' }
+}
+
 /** Engine factory: Prophey is the default; `pi` stays available as the other engine. */
 function createEngine(): AgentEngine {
   const shared = {
@@ -144,6 +185,13 @@ function createEngine(): AgentEngine {
     },
     onAssistantError: (message: string) => noteSpeedRejection(message),
     onExit: () => handleExit()
+  }
+  if (desktopConfig.engine === 'claude') {
+    return new ClaudeCodeEngine({ ...shared, binary: claudeBinary() })
+  }
+  if (desktopConfig.engine === 'codex') {
+    const { command, script } = codexLaunch()
+    return new CodexEngine({ ...shared, binary: command, script })
   }
   if (desktopConfig.engine !== 'pi') {
     return new PropheyEngine({
@@ -283,8 +331,11 @@ interface DesktopConfig {
   speed?: { mode?: SpeedMode }
   /** Project the window is working in; sessions still start on its primary repository. */
   activeProject?: string
-  /** Which engine runs the turn: `pi` (default) or `prophey` (ours). */
-  engine?: 'pi' | 'prophey'
+  /**
+   * Which engine runs the turn: `prophey` (ours, default), `pi`, `claude` (Claude Code CLI) or
+   * `codex` (Codex CLI).
+   */
+  engine?: 'pi' | 'prophey' | 'claude' | 'codex'
   /** Current Prophey-engine session id; rotates when a new session starts. */
   propheySessionId?: string
   /** Repositories the user worked in, most recent first (sidebar "切换仓库" menu). */
@@ -1391,7 +1442,7 @@ function registerIpc(): void {
   })
 
   ipcMain.handle('desktop:config', () => ({
-    engine: desktopConfig.engine === 'pi' ? 'pi' : 'prophey',
+    engine: currentEngineId(),
     cwd: status.cwd,
     sessionMode: currentSessionMode(),
     sessionDir: currentSessionDir(),
@@ -1436,9 +1487,11 @@ function registerIpc(): void {
   ipcMain.handle('updates:auto', (_event, enabled: boolean) => updates.setAuto(enabled))
   ipcMain.handle('app:proxy', () => getProxyInfo())
 
-  ipcMain.handle('desktop:set-engine', async (_event, next: 'pi' | 'prophey') => {
+  ipcMain.handle(
+    'desktop:set-engine',
+    async (_event, next: 'pi' | 'prophey' | 'claude' | 'codex') => {
     if (btwActive) await closeSideChat()
-    const engine = next === 'prophey' ? 'prophey' : 'pi'
+    const engine = ['pi', 'claude', 'codex'].includes(next) ? next : 'prophey'
     await saveConfig({
       engine,
       ...(engine === 'prophey' && !desktopConfig.propheySessionId
@@ -1450,7 +1503,8 @@ function registerIpc(): void {
     currentEngine = createEngine()
     previous.dispose()
     return startPi(status.cwd)
-  })
+    }
+  )
 
   ipcMain.handle('desktop:set-session-mode', async (_event, mode: SessionMode) => {
     if (btwActive) await closeSideChat()
