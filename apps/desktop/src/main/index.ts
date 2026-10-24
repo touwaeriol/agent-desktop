@@ -410,8 +410,6 @@ async function migrateLegacyUserData(): Promise<void> {
   }
 }
 
-type SessionMode = 'shared' | 'isolated'
-
 interface McpEngineConfig {
   enabled?: boolean
   entry?: string
@@ -442,7 +440,8 @@ interface McpConfig {
 
 interface DesktopConfig {
   cwd?: string
-  sessionMode?: SessionMode
+  /** Sessions always live in pi's own storage; an old `isolated` value is simply ignored. */
+  sessionMode?: 'shared' | 'isolated'
   mcp?: McpConfig
   /** Auto-compaction policy; `ratio` is the fraction of the window that triggers it. */
   autoCompact?: { ratio?: number; enabled?: boolean }
@@ -493,10 +492,6 @@ async function saveConfig(patch: Partial<DesktopConfig>): Promise<void> {
   await writeJsonAtomic(configPath(), desktopConfig)
 }
 
-function currentSessionMode(): SessionMode {
-  return desktopConfig.sessionMode === 'isolated' ? 'isolated' : 'shared'
-}
-
 /** All provider and MCP configuration follows the same directory as pi. */
 function applyProfile(): void {
   profile.setAgentDir(profile.CLI_AGENT_DIR)
@@ -534,11 +529,12 @@ function sharedSessionDir(): string {
   return profile.profileSessionDir()
 }
 
+/**
+ * Sessions always live in pi's own storage (`<agent dir>/sessions`), so the desktop and the pi
+ * CLI/TUI share one set of JSONL files and there is no second place a conversation could hide.
+ */
 function currentSessionDir(): string {
-  const base =
-    currentSessionMode() === 'isolated'
-      ? path.join(app.getPath('userData'), 'sessions')
-      : sharedSessionDir()
+  const base = sharedSessionDir()
   // A project keeps its conversations together: new sessions land under its own directory, while
   // the list still walks the whole tree so sessions from before the project stay visible.
   const project = activeProject()
@@ -546,7 +542,7 @@ function currentSessionDir(): string {
 }
 
 function sessionDirArgs(): string[] {
-  // Explicit for both modes: an isolated profile must never write into the CLI's session tree.
+  // Explicit so `PI_CODING_AGENT_DIR` overrides (tests, portable profiles) land in the same tree.
   return ['--session-dir', currentSessionDir()]
 }
 
@@ -1762,10 +1758,8 @@ function registerIpc(): void {
     codexSandbox: desktopConfig.codexSandbox,
     codexRequestUserInput: desktopConfig.codexRequestUserInput !== false,
     cwd: status.cwd,
-    sessionMode: currentSessionMode(),
     sessionDir: currentSessionDir(),
     sharedSessionDir: sharedSessionDir(),
-    isolatedSessionDir: path.join(app.getPath('userData'), 'sessions'),
     activeProject: desktopConfig.activeProject
   }))
 
@@ -1827,12 +1821,6 @@ function registerIpc(): void {
       broadcastStatus()
     }
     return statusSnapshot()
-  })
-
-  handle('desktop:set-session-mode', async (_event, mode: SessionMode) => {
-    if (btwActive) await closeSideChat()
-    await saveConfig({ sessionMode: mode === 'isolated' ? 'isolated' : 'shared' })
-    return startPi(status.cwd)
   })
 
   handle('pi:choose-workspace', async (_event, options?: { stop?: boolean }) => {

@@ -29,6 +29,9 @@ app.on('browser-window-created', (_event, window) => {
       const settingsPaths = await evaluate('window.pi.getAppSettings()')
       assert.equal(settingsPaths.authPath, path.join(process.env.PI_CODING_AGENT_DIR, 'auth.json'))
       assert.equal(config.sharedSessionDir, path.join(process.env.PI_CODING_AGENT_DIR, 'sessions'))
+      assert.equal(config.sessionDir, path.join(process.env.PI_CODING_AGENT_DIR, 'sessions'))
+      assert.equal(config.sessionMode, undefined, 'sessions always live in pi storage')
+      assert.equal(config.isolatedSessionDir, undefined)
       assert.equal((await evaluate('window.pi.getMcpState()')).userConfigPath, path.join(process.env.PI_CODING_AGENT_DIR, 'mcp.json'))
       assert.equal(config.capabilities.autoCompaction, 'configurable')
       assert.equal((await evaluate('window.pi.getStatus()')).autoCompactPercent, 0.1)
@@ -54,6 +57,10 @@ app.on('browser-window-created', (_event, window) => {
       await evaluate('Array.from(document.querySelectorAll(".settings-nav button")).find(b => b.textContent.trim() === "通用").click()')
       await until(() => evaluate('!!document.querySelector(".settings-content.general")'), 'general settings')
       assert(!await evaluate('document.querySelector(".settings-body").textContent.includes("配置来源")'))
+      assert(
+        !(await evaluate('document.querySelector(".settings-body").textContent.includes("会话存储")')),
+        'session storage is no longer configurable'
+      )
       await evaluate('document.querySelector(".modal-backdrop").dispatchEvent(new MouseEvent("mousedown", { bubbles: true }))')
       await until(() => evaluate('!document.querySelector(".settings")'), 'settings dismiss')
       const pi = await evaluate('window.pi.setEngine("pi")')

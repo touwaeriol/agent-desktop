@@ -247,10 +247,11 @@ npm run typecheck    # node + web 两个 tsconfig 分别检查
 ## Sessions & workspace
 
 - **配置固定共用**：默认直接读写 pi 的 `~/.pi/agent`，不再展示配置来源、独立配置或导入入口，历史 `config.profile` 字段不再生效。`profile.ts` 是路径唯一来源；显式 `PI_CODING_AGENT_DIR` 覆盖同时用于 SDK 和 pi 子进程，自动测试必须指向临时目录。
-- 默认 session 目录由同一个配置目录的 `sessions/` 派生；会话存储模式仍独立控制，原有历史文件不会迁移或删除。
-- 会话默认与 pi 共用 `~/.pi/agent/sessions`；desktop `config.json` 的 `sessionMode` 为 `isolated` 时，启动 pi 会附加 `--session-dir <userData>/sessions`，`listSessions` 也读该目录。两种模式都由 pi 写 JSONL，结构不变，可随时切回共用。
+- 默认 session 目录由同一个配置目录的 `sessions/` 派生，**没有“会话存储”开关**：桌面端永远写 pi 自己的 `sessions/`（`PI_CODING_AGENT_DIR` 覆盖对它同样生效），项目和 pi CLI/TUI 共用同一批 JSONL。老的 `config.json.sessionMode` 只是被忽略，已有会话文件不迁移不删除（SessionStore 里记录着 `path`，照旧列出来）。
+- 项目会话写到 `sessions/projects/<projectId>`（`currentSessionDir()`）；`--session-dir` 仍然**显式传入**（项目子目录 + 测试隔间都需要），只是不再有第二种基目录。`listSessions` 也从同一棵树递归读。
+- 老的独立目录（`userData/sessions`）里历史文件不会被删除，但新会话不再写进去；用户要搬就直接移动文件/改 SessionStore 记录。
 - 工作目录是**会话级**的：点击其他项目的会话必须走 `pi:open-session`（以该会话 cwd + `--session <path>` 重启 pi），不能只用 `switch_session`，否则工具会在错误目录运行。设置页只读显示当前会话目录，不提供全局工作目录编辑。
-- `config.json` 保存 `{ cwd, sessionMode, mcp }`；`cwd` 只是下次启动/新建会话的默认目录。目录不存在时 `startPi` 会回退到 home，避免 spawn ENOENT。
+- `config.json` 保存 `{ cwd, mcp }`（`sessionMode` 已是历史字段）；`cwd` 只是下次启动/新建会话的默认目录。目录不存在时 `startPi` 会回退到 home，避免 spawn ENOENT。
 
 ## MCP & desktop tools
 

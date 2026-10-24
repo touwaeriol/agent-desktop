@@ -609,20 +609,6 @@ export function SettingsModal({
     void loadSettings()
   }, [modelConfig, loadProviders, loadSettings])
 
-  const changeSessionMode = useCallback(async (mode: 'shared' | 'isolated') => {
-    const next = await window.pi.setSessionMode(mode)
-    if (next.phase === 'error') {
-      setError(next.error ?? '切换会话存储失败')
-      return
-    }
-    setDesktopConfig(await window.pi.getDesktopConfig())
-    setNotice(
-      mode === 'isolated'
-        ? '已切换到独立会话目录，并新建了会话'
-        : '已切换到共用 pi 会话目录，并新建了会话'
-    )
-  }, [])
-
   const openProviderEditor = async (mode: 'form' | 'json', provider?: ProviderInfo): Promise<void> => {
     try {
       const file = await window.pi.getModelsJson()
@@ -735,7 +721,7 @@ export function SettingsModal({
                     ? '连接工具服务，扩展当前引擎的能力'
                     : activeTab === 'agents'
                       ? '子代理预设：注入哪些工具、追加什么提示词，以及如何暴露给模型'
-                      : '当前会话目录、会话存储、默认模型与思考等级'}
+                      : '当前会话目录、默认模型与思考等级'}
               </p>
             </div>
             <button className="icon-btn" onClick={onClose} title="关闭 (Esc)">
@@ -935,36 +921,6 @@ export function SettingsModal({
                 )}
               </div>
 
-              {desktopConfig?.capabilities?.sessionStorage === 'managed' && (
-                <>
-                  <div className="field">
-                    <label>会话存储</label>
-                    <div className="theme-switch storage-switch">
-                      <button
-                        className={desktopConfig?.sessionMode !== 'isolated' ? 'active' : ''}
-                        onClick={() => void changeSessionMode('shared')}
-                      >
-                        共用 pi
-                      </button>
-                      <button
-                        className={desktopConfig?.sessionMode === 'isolated' ? 'active' : ''}
-                        onClick={() => void changeSessionMode('isolated')}
-                      >
-                        独立目录
-                      </button>
-                    </div>
-                    <p className="field-hint">
-                      共用：<code>{desktopConfig?.sharedSessionDir ?? '~/.pi/agent/sessions'}</code>
-                      ，与 pi CLI/TUI 使用同一批 JSONL 会话，结构不变。
-                    </p>
-                    <p className="field-hint">
-                      独立：
-                      <code>{desktopConfig?.isolatedSessionDir ?? '应用数据目录/sessions'}</code>
-                      ，只给桌面端使用，文件格式与 pi 完全一致，可随时切回共用。
-                    </p>
-                  </div>
-                </>
-              )}
               <div className="field">
                 <label>自动压缩</label>
                 {desktopConfig?.capabilities?.autoCompaction === 'configurable' ? (

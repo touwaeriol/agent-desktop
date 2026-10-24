@@ -14,7 +14,7 @@ adapters; the desktop owns projects, session navigation and UI.
 - Provider login (OAuth / API key), custom providers via `models.json`
 - Light and dark themes
 - Conversation outline and user-message timeline
-- Session storage shared with pi, or isolated to the desktop app
+- Sessions stored in pi's own `~/.pi/agent/sessions` tree, shared with the pi CLI/TUI
 - Four engines: Prophey provider loop, pi RPC, Claude Agent SDK and Codex app-server
 - Capability-driven slash commands, native compaction, model selection and approval dialogs
 - Native questions from every engine: Claude Code's `AskUserQuestion`, Codex's `request_user_input` and pi/Prophey's desktop tool all use the same panel above the composer

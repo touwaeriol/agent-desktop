@@ -53,8 +53,6 @@ const bridge: PiBridge = {
   setEngine: (engine: 'pi' | 'prophey' | 'claude' | 'codex') =>
     ipcRenderer.invoke('desktop:set-engine', engine),
   setDefaultEngine: (engine) => ipcRenderer.invoke('desktop:set-default-engine', engine),
-  setSessionMode: (mode: 'shared' | 'isolated') =>
-    ipcRenderer.invoke('desktop:set-session-mode', mode) as Promise<PiStatus>,
   getUpdateSnapshot: () => ipcRenderer.invoke('updates:snapshot') as Promise<AppUpdateSnapshot>,
   checkForUpdates: () => ipcRenderer.invoke('updates:check') as Promise<AppUpdateSnapshot>,
   installUpdate: () => ipcRenderer.invoke('updates:install') as Promise<AppUpdateSnapshot>,

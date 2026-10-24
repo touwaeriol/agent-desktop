@@ -272,10 +272,9 @@ export interface ModelChoice {
 export interface DesktopConfig {
   defaultEngine?: EngineId;
   cwd: string;
-  sessionMode: "shared" | "isolated";
+  /** Where sessions are written: always pi's own `<agent dir>/sessions` tree. */
   sessionDir: string;
   sharedSessionDir: string;
-  isolatedSessionDir: string;
   /** Project the window is working in, when one is selected. */
   activeProject?: string;
   /** Which engine runs the turn; also decides which MCP groups apply. */
@@ -568,7 +567,6 @@ export interface PiBridge {
     enabled: boolean,
   ): Promise<{ ok: boolean; error?: string }>;
   getDesktopConfig(): Promise<DesktopConfig>;
-  setSessionMode(mode: "shared" | "isolated"): Promise<PiStatus>;
   /** Switch the engine; the main process rebuilds it and restarts the session. */
   setEngine(engine: "pi" | "prophey" | "claude" | "codex"): Promise<PiStatus>;
   setDefaultEngine(engine: EngineId): Promise<{ ok: boolean }>;
