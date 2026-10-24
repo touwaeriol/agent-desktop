@@ -139,6 +139,8 @@ export class SubagentManager {
   constructor(
     private readonly options: {
       userData: string
+      /** Non-tool extensions shared with the desktop's pi engine (e.g. model metadata). */
+      piExtensions?: () => string[]
       /** Called when a record changes, for the settings/UI side. */
       onUpdate?: (record: SubagentRecord) => void
       /** Called once per finished turn when `notify` is not `none`. */
@@ -350,6 +352,7 @@ export class SubagentManager {
     })
 
     const args = ['--session-dir', this.sessionDir()]
+    for (const file of this.options.piExtensions?.() ?? []) args.push('--extension', file)
     if (!options.desktopTools) args.push('--no-mcp')
     if (tools && tools.length > 0) args.push('--tools', tools.join(','))
     if (model) args.push('--provider', model.provider, '--model', thinking ? `${model.id}:${thinking}` : model.id)

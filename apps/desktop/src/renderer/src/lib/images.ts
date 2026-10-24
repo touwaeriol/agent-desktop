@@ -1,3 +1,31 @@
+import { MAX_CLIPBOARD_IMAGE_PIXELS, MAX_CLIPBOARD_PNG_BYTES } from '../../../shared/image-clipboard'
+
+/** Rasterize the displayed image, not its URL, so JPEG/WebP/etc. copy as a real PNG. */
+export async function copyPreviewImage(image: HTMLImageElement): Promise<void> {
+  if (!image.complete || !image.naturalWidth || !image.naturalHeight) {
+    throw new Error('图片尚未加载或加载失败，请稍后重试')
+  }
+  if (image.naturalWidth * image.naturalHeight > MAX_CLIPBOARD_IMAGE_PIXELS) {
+    throw new Error('图片尺寸过大，无法复制')
+  }
+  const canvas = document.createElement('canvas')
+  canvas.width = image.naturalWidth
+  canvas.height = image.naturalHeight
+  try {
+    const context = canvas.getContext('2d')
+    if (!context) throw new Error('无法读取图片')
+    context.drawImage(image, 0, 0)
+    const blob = await new Promise<Blob>((resolve, reject) => {
+      canvas.toBlob(value => value ? resolve(value) : reject(new Error('图片转换失败')), 'image/png')
+    })
+    if (blob.size > MAX_CLIPBOARD_PNG_BYTES) throw new Error('图片过大，无法复制')
+    const result = await window.pi.copyImage(await readAsDataUrl(blob))
+    if (!result.ok) throw new Error(result.error || '复制图片失败')
+  } finally {
+    canvas.width = canvas.height = 0
+  }
+}
+
 export interface DraftImage {
   id: string
   data: string

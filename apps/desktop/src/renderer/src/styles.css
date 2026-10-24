@@ -1794,15 +1794,6 @@ button:disabled {
   color: var(--text-strong);
 }
 
-.composer-hint {
-  max-width: 860px;
-  margin: 6px auto 0;
-  text-align: center;
-  font-size: 10.6px;
-  color: var(--text-faint);
-  user-select: none;
-}
-
 /* ---------------- misc ---------------- */
 
 .jump-bottom {
@@ -4865,7 +4856,7 @@ button:disabled {
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 40px;
+  padding: 64px 40px;
   background: rgba(8, 9, 11, 0.78);
 }
 
@@ -4881,13 +4872,46 @@ button:disabled {
   object-fit: contain;
 }
 
-.image-lightbox-close {
+.image-lightbox-actions {
   position: absolute;
   top: 16px;
   right: 18px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.image-lightbox-close,
+.image-lightbox-copy {
   background: var(--bg-elev);
+  color: var(--text);
   border: 1px solid var(--border-strong);
 }
+
+.image-lightbox-copy {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.image-lightbox-copy:hover:not(:disabled) { background: var(--bg-hover); }
+.image-lightbox-copy:disabled { opacity: 0.6; cursor: wait; }
+
+.image-lightbox-feedback {
+  position: absolute;
+  bottom: 16px;
+  max-width: calc(100% - 80px);
+  padding: 6px 12px;
+  border-radius: 8px;
+  background: var(--bg-elev);
+  color: var(--text);
+  font-size: 13px;
+}
+
+.image-lightbox-feedback:empty { display: none; }
 
 /* ---------- sidebar toolbar, pinned ---------- */
 

@@ -73,6 +73,7 @@ const bridge: PiBridge = {
   listSessions: () => ipcRenderer.invoke('pi:list-sessions') as Promise<SessionSummary[]>,
   openAgentDir: () => ipcRenderer.invoke('pi:open-agent-dir') as Promise<void>,
   openExternal: (url: string) => ipcRenderer.invoke('app:open-external', url) as Promise<void>,
+  copyImage: (dataUrl: string) => ipcRenderer.invoke('app:copy-image', dataUrl),
   setTheme: (theme: 'dark' | 'light') =>
     ipcRenderer.invoke('app:set-theme', theme) as Promise<void>,
   listModels: () => ipcRenderer.invoke('pi:list-models'),

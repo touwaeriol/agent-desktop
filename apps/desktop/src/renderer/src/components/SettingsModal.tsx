@@ -49,7 +49,7 @@ const COMPACT_PERCENT_PRESETS = [50, 60, 70, 75, 80, 85, 90, 95]
 function formatTokens(value: number): string {
   if (value >= 1_000_000) {
     const millions = value / 1_000_000
-    return `${Number.isInteger(millions) ? millions : millions.toFixed(1)}M`
+    return `${Number(millions.toFixed(2))}M`
   }
   if (value >= 1000) {
     const thousands = value / 1000
@@ -1255,7 +1255,7 @@ export function SettingsModal({
                   <span className="model-config-name">{model.name ?? model.modelId}</span>
                   <span className="model-config-meta">
                     {model.modelId}
-                    {model.contextWindow ? ` · ${Math.round(model.contextWindow / 1000)}K` : ''}
+                    {model.contextWindow ? ` · ${formatTokens(model.contextWindow)}` : ''}
                   </span>
                 </label>
               ))}

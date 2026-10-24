@@ -1,3 +1,4 @@
+import { copyImageToClipboard } from './image-clipboard'
 import { ImportedHistoryStore } from './imported-history-store'
 import { writeJsonAtomic } from './storage'
 import { listEngineCommands, executeEngineCommand } from './engine-commands'
@@ -621,15 +622,15 @@ function searchUp(start: string, relative: string, depth = 6): string | undefine
   return undefined
 }
 
-function desktopExtensionPath(): string {
-  if (app.isPackaged) return path.join(resourceDir(), 'extension', 'desktop-mcp.js')
+function desktopExtensionPath(name = 'desktop-mcp.js'): string {
+  if (app.isPackaged) return path.join(resourceDir(), 'extension', name)
   return (
-    searchUp(app.getAppPath(), path.join('resources', 'extension', 'desktop-mcp.js')) ??
+    searchUp(app.getAppPath(), path.join('resources', 'extension', name)) ??
     searchUp(
       app.getAppPath(),
-      path.join('apps', 'desktop', 'resources', 'extension', 'desktop-mcp.js')
+      path.join('apps', 'desktop', 'resources', 'extension', name)
     ) ??
-    path.join(resourceDir(), 'extension', 'desktop-mcp.js')
+    path.join(resourceDir(), 'extension', name)
   )
 }
 
@@ -718,6 +719,7 @@ function subagentManager(): SubagentManager {
   if (!subagents) {
     subagents = new SubagentManager({
       userData: app.getPath('userData'),
+      piExtensions: () => [desktopExtensionPath('model-context.ts')].filter(existsSync),
       createOwnEngine: ({ id, tools, appendSystemPrompt, onEvent }) => new PropheyEngine({
         onStatus: () => {}, onEvent, onSettled: () => {},
         toolModulePath: coreToolsModule(), shellPath: realBashPath(), allowedTools: tools,
@@ -836,8 +838,11 @@ function serializeSubagent(record: SubagentRecord): Record<string, unknown> {
  * keep working when the user turns the built-in servers off.
  */
 function extensionArgs(): string[] {
-  const file = desktopExtensionPath()
-  return existsSync(file) ? ['--extension', file] : []
+  // Catalog corrections are independent of MCP and apply inside pi, not just its UI.
+  return ['model-context.ts', 'desktop-mcp.js'].flatMap((name) => {
+    const file = desktopExtensionPath(name)
+    return existsSync(file) ? ['--extension', file] : []
+  })
 }
 
 async function mcpLaunch(
@@ -1919,6 +1924,8 @@ function registerIpc(): void {
     await fs.mkdir(dir, { recursive: true })
     await shell.openPath(dir)
   })
+
+  handle('app:copy-image', (_event, dataUrl: unknown) => copyImageToClipboard(dataUrl))
 
   handle('app:open-external', async (_event, url: string) => {
     if (/^https?:\/\//i.test(url)) await shell.openExternal(url)

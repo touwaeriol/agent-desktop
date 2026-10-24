@@ -1,4 +1,5 @@
 import { updateJsonFile, writeJsonAtomic } from './storage'
+import { createContextProvider } from '../../resources/extension/model-context'
 import { promises as fs } from 'node:fs'
 import { randomUUID } from 'node:crypto'
 import path from 'node:path'
@@ -64,11 +65,15 @@ export function getRuntime(): Promise<ModelRuntime> {
   if (!runtimePromise) {
     const pending = (async () => {
       const sdk = await import('@earendil-works/pi-coding-agent')
-      return sdk.ModelRuntime.create({
+      const runtime = await sdk.ModelRuntime.create({
         authPath: authPath(),
         modelsPath: modelsPath(),
         refreshOnCreate: false
       })
+      // Correct the builtin catalog below user overrides, so every consumer (UI,
+      // execution, compaction, titles and subagents) sees the same window.
+      runtime.registerNativeProvider(await createContextProvider(authPath()))
+      return runtime
     })()
     runtimePromise = pending
     pending.catch(() => {

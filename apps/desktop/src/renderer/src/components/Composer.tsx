@@ -24,7 +24,7 @@ function contextLabel(value?: number): string {
   if (!value) return ''
   if (value >= 1_000_000) {
     const millions = value / 1_000_000
-    return `${Number.isInteger(millions) ? millions : millions.toFixed(1)}M`
+    return `${Number(millions.toFixed(2))}M`
   }
   return `${Math.round(value / 1000)}K`
 }
@@ -538,7 +538,7 @@ export function Composer({
               ? '正在压缩上下文，结束后会自动继续…'
               : streaming
                 ? capabilities?.steer
-                  ? '继续输入，Enter 引导（立即插入当前回合），Ctrl+Enter 排队'
+                  ? '继续输入，Enter 引导'
                   : '继续输入，Enter 排队'
                 : '发送消息…（可直接粘贴图片）'
           }
@@ -851,11 +851,6 @@ export function Composer({
             )}
           </div>
         </div>
-      </div>
-      <div className="composer-hint">
-        {streaming
-          ? 'Enter 引导（立即插入当前回合） · Shift+Enter 换行 · Ctrl+Enter 排队 · 粘贴或拖入图片'
-          : 'Enter 发送 · Shift+Enter 换行 · Ctrl+Enter 发送 · 粘贴或拖入图片'}
       </div>
 
       {preview && (

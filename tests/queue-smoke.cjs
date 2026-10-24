@@ -12,12 +12,27 @@ module.exports = async function queueSmoke(evaluate, until, window) {
   await new Promise((resolve) => setTimeout(resolve, 300))
 
   const placeholder = await evaluate('document.querySelector(".composer textarea").placeholder')
-  assert.match(placeholder, /Enter 引导/, 'Enter steers while a run is streaming')
-  assert.match(placeholder, /Ctrl\+Enter 排队/, 'Ctrl+Enter queues instead')
-  assert.match(
-    await evaluate('document.querySelector(".composer-hint").textContent'),
-    /Ctrl\+Enter 排队/
-  )
+  assert.equal(placeholder, '继续输入，Enter 引导', 'streaming placeholder stays concise')
+  assert.equal(await evaluate('!!document.querySelector(".composer-hint")'), false,
+    'no duplicate keyboard-help row below the composer')
+
+  // Measure the removed row in the real DOM, with its former styles, then remove the fixture.
+  const space = await evaluate(`(() => {
+    const composer = document.querySelector('.composer')
+    const wrap = composer.parentElement
+    const after = wrap.getBoundingClientRect().height
+    const hint = document.createElement('div')
+    hint.style.cssText = 'max-width:860px;margin:6px auto 0;text-align:center;font-size:10.6px;color:var(--text-faint);user-select:none'
+    hint.textContent = 'Enter 引导（立即插入当前回合） · Shift+Enter 换行 · Ctrl+Enter 排队 · 粘贴或拖入图片'
+    composer.after(hint)
+    try {
+      return { before: wrap.getBoundingClientRect().height, after }
+    } finally {
+      hint.remove()
+    }
+  })()`)
+  assert.ok(space.before - space.after > 6, 'removing the help row saves its line height plus margin')
+  console.log('Composer footer space (px):', { ...space, saved: space.before - space.after })
 
   await evaluate(`
     (() => {
@@ -49,5 +64,6 @@ module.exports = async function queueSmoke(evaluate, until, window) {
   await evaluate('document.querySelector(".queue-item .queue-btn:last-child").click()')
   await until(() => evaluate('!document.querySelector(".queue-panel")'), 'queue cleared')
   window.webContents.send('pi:status', idle)
-  console.log('Composer passed: Enter steers, Ctrl+Enter queues, queue sits above the composer')
+  assert.equal(await evaluate('!!document.querySelector(".composer-hint")'), false)
+  console.log('Composer passed: concise placeholder, no duplicate footer, Ctrl+Enter queues above the composer')
 }

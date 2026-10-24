@@ -591,6 +591,7 @@ export interface PiBridge {
   listSessions(): Promise<SessionSummary[]>;
   openAgentDir(): Promise<void>;
   openExternal(url: string): Promise<void>;
+  copyImage(dataUrl: string): Promise<{ ok: boolean; error?: string }>;
   setTheme(theme: "dark" | "light"): Promise<void>;
   listModels(): Promise<ModelOption[]>;
   setModel(

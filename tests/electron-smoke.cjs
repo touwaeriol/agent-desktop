@@ -1,4 +1,4 @@
-const { app, BrowserWindow } = require('electron')
+const { app, BrowserWindow, ipcMain } = require('electron')
 const assert = require('node:assert/strict')
 const path = require('node:path')
 const root = process.env.PROPHEY_SMOKE_ROOT
@@ -7,6 +7,14 @@ app.setPath('userData', process.env.PROPHEY_SMOKE_DATA)
 app.setAppPath(desktop)
 // Exercise the real renderer without interrupting the user's desktop.
 BrowserWindow.prototype.show = function () {}
+// Session-history fixture only; real preload and image-copy IPC stay untouched.
+let imageCopySessionFixture
+const originalHandle = ipcMain.handle
+ipcMain.handle = function (channel, listener) {
+  return originalHandle.call(this, channel, channel === 'pi:get-messages'
+    ? (event, ...args) => imageCopySessionFixture ?? listener(event, ...args)
+    : listener)
+}
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms))
 async function until(probe, label) {
   for (let attempt = 0; attempt < 200; attempt++) {
@@ -101,6 +109,7 @@ app.on('browser-window-created', (_event, window) => {
       window.webContents.send('pi:status', state)
       await require('./ask-panel-smoke.cjs')(evaluate, until)
       await require('./session-switch-smoke.cjs')(evaluate, until, window)
+      await require('./image-copy-smoke.cjs')(evaluate, until, window, fixture => { imageCopySessionFixture = fixture })
       await require('./queue-smoke.cjs')(evaluate, until, window)
       await require('./session-title-smoke.cjs')(evaluate, until)
       const version = (await evaluate('window.pi.getUpdateSnapshot()')).currentVersion

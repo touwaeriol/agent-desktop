@@ -38,6 +38,24 @@ module.exports = async function checkProviderSettings(evaluate, until) {
   assert(!nav.includes('自定义服务商'))
   await until(() => evaluate('document.querySelectorAll(".provider-row").length > 0'), 'providers loaded')
 
+  // The real IPC and settings list must expose the corrected window, not just a relabelled 272K.
+  await input('.providers-toolbar input', 'openai')
+  await until(() => evaluate('Array.from(document.querySelectorAll(".provider-row code")).some(c => c.textContent === "openai")'), 'OpenAI provider')
+  await evaluate(`(() => {
+    const row = Array.from(document.querySelectorAll('.provider-row code'))
+      .find(c => c.textContent === 'openai').closest('.provider-row');
+    Array.from(row.querySelectorAll('button')).find(b => b.textContent.trim() === '模型').click();
+  })()`)
+  await until(() => evaluate('Array.from(document.querySelectorAll(".model-config-meta")).some(e => e.textContent.includes("gpt-6.1-sol"))'), 'OpenAI models')
+  const openaiModels = await evaluate('window.pi.listProviderModels("openai")')
+  const labels = await evaluate('Array.from(document.querySelectorAll(".model-config-meta"), e => e.textContent.trim())')
+  for (const id of ['gpt-6-astra', 'gpt-6-luna', 'gpt-6-sol', 'gpt-6.1-sol']) {
+    assert.equal(openaiModels.find(m => m.modelId === id).contextWindow, 1050000)
+    assert(labels.includes(id + ' · 1.05M'), 'exact million-token display for ' + id)
+  }
+  await click('.model-config-dialog button', '取消')
+  await input('.providers-toolbar input', '')
+
   // JSON failures must keep the editor and draft available to repair.
   await click('.providers-toolbar button', '高级 JSON')
   await editor()
