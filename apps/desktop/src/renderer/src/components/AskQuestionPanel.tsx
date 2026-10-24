@@ -16,8 +16,9 @@ function draftAnswered(draft: Draft): boolean {
   return draft.skipped || draft.selected.length > 0 || draft.other.trim().length > 0
 }
 
-function draftSummary(draft: Draft): string {
+function draftSummary(draft: Draft, secret = false): string {
   if (draft.skipped) return '已跳过'
+  if (secret) return draftAnswered(draft) ? '已填写' : ''
   const parts = [...draft.selected]
   if (draft.other.trim()) parts.push(draft.other.trim())
   return parts.join('、')
@@ -143,6 +144,7 @@ export function AskQuestionPanel({
             {index + 1} / {questions.length}
             {questions.length > 1 ? ` · 已填 ${answeredCount}` : ''}
             {queued > 0 ? ` · 还有 ${queued} 个排队` : ''}
+            {request.tool ? ` · ${request.tool}` : ''}
           </span>
         </div>
         {questions.length > 1 && (
@@ -154,7 +156,7 @@ export function AskQuestionPanel({
                   draftAnswered(drafts[position] ?? emptyDraft()) ? 'answered' : ''
                 }`}
                 onClick={() => setIndex(position)}
-                title={draftSummary(drafts[position] ?? emptyDraft()) || question.question}
+                title={draftSummary(drafts[position] ?? emptyDraft(), question.secret) || question.question}
               >
                 {position + 1}
               </button>
@@ -171,6 +173,7 @@ export function AskQuestionPanel({
           {current.header && <span className="ask-tag">{current.header}</span>}
           <span className="ask-question">{current.question}</span>
           {current.multiSelect && <span className="ask-multi">可多选</span>}
+          {current.secret && <span className="ask-multi">不会回显</span>}
         </div>
 
         {(current.options?.length ?? 0) > 0 && (
@@ -208,8 +211,9 @@ export function AskQuestionPanel({
           <input
             ref={inputRef}
             value={draft.other}
+            type={current.secret ? 'password' : 'text'}
             placeholder={current.options?.length ? '或直接输入答案' : '输入你的答案'}
-            spellCheck={false}
+            spellCheck={!current.secret}
             onChange={(event) => typeAnswer(event.target.value)}
             onKeyDown={(event) => {
               if (event.key === 'Enter') {

@@ -69,9 +69,9 @@ const { isSubagentRunning } = require(path.join(temp, 'subagents.cjs'))
 const session = (id, cwd) => ({ id, path: id, title: id, cwd, createdAt: 1, updatedAt: Date.now() })
 function groupOptions(group) {
   return {
-    sessions: [session('inside', 'C:/repo'), session('outside', 'C:/elsewhere'), session('pinned', 'C:/repo')],
+    sessions: [{ ...session('inside', 'C:/repo'), projectId: 'p' }, session('outside', 'C:/elsewhere'), { ...session('pinned', 'C:/repo'), projectId: 'p' }],
     pinned: ['pinned'], archived: new Set(), projectStatus: {}, projectQueries: {}, cwd: 'C:/repo',
-    activeProject: { id: 'p', name: 'Project', roots: [{ path: 'c:/REPO', primary: true }] },
+    activeProject: { id: 'p', name: 'Project', roots: [{ path: 'c:/REPO', primary: true }, { path: 'C:/second' }] },
     prefs: { environment: 'all', group, sort: 'activity', showEmptyGroups: true, onlyActiveProject: true }
   }
 }
@@ -85,13 +85,13 @@ test('renderer: empty groups respect the active project and do not duplicate mer
   options.sessions = []
   assert.deepEqual(buildSessionGroups(options).map(g => g.key), ['project:p'])
   options.cwd = 'C:/elsewhere'
-  assert.deepEqual(buildSessionGroups(options), [])
+  assert.deepEqual(buildSessionGroups(options).map(g => g.key), ['project:p'])
   options.prefs.onlyActiveProject = false
-  assert.deepEqual(buildSessionGroups(options).map(g => g.key), ['folder:C:/elsewhere'])
+  assert.deepEqual(buildSessionGroups(options).map(g => g.key), ['project:p', 'folder:c:/elsewhere'])
 })
 test('renderer: archive and text filters preserve total counts and do not mutate input', () => {
   const options = groupOptions('folder')
-  options.sessions.push(session('archived', 'C:/repo'))
+  options.sessions.push({ ...session('archived', 'C:/repo'), projectId: 'p' })
   options.archived.add('archived')
   options.projectStatus['project:p'] = 'archived'
   options.projectQueries['project:p'] = 'arch'
@@ -99,6 +99,35 @@ test('renderer: archive and text filters preserve total counts and do not mutate
   assert.deepEqual(groups[0].sessions.map(s => s.id), ['archived'])
   assert.equal(groups[0].total, 2)
   assert.equal(options.sessions.length, 4)
+})
+
+test('renderer: project ownership does not absorb standalone sessions or another project sharing the same directory', () => {
+  const options = groupOptions('folder')
+  options.prefs.onlyActiveProject = false
+  options.prefs.showEmptyGroups = false
+  options.projects = [options.activeProject, { id: 'q', name: 'Second', roots: [{ path: 'C:/repo' }, { path: 'C:/other' }] }]
+  options.sessions = [
+    { ...session('one', 'C:/repo'), projectId: 'p' },
+    { ...session('two', 'C:/repo'), projectId: 'q' },
+    session('standalone', 'C:/repo')
+  ]
+  const groups = buildSessionGroups(options)
+  assert.deepEqual(groups.find(g => g.key === 'project:p').sessions.map(s => s.id), ['one'])
+  assert.deepEqual(groups.find(g => g.key === 'project:q').sessions.map(s => s.id), ['two'])
+  assert.deepEqual(groups.find(g => g.key === 'folder:c:/repo').sessions.map(s => s.id), ['standalone'])
+})
+
+test('renderer: legacy single-directory projects stay under sessions and Windows path aliases merge', () => {
+  const options = groupOptions('folder')
+  options.prefs.onlyActiveProject = false
+  options.prefs.showEmptyGroups = false
+  options.activeProject = undefined
+  options.projects = [{ id: 'legacy', name: 'Old', roots: [{ path: 'C:/repo' }] }]
+  options.sessions = [{ ...session('one', 'C:/repo'), projectId: 'legacy' }, session('two', 'c:\\REPO\\')]
+  const groups = buildSessionGroups(options)
+  assert.equal(groups.length, 1)
+  assert.equal(groups[0].rootCount, undefined)
+  assert.equal(groups[0].sessions.length, 2)
 })
 test('renderer: failed saves preserve draft, release busy and report result or transport error', async () => {
   for (const task of [async () => ({ ok: false, error: 'rejected' }), async () => { throw new Error('offline') }]) {

@@ -62,14 +62,14 @@ async function rpc(
 }
 
 /** List the tools of one endpoint, or an empty list when it is not answering. */
-async function listTools(endpoint: McpEndpoint): Promise<McpTool[]> {
+async function listTools(endpoint: McpEndpoint, signal?: AbortSignal): Promise<McpTool[]> {
   try {
     await rpc(endpoint, 'initialize', {
       protocolVersion: '2025-06-18',
       capabilities: {},
       clientInfo: { name: 'prophey-engine', version: '0.1.0' }
-    })
-    const result = (await rpc(endpoint, 'tools/list')) as { tools?: McpTool[] } | undefined
+    }, 15_000, signal)
+    const result = (await rpc(endpoint, 'tools/list', {}, 15_000, signal)) as { tools?: McpTool[] } | undefined
     return result?.tools ?? []
   } catch {
     return []
@@ -94,10 +94,11 @@ function toContent(result: unknown): Array<{ type: string; text?: string }> {
  * Load every configured endpoint as tools named `mcp__<server>__<tool>`, the same names pi gives
  * them, so a prompt that mentions a tool keeps working when the engine changes.
  */
-export async function loadMcpTools(endpoints: McpEndpoint[]): Promise<CoreTool[]> {
+export async function loadMcpTools(endpoints: McpEndpoint[], signal?: AbortSignal): Promise<CoreTool[]> {
   const tools: CoreTool[] = []
-  for (const endpoint of endpoints) {
-    const listed = await listTools(endpoint)
+  const discovered = await Promise.all(endpoints.map(async endpoint => ({ endpoint, listed: await listTools(endpoint, signal) })))
+  signal?.throwIfAborted()
+  for (const { endpoint, listed } of discovered) {
     for (const tool of listed) {
       // No `mcp__` prefix: that name exists because pi has to namespace MCP tools. We own the
       // loop, so the server is already part of the name (`codegraph__git__codegraph_search`).

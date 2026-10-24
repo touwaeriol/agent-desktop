@@ -1,0 +1,60 @@
+const assert = require('node:assert/strict')
+const http = require('node:http')
+
+module.exports = async function checkSessionTitles(evaluate, until) {
+  const requests = []
+  let releaseFirst
+  const server = http.createServer((req, res) => {
+    let raw = ''
+    req.on('data', chunk => { raw += chunk })
+    req.on('end', () => {
+      const body = JSON.parse(raw)
+      requests.push(body)
+      const metadata = body.messages.some(m => m.role === 'system' && JSON.stringify(m.content).includes('会话标题'))
+      const first = JSON.stringify(body.messages).includes('FIRST_TITLE_TEST')
+      const reply = () => {
+        const text = metadata ? first ? '第一个会话标题' : '第二个会话标题' : '普通工作回复'
+        res.writeHead(200, { 'content-type': 'text/event-stream' })
+        res.write('data: ' + JSON.stringify({ id: 'title-proof', object: 'chat.completion.chunk', created: 1, model: 'title-proof', choices: [{ index: 0, delta: { role: 'assistant', content: text }, finish_reason: null }] }) + '\n\n')
+        res.write('data: ' + JSON.stringify({ id: 'title-proof', choices: [{ index: 0, delta: {}, finish_reason: 'stop' }], usage: { prompt_tokens: 8, completion_tokens: 8, total_tokens: 16 } }) + '\n\n')
+        res.end('data: [DONE]\n\n')
+      }
+      if (metadata && first) releaseFirst = reply
+      else reply()
+    })
+  })
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+  try {
+    const models = { providers: { 'title-proof': {
+      api: 'openai-completions', baseUrl: `http://127.0.0.1:${server.address().port}/v1`, apiKey: 'local-fixture',
+      models: [{ id: 'title-proof', contextWindow: 32000, maxTokens: 2048, reasoning: false }]
+    } } }
+    assert.equal((await evaluate('window.pi.saveModelsJson(' + JSON.stringify(JSON.stringify(models)) + ')')).ok, true)
+    await evaluate('window.pi.newSession()')
+    assert.equal((await evaluate('window.pi.prompt("FIRST_TITLE_TEST 优化列表")')).ok, true)
+    await until(() => !!releaseFirst, 'independent title request')
+    const first = await evaluate('window.pi.getStatus()')
+    await evaluate('window.pi.newSession()')
+    assert.equal((await evaluate('window.pi.prompt("SECOND_TITLE_TEST 处理登录")')).ok, true)
+    const second = await evaluate('window.pi.getStatus()')
+    await until(() => evaluate('window.pi.listSessions().then(rows => rows.some(r => r.title === "第二个会话标题"))'), 'second title')
+    releaseFirst()
+    await until(() => evaluate('window.pi.listSessions().then(rows => rows.some(r => r.title === "第一个会话标题"))'), 'late first title')
+    const rows = await evaluate('window.pi.listSessions()')
+    assert.equal(rows.find(r => r.path === first.sessionKey).title, '第一个会话标题')
+    assert.equal(rows.find(r => r.path === second.sessionKey).title, '第二个会话标题')
+    assert.equal((await evaluate('window.pi.getStatus()')).sessionName, '第二个会话标题')
+    await evaluate('window.pi.prompt("FOLLOWUP 继续")')
+    const titleRequests = requests.filter(r => r.messages.some(m => m.role === 'system' && JSON.stringify(m.content).includes('会话标题')))
+    assert.equal(titleRequests.length, 2, 'one title request per session, never on follow-ups')
+    for (const request of titleRequests) {
+      assert.equal(request.messages.length, 2)
+      assert(!request.tools?.length)
+    }
+    assert(!JSON.stringify(await evaluate('window.pi.getMessages()')).includes('第二个会话标题'))
+    console.log('Session titles passed: isolated requests, once per first prompt, late results stay with their session')
+  } finally {
+    server.closeAllConnections()
+    await new Promise(resolve => server.close(resolve))
+  }
+}

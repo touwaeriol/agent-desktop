@@ -173,6 +173,8 @@ function normalizeQuestions(raw: unknown): AskQuestion[] {
         ? { header: value.header.trim() }
         : {}),
       ...(value.multiSelect === true ? { multiSelect: true } : {}),
+      // Confidential answers (Codex `isSecret`) must stay masked in the panel.
+      ...(value.secret === true ? { secret: true } : {}),
       ...(options.length > 0 ? { options } : {})
     })
   }

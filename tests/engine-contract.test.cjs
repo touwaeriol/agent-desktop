@@ -6,7 +6,7 @@ const path = require('node:path')
 const esbuild = require('esbuild')
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'prophey-engine-tests-'))
 const root = path.resolve(__dirname, '..')
-const sources = ['shared/engine', 'main/session-store', 'main/agent/codex-engine', 'main/agent/claude-engine', 'main/agent/json-rpc-process']
+const sources = ['shared/engine', 'main/session-store', 'main/agent/codex-engine', 'main/agent/claude-engine', 'main/agent/json-rpc-process', 'main/agent/switch-guard']
 for (const file of sources) esbuild.buildSync({ entryPoints: [path.join(root, 'apps/desktop/src', file + '.ts')], outfile: path.join(temp, path.basename(file) + '.cjs'), bundle: true, platform: 'node', format: 'cjs', packages: 'external' })
 const fakeProvider=path.join(temp,'provider.mjs')
 fs.writeFileSync(fakeProvider,'export async function getRuntime(){return {}}; export async function listModelChoices(){return []}')
@@ -178,6 +178,7 @@ test('Prophey: stopping cancels the current request before accepting another tur
  const e=new PropheyEngine(callbacks());e.model={id:'mock',provider:'mock',api:'mock',contextWindow:1000};e.tools=[];e.setStatus({phase:'ready'})
  e.streamRoundWithRetry=async()=>new Promise(resolve=>e.controller.signal.addEventListener('abort',()=>resolve({ok:false,error:'cancelled'}),{once:true}))
  const pending=e.prompt('hello');await new Promise(r=>setImmediate(r));assert(e.busy())
+ await assert.rejects(e.setModel('mock','other'), /当前回合结束/)
  await e.abort();assert.equal((await pending).ok,false);assert.equal(e.busy(),false)
  e.streamRoundWithRetry=async()=>({ok:true,message:{role:'assistant',content:[]}})
  assert.equal((await e.prompt('next')).ok,true)
@@ -245,4 +246,220 @@ test('Claude: native tools and configured MCPs survive retired desktop tool sett
     engine.stop()
     delete globalThis.__claudeToolPolicyOptions
   }
+})
+
+test('Codex: the native question tool is switched on per launch, not in the user config', async () => {
+  const { codexQuestionArgs } = require(path.join(temp, 'codex-engine.cjs'))
+  assert.deepEqual(codexQuestionArgs(false), [])
+  assert.deepEqual(codexQuestionArgs(true), [
+    '-c', 'tools.experimental_request_user_input.enabled=true',
+    '-c', 'features.default_mode_request_user_input=true'
+  ])
+  for (const [enabled, extra] of [[true, 4], [false, 0]]) {
+    const start = [], requests = []
+    const engine = new CodexEngine({ ...callbacks(), binary: 'unused', questions: () => enabled })
+    engine.rpc.start = (command, args) => start.push(args)
+    engine.rpc.request = async (method, params) => {
+      requests.push({ method, params })
+      if (method === 'model/list') return { data: [] }
+      if (method === 'thread/start') return { thread: { id: 'thread' }, model: 'gpt-test' }
+      if (method === 'thread/items/list') return { data: [] }
+      return {}
+    }
+    try {
+      await engine.start(temp)
+      assert.deepEqual(start[0].slice(0, 3), ['app-server', '--listen', 'stdio://'])
+      assert.equal(start[0].length - 3, extra, enabled ? 'flags reach the spawned server' : 'no flags when disabled')
+      const initialize = requests.find((entry) => entry.method === 'initialize')
+      assert.equal(initialize.params.capabilities.experimentalApi, false, 'no blanket experimental opt-in')
+      assert.equal(initialize.params.clientInfo.name, 'prophey')
+    } finally {
+      engine.stop()
+    }
+  }
+})
+
+test('Codex: request_user_input answers come back keyed by Codex question id', async () => {
+  const asked = []
+  const engine = new CodexEngine({
+    ...callbacks(),
+    binary: 'unused',
+    ask: async (questions, tool) => {
+      asked.push({ questions, tool })
+      return {
+        cancelled: false,
+        answers: [
+          { question: '用哪种语言？', selected: ['中文'], other: '' },
+          { question: '访问令牌？', selected: [], other: 'sk-test' }
+        ]
+      }
+    }
+  })
+  engine.threadId = 'thread'
+  const params = {
+    threadId: 'thread',
+    turnId: 'turn',
+    itemId: 'item',
+    isBlocking: true,
+    autoResolutionMs: null,
+    questions: [
+      {
+        id: 'output_language', header: '输出语言', question: '用哪种语言？', isOther: true, isSecret: false,
+        options: [{ label: '中文', description: '用中文' }, { label: '英文' }]
+      },
+      { id: 'token', header: '令牌', question: '访问令牌？', isOther: false, isSecret: true, options: null }
+    ]
+  }
+  const result = await engine.rpc.requested('item/tool/requestUserInput', params)
+  assert.equal(asked.length, 1)
+  assert.equal(asked[0].tool, 'Codex')
+  assert.deepEqual(asked[0].questions[0], {
+    question: '用哪种语言？',
+    header: '输出语言',
+    options: [{ label: '中文', description: '用中文' }, { label: '英文', description: undefined }],
+    secret: false
+  })
+  assert.equal(asked[0].questions[1].secret, true, 'isSecret keeps the answer out of the UI summary')
+  assert.equal(asked[0].questions[1].options, undefined)
+  assert.deepEqual(result, {
+    answers: { output_language: { answers: ['中文'] }, token: { answers: ['sk-test'] } }
+  })
+
+  const cancelled = new CodexEngine({ ...callbacks(), binary: 'unused', ask: async () => ({ cancelled: true }) })
+  cancelled.threadId = 'thread'
+  assert.deepEqual(
+    await cancelled.rpc.requested('item/tool/requestUserInput', { threadId: 'thread', questions: [{ id: 'q', question: 'q' }] }),
+    { answers: { q: { answers: [] } } }
+  )
+  await assert.rejects(
+    cancelled.rpc.requested('item/tool/requestUserInput', { threadId: 'other', questions: [{ id: 'q', question: 'q' }] }),
+    /不属于当前会话/
+  )
+  await assert.rejects(
+    cancelled.rpc.requested('item/tool/requestUserInput', { threadId: 'thread', questions: [] }),
+    /没有内容/
+  )
+})
+
+test('Codex: permission requests and unknown methods keep their schema shapes', async () => {
+  const allow = new CodexEngine({
+    ...callbacks(), binary: 'unused',
+    ask: async () => ({ cancelled: false, answers: [{ question: 'x', selected: ['允许本次'] }] })
+  })
+  allow.threadId = 'thread'
+  assert.deepEqual(
+    await allow.rpc.requested('item/permissions/requestApproval', {
+      threadId: 'thread', permissions: { network: { enabled: true } }
+    }),
+    { permissions: { network: { enabled: true } }, scope: 'turn' }
+  )
+  const deny = new CodexEngine({ ...callbacks(), binary: 'unused', ask: async () => ({ cancelled: true }) })
+  deny.threadId = 'thread'
+  assert.deepEqual(
+    await deny.rpc.requested('item/permissions/requestApproval', { threadId: 'thread', permissions: {} }),
+    { permissions: {}, scope: 'turn' }
+  )
+  const command = new CodexEngine({ ...callbacks(), binary: 'unused' })
+  command.threadId = 'thread'
+  assert.deepEqual(
+    await command.rpc.requested('item/commandExecution/requestApproval', { threadId: 'thread', command: 'ls' }),
+    { decision: 'decline' },
+    'no interactive surface means no approval'
+  )
+  assert.deepEqual(
+    await deny.rpc.requested('item/tool/call', { threadId: 'thread', tool: 'desktop_echo' }),
+    { success: false, contentItems: [{ type: 'inputText', text: '桌面端没有注册动态工具 desktop_echo' }] }
+  )
+  await assert.rejects(deny.rpc.requested('elicitation/create', { threadId: 'thread' }), /尚不支持/)
+})
+
+test('Claude: AskUserQuestion is answered through the desktop queue', async () => {
+  const sdk = path.join(temp, 'claude-ask-sdk.mjs')
+  fs.writeFileSync(sdk, `
+    export function query({ options }) {
+      globalThis.__claudeAskOptions = options;
+      let close;
+      const closed = new Promise(resolve => { close = resolve });
+      return {
+        supportedModels: async () => [], supportedCommands: async () => [], close,
+        async *[Symbol.asyncIterator]() { await closed }
+      };
+    }
+  `)
+  const source = fs.readFileSync(path.join(root, 'apps/desktop/src/main/agent/claude-engine.ts'), 'utf8')
+    .replaceAll("await import('@anthropic-ai/claude-agent-sdk')", 'await import(' + JSON.stringify(sdk.replaceAll('\\', '/')) + ')')
+  const output = path.join(temp, 'claude-ask.cjs')
+  esbuild.buildSync({ stdin: { contents: source, loader: 'ts', resolveDir: path.join(root, 'apps/desktop/src/main/agent') }, outfile: output, bundle: true, platform: 'node', format: 'cjs', packages: 'external' })
+  const { ClaudeCodeEngine } = require(output)
+  const asked = []
+  const engine = new ClaudeCodeEngine({
+    ...callbacks(),
+    binary: 'unused',
+    ask: async (questions, tool) => {
+      asked.push({ questions, tool })
+      return { cancelled: false, answers: [{ question: '用哪种语言？', selected: ['中文'], other: '并附英文' }] }
+    }
+  })
+  try {
+    await engine.start(temp)
+    const canUseTool = globalThis.__claudeAskOptions.canUseTool
+    const input = {
+      questions: [{ question: '用哪种语言？', header: '语言', options: [{ label: '中文' }, { label: '英文' }], multiSelect: false }]
+    }
+    assert.deepEqual(await canUseTool('AskUserQuestion', input), {
+      behavior: 'allow',
+      updatedInput: { ...input, answers: { '用哪种语言？': '中文, 并附英文' } }
+    })
+    assert.equal(asked[0].tool, 'AskUserQuestion')
+    assert.deepEqual(asked[0].questions, input.questions, 'Claude questions go to the panel unchanged')
+    assert.deepEqual(await canUseTool('Bash', { command: 'ls' }), { behavior: 'deny', message: '用户拒绝或取消' })
+    assert.deepEqual(asked[1].questions, [{
+      question: '允许 Claude Code 执行 Bash？\n{"command":"ls"}',
+      options: [{ label: '拒绝' }, { label: '允许本次' }]
+    }])
+  } finally {
+    engine.stop()
+    delete globalThis.__claudeAskOptions
+  }
+  const cancelling = new ClaudeCodeEngine({ ...callbacks(), binary: 'unused', ask: async () => ({ cancelled: true, reason: '窗口已关闭' }) })
+  try {
+    await cancelling.start(temp)
+    assert.deepEqual(
+      await globalThis.__claudeAskOptions.canUseTool('AskUserQuestion', { questions: [{ question: 'q' }] }),
+      { behavior: 'deny', message: '用户已取消' }
+    )
+  } finally {
+    cancelling.stop()
+    delete globalThis.__claudeAskOptions
+  }
+})
+
+test('session switches stop a running turn only with consent', async () => {
+  const { idleBeforeSwitch } = require(path.join(temp, 'switch-guard.cjs'))
+  const calls = []
+  const engine = (busy, abortFails = false) => ({
+    busy: () => busy,
+    abort: async () => {
+      calls.push('abort')
+      if (abortFails) throw new Error('abort failed')
+    },
+    stop: () => calls.push('stop'),
+    waitForSettle: async (ms) => {
+      calls.push('settle:' + ms)
+      return true
+    }
+  })
+  // Idle: a switch needs no permission and no engine call.
+  await idleBeforeSwitch(engine(false), false)
+  assert.deepEqual(calls, [])
+  // Busy without consent: refuse, and do not touch the run.
+  await assert.rejects(idleBeforeSwitch(engine(true), false), /停止它才能切换会话/)
+  assert.deepEqual(calls, [])
+  // With consent: abort, then wait for the turn to settle.
+  await idleBeforeSwitch(engine(true), true)
+  assert.deepEqual(calls, ['abort', 'settle:3000'])
+  // An engine that refuses to abort is stopped so the switch cannot hang.
+  calls.length = 0
+  await idleBeforeSwitch(engine(true, true), true)
+  assert.deepEqual(calls, ['abort', 'stop'])
 })

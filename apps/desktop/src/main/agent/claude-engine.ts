@@ -1,4 +1,3 @@
-import { toClaudeEntries, type HistoryMessage } from './history'
 import type { ImportedHistoryStore } from '../imported-history-store'
 import type { EngineStartOptions } from './engine'
 import { randomUUID } from 'node:crypto'
@@ -203,18 +202,7 @@ export class ClaudeCodeEngine extends NativeEngine {
       sessionStore: sessionId && store && await store.owns(sessionId) ? store : undefined
     }
   }
-  async importHistory(messages: HistoryMessage[]): Promise<void> {
-    if (this.busy()) throw new Error('请先停止当前回合')
-    const store = this.options.historyStore
-    if (!store) throw new Error('历史存储未配置')
-    const id = randomUUID()
-    await store.append({ sessionId: id, projectKey: this.roots.primary }, toClaudeEntries(messages, id, this.roots.primary))
-    this.sessionId = id
-    this.transcript = []
-    this.usage = {}
-    this.setStatus({ model: undefined, thinkingLevel: undefined, sessionName: undefined })
-    await this.connect()
-  }
+
   private async readHistory(): Promise<void> {
     if (!this.sessionId) {
       this.transcript = []
@@ -266,6 +254,7 @@ export class ClaudeCodeEngine extends NativeEngine {
   }
   async setModel(_provider: string, model: string): Promise<PiModel> {
     if (!this.query) throw new Error('Claude Code 未连接')
+    if (!this.modelCatalog.some(row => row.value === model)) throw new Error('Claude Code 当前可用模型中没有 ' + model)
     await this.query.setModel(model)
     const info = {
       provider: 'claude-code',

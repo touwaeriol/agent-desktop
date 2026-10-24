@@ -35,9 +35,20 @@ npm run typecheck    # node + web 两个 tsconfig 分别检查
 - **新增或修改的模型必须填 `contextWindow`**（`ProviderEditor` 保存时校验）。缺了它会影响自动压缩与用量显示；只修改预置服务商地址时不写空模型列表，继续沿用预置模型目录。
 - 区域/订阅版本是 pi 的**独立 provider id**，不要合并：`moonshotai-cn`/`moonshotai`（Kimi 国内/海外）、`kimi-coding`（Kimi 订阅）、`minimax-cn`/`minimax`、`zai`/`zai-coding-cn`（Z.AI 海外/国内订阅）、`google`（AI Studio）/`google-vertex`。设置页用 `PROVIDER_NOTES` 给这些 id 加中文说明，而不是改名字或做映射。
 - 模型切换：输入条模型 chip 打开列表，数据来自 RPC `get_available_models`（只含已配置凭据的服务商），选择后调用 `set_model` 并广播新状态；不要再用 `cycle_model` 盲切。
-- 同一会话内跨服务商切换是 pi 原生能力：`set_model` 只要求新服务商有凭据，会向会话追加 `model_change` 记录，历史保持不变，下一条 assistant 消息记录新的 `provider/model`。恢复会话时 pi 用会话里最后一个 `model_change` / assistant 消息恢复模型（`sdk.js` 的 `getBranchSelection` + `hasConfiguredAuth`）；凭据缺失才回退默认模型并给出 “Could not restore model …”。切换的代价是 prompt cache 归零、换到窗口更小的模型会触发自动压缩；没有 provider 签名的 thinking 块在发给 Anthropic 时会被降级成普通文本（`pi-ai/dist/api/anthropic-messages.js`）。
+- 同一会话内跨服务商切换是 pi 原生能力：`set_model` 只要求新服务商有凭据，会向会话追加 `model_change` 记录，历史保持不变，下一条 assistant 消息记录新的 `provider/model`。恢复会话时 pi 用会话里最后一个 `model_change` / assistant 消息恢复模型（`sdk.js` 的 `getBranchSelection` + `hasConfiguredAuth`）；凭据缺失才回退默认模型并给出 “Could not restore model …”。切换的代价是 prompt cache 归零、换到窗口更小的模型会触发自动压缩；当前 SDK 会在跨模型请求中过滤其他模型的 thinking/私有签名，并由目标协议适配器处理工具 ID（`pi-ai/dist/api/transform-messages.js`）。
 
 ## Theme & sidebar
+
+- 新建会话优先打开 `WorkspacePicker` 的最近目录列表；侧栏、工具栏加号、Ctrl+N 和目录入口共用，只在点击“选择其他目录…”时调用系统选择器。最近 24 个目录保存到 config.recentRepos，按最近使用顺序去重（Windows 大小写/斜杠归一），并补充历史会话目录；同名不同路径同时显示。取消系统选择保留最近列表，失效目录明确提示，不清空当前会话。
+
+- 当前会话以 `status.sessionKey` 为准标记选中，比较 Windows 路径时归一斜杠和大小写。选中行使用底色与实心点；`runningSessionKeys` 汇总主回合、压缩、后台命令及子代理所属会话，执行中显示动态状态点；普通列表和置顶一致。
+- 首条请求额外启动一次独立标题请求（`session-title.ts`），只传用户首条提示词，禁用工具，不写 transcript，不阻塞主回合。优先用当前已配置模型，CLI 模型不在桌面目录时用已配置的默认/可用模型。无凭据或生成失败保留首句标题。结果按原 session file 写入，不能跟随当前激活会话漂移；`titleSource` 区分 prompt/generated/manual，生成结果不得覆盖手工标题。
+- `readSummary` 同时读取 pi 和内建 JSONL 格式；已有 `s_...` 文件名标题按首条真实用户消息修复。后台通知不能作为标题来源。
+
+- 侧栏区分“会话”和“项目”：单目录会话按目录分组，多目录项目按持久化的 `SessionSummary.projectId` 分组，不得仅因 cwd 相同就吸收到项目中。全部多目录项目都列出，不随当前激活项目切换而消失；历史单目录项目保留记录并按普通会话显示。
+- `SessionSummary` 携带 `projectId/additional`，从 SessionStore 透传。项目标题右侧 `+` 创建该项目的新会话；目录分组的 `+` 只创建单目录会话，清除之前项目的归属。项目选择器统一放进列表，不再使用顶部横向项目 chips。
+- 侧栏“新项目”的目录选择器：去重后只有一个目录时直接创建普通会话，不保存一个空的单目录项目。多目录时创建项目。“管理项目目录”使用中立的目录/默认工作目录文案。
+- 会话行固定约 30px，标题占主要宽度，时间与引擎移入 title 提示；选中态用底色，菜单在悬停/键盘聚焦时显示。置顶与列表共用滚动区，置顶会话不重复出现。`node scripts/test-sidebar.cjs` 用隔离 Electron 验证并输出亮暗主题截图至 `artifacts/sidebar/`。
 
 - 主题：`document.documentElement.dataset.theme` 为 `dark` / `light`，持久化在 localStorage `pi-desktop-theme`。样式全部走 `styles.css` 顶部的 CSS 变量；新增样式不要写死颜色，否则亮色主题会破。切换主题时同时调用 `app:set-theme` 同步 Electron 标题栏 overlay 颜色。
 - 侧栏顶部按参考产品（Claude 桌面端）排：`.sidebar-toolbar`（☰ 收起侧栏 / ▭ 视图选项 / ← → 会话前进后退）、`.sidebar-nav`（新建 / 自定义 / 更多，更多展开 `.nav-menu`）、`.pinned-block`（置顶会话，编号徽标）。
@@ -51,7 +62,9 @@ npm run typecheck    # node + web 两个 tsconfig 分别检查
 ## Conversation layout
 
 - assistant 消息不再有头像，正文直接铺开（文档式）；用户消息是右对齐气泡，图片在气泡上方（`.message.user` 为 column + align-items flex-end）。
-- 工具调用按“活动行”聚合：`Activity` 把同一轮的工具按 read/write/bash/search/other 汇总成 `读取 2 个文件 · 运行 1 条命令 ›`，点开才显示具体 `.tool-card`；运行中/失败才显示圆点。**一轮 = 一条 assistant 消息**：不要为了“看起来少一点”去跨消息合并思考块或工具，模型真的一次发多个调用时，聚合行自然会变长。
+- 工具调用按“活动行”聚合：`Activity` 把同一轮的工具按 read/write/bash/search/other 汇总成 `读取 2 个文件 · 运行 1 条命令 ›`，默认展开并显示每条工具的 `.tool-card` 标题、参数摘要和状态；完整参数与输出默认折叠，运行中也不自动展开；运行中/失败才显示圆点。**一轮 = 一条 assistant 消息**：不要为了“看起来少一点”去跨消息合并思考块或工具，模型真的一次发多个调用时，聚合行自然会变长。
+- **竖向节奏要紧凑（同屏信息量优先）**：`.conversation` 项间距 10px、上下 padding 14px；`.assistant-body` gap 6px；`.activity` 上边距 2px、`.activity-row` 内边距 2px（行高约 20px）；`.tool-head` 内边距 5px 9px（行高约 26px）、`.activity-body` gap 4px；`.markdown p` 下边距 8px。同一段 transcript 的 `scrollHeight` 从 623 降到 487（≈少 22%，同屏多两成内容），实测方式见下一条。改小之前先量：不要靠肉眼拍脑袋。
+- 量间距不要靠肉眼拍脑袋：写一个一次性脚本（种一份带工具调用的 transcript → 用真实构建打开 → 打印 `itemGaps` / `contentHeight` / `toolHeadHeight` 并截图到 `artifacts/`），对比改前改后的数字，量完删掉、不要提交。
 - 每轮结束的统计行（`.run-status`）来自 `App.tsx` 的 `run` 状态：`agent_start` 记开始时间、`tool_execution_start/end` 加减运行中数量、`agent_settled` 记结束时间并通过 `pi:session-stats`（RPC `get_session_stats`）取 `tokens.total`。1 秒定时器只为刷新计时，不要用它做别的。
 
 ## Session view, thinking, model allowlist
@@ -129,12 +142,12 @@ npm run typecheck    # node + web 两个 tsconfig 分别检查
 - `index.ts` 里的 `status` 只是**镜像**：引擎通过 `onStatus` 推过来，`statusSnapshot()` 再加应用自己的字段（压缩百分比、档位、仓库）。写状态必须走 `engine.setStatus()`，不要直接赋值。
 - 新增 pi 调用时用引擎的**语义方法**（`setModel` / `thinkingLevels` / `stats` / `messages` / `compact` / `newSession` / `switchSession` / `clone` / `abort` / `send`），**不要**再写 `engine.request('set_model')` 这种命令名：那等于把 pi 的命令表写进窗口，第二个引擎就接不进来。`PiEngine` 里这些方法只是薄封装，`index.ts` 已无一处 `engine.request(`。
 - `engine.prompt()` 承担「窗口和 pi 对忙碌判断不一致」的全部兜底（压缩中等空闲后重试、`already processing` 改发 `followUp` 并回 `queued: true`），所以它是唯一发送入口；不要在别处再包一层重试。
-- **Prophey 引擎（v1）**：`agent/prophey-engine.ts`，`config.engine = 'prophey'` 或设置 → 引擎切换（默认 `pi`）。它自己调 `ModelRuntime.streamSimple` 跑循环：一轮 = 一次模型回复，回复里有 `toolCall` 就执行、把 `toolResult` 塞回 transcript、再来一轮（上限 `MAX_ROUNDS = 16`），事件流和 pi 一致（`agent_start → message_start → message_update… → message_end → tool_execution_start/end → agent_end → agent_settled`）。transcript 只在内存里。
+- **Prophey 引擎（v1）**：`agent/prophey-engine.ts`，`config.engine = 'prophey'` 或设置 → 引擎切换（默认 `pi`）。它自己调 `ModelRuntime.streamSimple` 跑循环：一轮 = 一次模型回复，回复里有 `toolCall` 就执行、把 `toolResult` 塞回 transcript、再来一轮（持续执行到最终回复或用户停止，不按固定工具轮数静默退出），事件流和 pi 一致（`agent_start → message_start → message_update… → message_end → tool_execution_start/end → agent_end → agent_settled`）。transcript 只在内存里。
 - Prophey 引擎的工具**复用 pi 那边同一份实现**：`agent/core-tools.ts` 按绝对路径 import `packages/mcp-core/tools/workspace.mjs`（打包后在 `resources/mcp/tools/`），不复制第二份；工具调用的 `root` 语义、越界拒绝、Git Bash 路径全部一致。
 - **会话持久化**：`transcript-store.ts` 把 transcript 写 `userData/transcripts/<sessionId>.jsonl`（头行 + 每条消息一行，全量重写、原子 rename）；`start()` 时 resume 一次并把历史按 `message_end` 重放给窗口，所以刷新/重启后对话还在。sessionId 存在 `config.propheySessionId`，新建会话时轮换。
 - **重试**：`streamRoundWithRetry` 对瞬时错误（429/5xx/timeout/ECONNRESET/流提前关闭）退避重试 3 次，发 `auto_retry_start/end`；鉴权/参数错误不重试。
 - **压缩**：`compact()` 让模型把对话压成一段结构化中文摘要（目标/决定/改过的文件/未完成/继续所需事实），摘要作为唯一一条 user 消息替换 transcript；`shouldCompact()` 在**每轮开始前**按 `contextWindow × 比例` 判断是否自动压缩（配置来自窗口同一个阈值设置，不重启），并发 `compaction_start/end`。`stats()` 用 transcript 估算 token（~4 字符/token）填 `contextUsage`，所以用量环和自动压缩阈值在 Prophey 引擎下也工作。
-- **子代理**：Prophey 引擎把 `packages/mcp-core/tools/subagent.mjs` 也加载进来，但**不走 MCP**——`agent/core-tools.ts` 的 `bridgeContext()` 直接对桥接的 JSON API 发请求（同一个 token、同一批端点），所以子代理管理器只有一份实现。
+- **子代理按引擎归属执行**：Prophey 子代理创建独立 `PropheyEngine` 实例与 transcript，不启动 pi；pi 子代理仍用 `PiRpcClient`。CC/Codex 使用其原生子代理，不注入桌面子代理 MCP。记录/UI 可共用，执行后端不得跨引擎静默回退。
 - **`/btw` 也通了**：`clone()` 把 transcript 复制成新 id 并返回它的路径，`switchSession()` 按路径载入，所以 `pi:btw-start` 那套「记住原会话 → fork → 关闭时切回」的记账不用改就成立（实测：起侧边对话 → 追问 → 关闭后 sessionFile 回到原值）。
 - **MCP 也通了**：`agent/mcp-client.ts` 直接连桥接的 `/mcp/<key>`（streamable HTTP，`initialize` + `tools/list` + `tools/call`），工具名保持 `mcp__<server>__<tool>`，和 pi 完全一致。端点由 `mcpEndpointsFor(workspace)` 生成（同一套 `buildEngineTargets` / `buildEngineRegistrations`，所以多根仓库的 `codegraph__<repo>` 也在）。实测：Prophey 引擎下调 `mcp__codegraph__codegraph_search` 拿到了真实路径。
 - **速度档位（两家都支持）**：用 SDK 的 `onPayload`（改请求体）+ `transformHeaders`（加 beta 头）两个钩子，不要去 patch 全局 fetch。OpenAI 写 `service_tier: fast|ultrafast`；Anthropic 写 `speed: "fast"` 并把 `fast-mode-2026-02-01` 合并进已有的 `anthropic-beta`（不重复、不覆盖别的 beta）。档位由 `speed.resolveSpeedMode` 按 provider 判断，非目标服务商不会发。**注意：两家都没有在真实付费账号上验证过**（当前账号不支持该档位），只验证了生成的 payload/header 形状。
@@ -144,7 +157,7 @@ npm run typecheck    # node + web 两个 tsconfig 分别检查
 - **默认引擎是 Prophey**（`config.engine` 不设或不是 `'pi'` 时都走它）；`pi` 仍是可切换的另一套实现。
 - **MCP 工具名不带 `mcp__` 前缀**：那个前缀是 pi 为了给 MCP 工具分命名空间才有的，我们自己的循环不需要——工具名就是 `<server>__<tool>`（如 `codegraph__codegraph_search`、`codegraph__git__codegraph_search`）。pi 引擎那边仍然是 `mcp__…`，所以两边的工具名不同，提示词不要写死名字。
 - **系统提示词由引擎自己拼**（`systemPrompt()`）：角色、`<workspace>`（主目录 + 附加目录）、`<tools>`（root 语义、先读后改、run_bash 指目录）、多根时再加 `<project>`（绝对路径、每条 bash 是新 shell、按目录选工具集）。没有扩展钩子参与。
-- Prophey 引擎与 pi 的功能差距：**没有了**（Anthropic 快速模式已补齐）。切换引擎是热替换（`desktop:set-engine` 重建引擎对象并重启会话），不需要退出应用。
+- Prophey 引擎与 pi 的功能差距：**没有了**（Anthropic 快速模式已补齐）。只有尚未开始的空会话可以选择 agent；开始后的会话不得更换 agent。
 - 改名说明：产品名是 Prophey，但 `app.setName('agent-desktop')` **故意保留**——它决定 `%APPDATA%/agent-desktop`，改了等于丢失用户的配置、会话、项目和凭据。
 - 还没搬完的部分：`/btw` 的 clone/switch、压缩阈值同步、登录消息、MCP 启动参数装配（`prepare` 仍由 `index.ts` 提供，这是刻意的）。
 
@@ -159,9 +172,17 @@ npm run typecheck    # node + web 两个 tsconfig 分别检查
 - 自动压缩分 configurable/native/none。原生管理时隐藏桌面阈值，后端也拒绝覆写 pi 配置。未知上下文用量不能显示成 0%，原生自动压缩不能显示成已关闭。
 - 命令来源：桌面公共命令 + pi get_commands / Claude supportedCommands / Codex skills/list 与 review/start。未知命令明确拒绝，不作为普通提示词。重名时由公共适配入口处理。
 - 运行中引导只对支持 steer 的引擎开放；其他引擎排队。原生审批和提问复用 ask 回调与桌面问答队列，缺少 UI 时拒绝，不静默授权。
+- **原生提问（CC / Codex）走同一套 UI**：引擎侧只调 `ask(questions, tool)`（`native-engine.ts`），它走桥接的 `askEngine` → `ask:request` → `AskQuestionPanel`，和 pi/Prophey 的 `ask_user_question` 共用队列与面板，不另做一套弹窗。
+  - Claude Code：在 `canUseTool` 拦 `AskUserQuestion`，问题**原样**交给面板；回答回 `{ behavior: 'allow', updatedInput: { ...input, answers } }`（键=问题文本，值=选项 + 手输用 `, ` 拼接），取消回 `deny`。其他工具的审批也走这个回调（拒绝 / 允许本次）。
+  - Codex：处理服务端请求 `item/tool/requestUserInput`，问题映射成 `AskQuestion`（`header`、`options[].description`、`isSecret → secret`），回答回 `{ answers: { <question id>: { answers: [...] } } }`（形状照 `codex app-server generate-json-schema` 的 `ToolRequestUserInputResponse`）。另外 `item/permissions/requestApproval` 同意时把请求的权限原样回传（`scope: 'turn'`）、拒绝回 `{ permissions: {} }`；`item/tool/call` 明确回 `success: false`（桌面没注册动态工具）；其余方法抛「尚不支持的 Codex 请求」。
+  - **Codex 的 `request_user_input` 是实验工具，0.163 必须同时给两条启动覆盖**：`-c tools.experimental_request_user_input.enabled=true` 与 `-c features.default_mode_request_user_input=true`。少后者时工具在 Default 模式下被调用会报 `request_user_input is unavailable in Default mode`（只打到 stderr，模型自己改写回答，看起来像“没提问”）。用 `-c` 而不是写 `~/.codex/config.toml`；开关是 `config.json` 的 `codexRequestUserInput`（默认开，设置 → 通用 → 「原生提问」），因为它是启动参数，改了要重启 Codex。
+  - `initialize` 仍声明 `capabilities.experimentalApi = false`：实测 0.163 不打开也能收到 `item/tool/requestUserInput`，打开只会多收到其他实验方法（`elicitation/create` 等我们并不实现）。
+  - `isOther` 为 false 时 Codex 表示“请从选项里选”，但 `answers` 本身就是自由字符串，桌面面板继续保留手输（否则 `options: null` 的问题没法回答）；`isSecret` 会让面板用密码框并把手输内容显示成「已填写」。
+  - 回归方式（均需登录 + 系统代理，会跑一轮真实模型）：`node scripts/claude-question-probe.mjs` 与 `node scripts/codex-question-probe.mjs`。实测 CC 2.1.304：`AskUserQuestion` 进 ask 回调（header/options/multiSelect）→ 选「英文/详细」→ 模型回 “From here on I’ll answer in English and go into detail.”；Codex 0.163：`item/tool/requestUserInput` 进回调（header/options/isSecret）→ 选「英文/详细」→ 模型回 “I’ll respond in English with detailed explanations.”。
+  - 单测：`tests/engine-contract.test.cjs` 覆盖两条映射（含取消/拒绝/权限/动态工具分支）与 Codex 启动参数；面板由 `tests/ask-panel-smoke.cjs`（经 `npm run test:smoke`）向桥 `POST /ask` 验证：工具名、选项、多问题步骤、`secret` 密码框、回答回传与关闭取消。
 - Claude 初始化可发现模型/命令目录；实际默认模型在首轮 init 才报告。此前显示 CLI 默认模型，不误报未登录。
 - 本机 Codex 0.163.0 生成了 thread/items/list 类型但运行时返回 not supported；保留 thread/read/恢复响应历史的兼容路径，不能仅凭 schema 推断运行时能力。
-- 验证使用 npm test + npm run typecheck + npm run build。真实 CLI 验证使用系统代理，与主应用一致；不修改用户现有配置。
+- 验证使用 npm test + npm run typecheck + npm run build + npm run test:smoke。真实 CLI 验证使用系统代理，与主应用一致；不修改用户现有配置（手工探针：`scripts/claude-question-probe.mjs`、`scripts/codex-question-probe.mjs`）。
 
 ## 会话存储（我们自己的）
 
@@ -209,6 +230,9 @@ npm run typecheck    # node + web 两个 tsconfig 分别检查
 - 运行中改 MCP/子代理设置走 `reloadPiConfig()`：忙碌时只记 `configPending`，`agent_settled` 时用 `sessionArgs()` 重启 pi 把新配置装上（否则开关改了永远不生效）。
 - pi 非预期退出（扩展抛错、OOM）时 `rpc.on('exit')` 会在 1 秒后用同一会话重启，2 分钟内最多 3 次；`shuttingDown` 为真（`window-all-closed` / `before-quit`）时不再重启。
 - 扩展里的定时器**必须能容忍失效的 ctx**：`new_session` / `clone` / `switch_session` / `reload` 之后捕获的 `pi` 会变 stale，`pi.getAllTools()` 抛出的异常会直接杀掉整个 pi 进程（实测 `Timeout.reportTools` 崩溃导致「pi 未运行」）。`reportTools` 已包 try/catch。
+- **运行中切换会话要先问**：一次会话切换就是换引擎（新会话 = 新进程/transcript，打开别的会话会 dispose 当前引擎），所以运行中切换会把在跑的回合一起杀掉。现在由**窗口**征求同意：`App.tsx` 的 `confirmSwitch()` 在 `status.isStreaming || status.compacting` 时弹 `ConfirmDialog`（窗口自己的确认框，**不是** `AskQuestionPanel`——那是模型的），确认后才把 `{ stop: true }` 传给 IPC。四个入口都要走它：新建会话（侧栏 `+` / 仓库 `+` / Ctrl+N 选目录）、打开会话、切换项目、删除项目。**不要再让按钮直接撞上主进程的 busy 错误**——那正是用户看到的「新建会话为什么要停止当前会话？」。
+- 主进程侧：`activateConversation({ stop })` 调 `agent/switch-guard.ts` 的 `idleBeforeSwitch()`——`busy` 且没 `stop` 就报「当前回合仍在运行：停止它才能切换会话」；有 `stop` 则 `abort()` → `waitForSettle(3s)` → 仍不结束就 `stop()`。stop 分支必须**先**把 `switchingEngine` 置上再 abort，否则 `agent_settled` 触发 `configPending` 的重启会打到马上要被替换的引擎上；同时 `cancelPendingAsks('会话已切换')` 关掉可能开着的提问面板。
+- 验证：`tests/engine-contract.test.cjs` 的 `idleBeforeSwitch` 单测（空闲不调用引擎、无同意拒绝、同意 abort+settle、abort 失败退 stop）；`tests/session-switch-smoke.cjs`（`npm run test:smoke`）发一条 `isStreaming: true` 的状态后点仓库 `+`，断言弹出确认框、取消后会话不变、确认后进入新会话。
 
 ## Updates & packaging
 
@@ -222,9 +246,8 @@ npm run typecheck    # node + web 两个 tsconfig 分别检查
 
 ## Sessions & workspace
 
-- **配置来源（profile）**：`config.json.profile` 为 `shared`（默认，读写 pi CLI 的 `~/.pi/agent`）或 `desktop`（`%APPDATA%/agent-desktop/pi`）。`src/main/profile.ts` 是唯一知道路径的模块（`agentDir()/authPath()/modelsPath()/settingsPath()/mcpPath()/profileSessionDir()`），**不要在别处硬编码 `~/.pi/agent`**，否则切换 profile 会有一半代码还在写 CLI 的文件。隔离靠给 pi 子进程设 `PI_CODING_AGENT_DIR`（pi 用它覆盖配置目录），`startPi` 里只在隔离时设置；我们的 `ModelRuntime` 用显式 `authPath/modelsPath`，所以 `applyProfile()` 之后必须 `providers.invalidateCache()`。
-- 隔离 profile 下 session 目录也跟着走（`<profile>/sessions`），`sessionDirArgs()` 两种会话模式都显式传 `--session-dir`，避免隔离时把会话写进 CLI 的目录。
-- 「从 CLI 导入」(`providers.importFromCli`)：`auth.json` 是**合并**（pi 在新目录首次启动会自己建一个空的 `auth.json`，按「文件存在就跳过」会让用户永远没有凭据），其余文件只在目标不存在时复制。导入后 `resetRuntime()` + 重启 pi。
+- **配置固定共用**：默认直接读写 pi 的 `~/.pi/agent`，不再展示配置来源、独立配置或导入入口，历史 `config.profile` 字段不再生效。`profile.ts` 是路径唯一来源；显式 `PI_CODING_AGENT_DIR` 覆盖同时用于 SDK 和 pi 子进程，自动测试必须指向临时目录。
+- 默认 session 目录由同一个配置目录的 `sessions/` 派生；会话存储模式仍独立控制，原有历史文件不会迁移或删除。
 - 会话默认与 pi 共用 `~/.pi/agent/sessions`；desktop `config.json` 的 `sessionMode` 为 `isolated` 时，启动 pi 会附加 `--session-dir <userData>/sessions`，`listSessions` 也读该目录。两种模式都由 pi 写 JSONL，结构不变，可随时切回共用。
 - 工作目录是**会话级**的：点击其他项目的会话必须走 `pi:open-session`（以该会话 cwd + `--session <path>` 重启 pi），不能只用 `switch_session`，否则工具会在错误目录运行。设置页只读显示当前会话目录，不提供全局工作目录编辑。
 - `config.json` 保存 `{ cwd, sessionMode, mcp }`；`cwd` 只是下次启动/新建会话的默认目录。目录不存在时 `startPi` 会回退到 home，避免 spawn ENOENT。
@@ -279,7 +302,7 @@ npm run typecheck    # node + web 两个 tsconfig 分别检查
 
 ### 子代理（subagents）
 
-- **每个子代理是一个独立 `pi --mode rpc` 子进程**，由主进程 `apps/desktop/src/main/subagents.ts` 的 `SubagentManager` 管理；会话目录 `%APPDATA%/agent-desktop/subagents`，不写用户 `~/.pi/agent/sessions`，侧栏也看不到。默认加 `--no-mcp`：子代理不能反问用户（`ask_user_question`），也不能再起子代理。
+- **子代理后端**：`SubagentManager` 按记录的 `engine` 选择执行器。pi 用独立 RPC 进程；Prophey 用独立执行循环、工具上下文和 `subagents-prophey/` transcript。Prophey 子代理不提供嵌套子代理或用户提问工具；目前不支持桌面 MCP 和运行中的 steer/follow-up，调用时明确报错；thinking 根据选定模型的 SDK 能力校验并传入。
 - 主会话通过 8 个桌面工具驱动：`search_agents` / `list_models` / `start_subagent` / `get_subagent` / `wait_subagent` / `send_subagent_prompt` / `stop_subagent` / `get_subagent_changes`，实现在 `packages/mcp-core/tools/subagent.mjs`，只做参数校验 + 转发。
 - **工具返回默认是 Markdown**，JSON 只在显式传 `format: "json"` / `include` / `detail` 时返回；`ask_user_question` 也不再附带 JSON 副本。模型不需要解析结构，重复的键名纯属浪费 token。
 - `get_subagent` / `wait_subagent` **默认只返回最终结论 + 改动摘要**，运行中只给状态行；要看过程必须显式传 `include: ["messages"]`（带 `since` 游标）或 `["last"]`。
@@ -289,7 +312,7 @@ npm run typecheck    # node + web 两个 tsconfig 分别检查
 - `<agents>` 段由主进程渲染后经 `AGENT_DESKTOP_AGENTS_SECTION` 传给扩展，扩展在 `before_agent_start` 里注入 `sections.subagents`，**门控**：`pi.getActiveTools()` 里有 `mcp__desktop__start_subagent` 才注入，否则删除。
 - 这段除了预设清单，还有 `SUBAGENT_USAGE`（`agents.ts`）——**何时该用子代理**：自包含且会污染上下文的工作（大范围探索、长验证循环、diff 审查）、可并行的独立切片；不该用的（几次工具调用、依赖本会话上下文、需要用户决策、不可逆操作）。外加"子代理是瞎的，任务里必须写清目标/路径/约束/完成标准，不要写‘如前所述’"。`prompt` 与 `lazy` 两种暴露都带这段，只有 `hidden` 不带。实测：让模型把系统提示里这段原样贴出来，能完整复现。
 - 桥内部 API（JSON，给 mcp-core 用）：`GET /agents`、`GET /models`、`POST /subagents`、`GET /subagents/:id`、`POST /subagents/:id/{prompt,stop,wait}`、`GET /subagents/:id/changes`。令牌沿用桥的 Bearer。
-- **子代理结束怎么通知父代理**：工具调用返回后无法再回调，所以走"主进程 → 桥事件 → 父进程内的扩展"这条线。`SubagentManager` 的 `onSettle` 把一条三行通知交给 `bridge.publishEvent()`；扩展（`desktop-mcp.js` 的 `pumpEvents`）长轮询 `GET /events?wait=25000`（Bearer 令牌，最长等 60s，队列上限 20 条、10 分钟过期），收到后 `pi.sendMessage({ customType: 'subagent_notice' }, { triggerTurn })`。
+- **子代理完成通知**：按 parentSession 归属暂存，只在对应会话激活时投递。Prophey 直接接收带 `subagent_notice` 元数据的通知，支持唤醒新回合；pi 继续经桥事件与扩展接收。手动停止子代理不唤醒父代理。
 - 子代理的模型：`start_subagent` 的 `provider`/`model` 先经 `providers.resolveModelChoice()` 校验（`getModels()` 全量目录，**不受 `enabledModels` 白名单影响**，包含 models.json 自定义项）。pi 对未知模型 id 不会报错，只会跑出空结论，所以必须在启动前拦：`UNKNOWN_PROVIDER` / `UNKNOWN_MODEL`（附可用 id）/ `PROVIDER_NOT_CONFIGURED` / `AMBIGUOUS_MODEL`（只给 model 且多服务商都有）。只给 `model` 且唯一时可自动定位 provider。`thinking` 走 `--model <id>:<level>`，实测 `deepseek-v4-pro:high` 生效。
 - 记录里的 `model` 以子进程 `get_state` 返回的**实际模型**为准（`waitReady` 时抓取），所以"继承主会话"也能显示真实值，不是猜的。
 - `start_subagent` 的 `notify`：`wake`（background 默认，`triggerTurn: true`：空闲时立刻开一个回合，正在流式则作为 steer 插到当前回合之后）、`queue`（只追加一条 custom 消息，**不会**让父代理动起来，等下个回合才被读到）、`none`（sync 默认，只有 `get_subagent` / `wait_subagent` 能看到）。实测过：`queue` 只产生 `custom:subagent_notice`、`assistants` 不变；`wake` 会多一个 assistant 回合。
@@ -318,12 +341,32 @@ npm run typecheck    # node + web 两个 tsconfig 分别检查
 - 渲染层纯数据转换放在 `lib/conversation-events.ts` / `lib/session-groups.ts`，IPC、副作用和运行计时仍由 App 管理。
 - `npm run test:smoke` 在 build 后运行，使用临时数据和真实 Electron，不能接入用户现有 profile；测试成功必须出现明确完成标记。
 
-## 跨引擎切换
+## 引擎固定，模型可切换
 
-- `desktop:set-engine` 只更换当前会话的引擎：历史导入新的底层会话，但 `SessionRecord.id/key` 保持不变，侧栏不新增重复条目，置顶/归档/标题沿用原值；原始引擎文件保留用于恢复。`SessionSummary.engine` 显示每条会话的引擎。
-- `agent/history.ts` 是唯一清洗/编码层，`AgentEngine.importHistory` 是唯一导入入口。不能搬运 thinking/签名/系统指令，不能重新执行历史工具。
-- CC 使用应用自有 SessionStore；Codex 使用 thread/inject_items，并保存界面前缀（原生 turns 不保证显示注入记录）；pi 使用 SessionManager。
-- `pendingEngineSwitch` 包含原会话记录，必须在迁移成功并保存目标记录后才清除；失败及中途退出恢复原记录和引擎。会话记录写入串行，跨引擎绑定用严格写入，不能把落盘失败当成功。
-- `config.defaultEngine` 仅决定新建会话；`config.engine` 是当前激活引擎的兼容字段，`config.activeSession` 记录最后打开的会话 key。通用设置只设置“新会话默认引擎”，输入框的“会话引擎”只操作当前会话。
-- 所有会话导航（包括同一目录）都走 `activateConversation`，按目标记录选引擎；不要在渲染层按 cwd 分流到当前引擎的 switchSession。新建会话创建全新的引擎实例，不复用旧 transcript。`PiStatus.sessionKey` 用于侧栏选中，`sessionFile` 保持引擎私有引用。
-- 新增验证：build 后 `npm run test:handoff`；安装本机 CC/Codex 时再运行 `npm run test:handoff -- --native`。只使用隔离 profile 和本地模拟模型，不用用户历史作 fixture。
+- 会话开始后不能更换引擎。desktop:set-engine 仅为空会话选择引擎；已经删除 AgentEngine.importHistory、四种引擎的导入实现与新历史编码器，不再通过新会话搬运旧历史来换引擎。
+- 旧版本已导入的 CC/Codex 会话保留兼容读取及分支；agent/history.ts 仅用于这些旧数据，不得用于当前会话的模型切换。pendingEngineSwitch 仍是会话导航/空会话初始化失败时的恢复记录，并兼容旧配置。
+- config.defaultEngine 只影响新会话。已有会话导航按其保存的 engine 打开，不改变所属引擎。
+- 内建引擎允许回合之间切换已配置、已启用的服务商模型，原会话 id、transcript 和工具历史保持不变；运行中拒绝切换。思考等级重算为新模型支持的等级，窗口阈值按新模型检查。
+- OpenAI Responses / Chat Completions / Anthropic Messages 使用同一份 pi ModelRuntime.streamSimple 及其协议适配器。每条 assistant 保留原 api/provider/model，向适配器传递 transcript 深拷贝，禁止改写原始思考签名或工具 ID。
+- 当前 pi-ai SDK 在跨模型请求中丢弃其他模型的 thinking/加密签名，清除文本/工具思考签名，并按目标协议配对规范化 toolCallId；切回原模型可继续使用原始保存的合法签名。不要自行降级所有思考为正文。
+- tests/model-switch.test.cjs 通过真实 pi SDK 和本地 HTTP 模拟端点验证三种协议来回切换、图片、工具结果配对、私有思考过滤和恢复；未用真实付费账号做远程服务验收。
+- build 后 npm run test:handoff 验证会话锁定、新会话选择和旧状态恢复。
+
+- Prophey 的 workspace 工具目录和 shell 通过每次调用的 context 传递，禁止再写全局 AGENT_DESKTOP_ROOTS；多个子代理必须能同时操作各自的根。CLI MCP 仍支持环境变量入口。
+
+## Prophey 后台命令
+
+- 只有 Prophey 的 `run_bash` 接入 `agent/bash-tasks.ts`；pi、Claude Code、Codex 保持各自原生命令执行。Prophey 子代理复用这套自身能力，不启动 pi。
+- `run_in_background` 立即返回；普通命令默认等 1 秒（`yield_time_ms` 最多 10 秒），未结束则转后台。stdout/stderr 直接写 `userData/command-logs` 文件，不累积在内存或完整塞进 transcript。首次仅返回末尾 4000 bytes。
+- `read_bash_task` 用字节游标增量读取，默认 4000、最多 12000 bytes，可 `tail` / `status_only` / `wait_ms`（最多 60 秒）；`stop_bash_task` 停止进程树。完成只投递任务 id/状态/日志路径；最近 30 秒点过停止则不自动唤醒。
+- 后台命令属于创建它的引擎实例，停止/替换引擎或退出应用时终止，日志保留。普通回合结束不终止后台命令；切到 `/btw` 分支时不向错误会话投递通知。Windows 退出使用同步 killTree，不能只杀 Bash 外层。
+- 子代理结果默认限量；`get_subagent` 的 `include:["messages"]` 按 `since`（消息索引）和 `offset`（字符游标）分页读取，JSON 也不返回完整历史。
+
+## 会话锁定、模型与运行状态
+
+- 第一条真实消息开始后锁定目录和 agent，`PiStatus.sessionLocked` 由主进程判断；恢复历史仍锁定，空会话文件不锁定。界面 agent 选择器放在模型旁；需要其他目录或 agent 时从侧栏新建会话。`desktop:set-engine` 在主进程拒绝已开始会话，不再搬运历史切换 agent。
+- 已保存会话使用 SessionRecord 的 cwd/additional 快照，编辑项目目录只影响新会话。`pi:restart` 也不得借机修改已开始会话的目录。
+- Prophey/pi 模型选择器与 `/model` 只允许已配置且 enabledModels 启用的服务商模型。CC/Codex 只接受原生目录返回的模型，不接受任意字符串。
+- Prophey 思考等级复用 pi-ai 的 getSupportedThinkingLevels，尊重 reasoning/thinkingLevelMap，发送到 streamSimple 的 reasoning；off 不发送 reasoning。会话头保存模型/思考等级并在恢复后校验。
+- Prophey 不再在 16 轮工具后静默结束。每轮检查自动压缩；流提前关闭、空回复和 180 秒无新数据均明确报错/重试，可随时中止。
+- 状态栏依据 status.isStreaming/compacting 而非仅依赖事件计数；activity 给出准备/等待模型/执行工具/重试状态，backgroundTasks 单独报告仍在运行的 Bash，前台结束时不得隐藏后台任务。

@@ -1,6 +1,5 @@
 import { engineLabel } from '@shared/engine'
-import { useEffect, useMemo, useRef, useState } from 'react'
-import { ProjectSwitcher } from './ProjectSwitcher'
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
 import type { PiStatus, Project, RepoInfo, SessionSummary } from '@shared/types'
 import {
   ArrowLeftIcon,
@@ -12,7 +11,6 @@ import {
   ChevronIcon,
   CloseIcon,
   EllipsisIcon,
-  FilterIcon,
   FolderIcon,
   MenuIcon,
   PanelIcon,
@@ -182,20 +180,29 @@ export function Sidebar({
   const [prefs, setPrefs] = useState<Prefs>(loadPrefs)
   const [archived, setArchived] = useState<Set<string>>(loadArchived)
   const [pinned, setPinned] = useState<string[]>(loadPinned)
-  const [collapsed, setCollapsed] = useState<Set<string>>(new Set())
+  const [collapsed, setCollapsed] = useState<Set<string>>(() => {
+    try { return new Set(JSON.parse(localStorage.getItem('prophey-sidebar-collapsed') ?? '[]')) } catch { return new Set() }
+  })
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
   const [menuOpen, setMenuOpen] = useState(false)
   const [moreOpen, setMoreOpen] = useState(false)
   const [section, setSection] = useState<'environment' | 'group' | 'sort' | null>(null)
   const [searchKey, setSearchKey] = useState<string>()
   const [sessionMenu, setSessionMenu] = useState<string>()
+  const [menuAbove, setMenuAbove] = useState(false)
   const [filterKey, setFilterKey] = useState<string>()
+  const [pendingDelete, setPendingDelete] = useState<string>()
   const [projectQueries, setProjectQueries] = useState<Record<string, string>>({})
   const [projectStatus, setProjectStatus] = useState<Record<string, StatusFilter>>({})
   const menuRef = useRef<HTMLDivElement>(null)
   const sessionMenuRef = useRef<HTMLDivElement>(null)
   const moreRef = useRef<HTMLDivElement>(null)
   const projectFilterRef = useRef<HTMLDivElement>(null)
+  const selectedKey = status.sessionKey ?? activePath ?? status.sessionFile
+  const isSelected = (session: SessionSummary): boolean => !!selectedKey && pathKey(session.path) === pathKey(selectedKey)
+  const isRunning = (session: SessionSummary): boolean =>
+    (status.runningSessionKeys ?? []).some(key => pathKey(key) === pathKey(session.path)) ||
+    (isSelected(session) && !!(status.isStreaming || status.compacting || status.backgroundTasks?.length))
 
   const updatePrefs = (patch: Partial<Prefs>): void => {
     setPrefs((prev) => {
@@ -304,9 +311,9 @@ export function Sidebar({
 
   const groups = useMemo(
     () => buildSessionGroups({
-      sessions, pinned, prefs, archived, projectStatus, projectQueries, cwd: status.cwd, activeProject
+      sessions, pinned, prefs, archived, projectStatus, projectQueries, cwd: status.cwd, activeProject, projects
     }),
-    [sessions, pinned, prefs, archived, projectStatus, projectQueries, status.cwd, activeProject]
+    [sessions, pinned, prefs, archived, projectStatus, projectQueries, status.cwd, activeProject, projects]
   )
 
   useEffect(() => {
@@ -336,6 +343,7 @@ export function Sidebar({
       const next = new Set(prev)
       if (next.has(key)) next.delete(key)
       else next.add(key)
+      localStorage.setItem('prophey-sidebar-collapsed', JSON.stringify([...next]))
       return next
     })
   }
@@ -501,28 +509,22 @@ export function Sidebar({
         </div>
       )}
 
-      <ProjectSwitcher
-        projects={projects}
-        activeId={activeProject?.id}
-        onSelect={onSelectProject}
-        onCreate={onCreateProject}
-        onEdit={onEditProject}
-        onDelete={onDeleteProject}
-      />
-
       <div className="sidebar-nav">
-        <button className="nav-row" onClick={onNew}>
+        <button className="nav-row" onClick={onChooseWorkspace} title="从最近目录新建会话">
           <span className="nav-glyph">
             <PlusIcon size={13} />
           </span>
-          <span className="nav-label">新建</span>
-          <kbd>Ctrl N</kbd>
+          <span className="nav-label">新会话</span>
+        </button>
+        <button className="nav-row" onClick={onCreateProject} title="选择多个目录创建项目">
+          <span className="nav-glyph"><FolderIcon size={13} /></span>
+          <span className="nav-label">新项目</span>
         </button>
         <button className="nav-row" onClick={onOpenSettings}>
           <span className="nav-glyph">
             <BriefcaseIcon size={13} />
           </span>
-          <span className="nav-label">自定义</span>
+          <span className="nav-label">设置</span>
         </button>
         <div className="nav-more" ref={moreRef}>
           <button
@@ -536,6 +538,7 @@ export function Sidebar({
           </button>
           {moreOpen && (
             <div className="nav-menu">
+              <button className="nav-menu-row" onClick={() => { setMoreOpen(false); onNew() }}>在当前工作区新建</button>
               <button
                 className="nav-menu-row"
                 onClick={() => {
@@ -557,7 +560,7 @@ export function Sidebar({
               </button>
               {recentRepos.length > 0 && (
                 <>
-                  <div className="nav-menu-label">最近仓库</div>
+                  <div className="nav-menu-label">最近目录</div>
                   {recentRepos.slice(0, 6).map((dir) => (
                     <button
                       key={dir}
@@ -608,27 +611,31 @@ export function Sidebar({
         </div>
       </div>
 
+      <div className="session-list">
       {pinnedSessions.length > 0 && (
         <div className="pinned-block">
           <div className="section-label">置顶</div>
           {pinnedSessions.map((session, index) => (
             <div
               key={session.path}
-              className={`pinned-item ${session.path === activePath ? 'active' : ''}`}
+              className={`pinned-item ${isSelected(session) ? 'active' : ''} ${isRunning(session) ? 'running' : ''}`}
               role="button"
               tabIndex={0}
-              title={session.path}
+              title={`${session.title}\n${session.cwd}\n${engineLabel(session.engine)} · ${formatTime(session.updatedAt)}`}
+              aria-current={isSelected(session) ? 'page' : undefined}
               onClick={() => onSelect(session)}
               onKeyDown={(event) => {
+                if (event.target !== event.currentTarget) return
                 if (event.key === 'Enter' || event.key === ' ') {
                   event.preventDefault()
                   onSelect(session)
                 }
               }}
             >
-              <span className="pinned-index">{index + 1}</span>
+              {isSelected(session) || isRunning(session)
+                ? <span className={`session-dot current ${isRunning(session) ? 'running' : ''}`} role="img" aria-label={isRunning(session) ? '正在执行' : '当前会话'} />
+                : <span className="pinned-index">{index + 1}</span>}
               <span className="pinned-title">{session.title}</span>
-              <span className="session-engine">{engineLabel(session.engine)}</span>
               <button
                 className="pinned-unpin"
                 title="取消置顶"
@@ -644,7 +651,6 @@ export function Sidebar({
         </div>
       )}
 
-      <div className="session-list">
         {groups.length === 0 && pinnedSessions.length === 0 && (
           <div className="session-empty">
             {sessions.length === 0
@@ -652,19 +658,24 @@ export function Sidebar({
               : '没有符合当前筛选的会话'}
           </div>
         )}
-        {groups.map((group) => {
+        {groups.map((group, groupIndex) => {
+          const isProject = !!group.rootCount && group.rootCount > 1
+          const previousIsProject = groupIndex > 0 && (groups[groupIndex - 1].rootCount ?? 0) > 1
           const isCollapsed = collapsed.has(group.key)
           const isExpanded = expanded.has(group.key) || group.searching
           const visible = isExpanded ? group.sessions : group.sessions.slice(0, PAGE_SIZE)
           const hidden = group.sessions.length - PAGE_SIZE
           const projectStatusValue = projectStatus[group.key] ?? 'active'
           return (
-            <section key={group.key} className="project-group">
+            <Fragment key={group.key}>
+            {(groupIndex === 0 || isProject !== previousIsProject) && <div className="section-label sidebar-section-label">{isProject ? '项目' : '会话'}</div>}
+            <section className={`project-group ${isProject ? 'multi-directory-project' : ''}`} data-group-key={group.key}>
               {group.label && (
                 <div className="project-head">
                   <button
                     className="project-toggle"
                     onClick={() => toggleCollapsed(group.key)}
+                    aria-expanded={!isCollapsed}
                     title={
                       group.cwd
                         ? `${repos[group.cwd]?.root ?? group.cwd}${
@@ -674,31 +685,15 @@ export function Sidebar({
                     }
                   >
                     <ChevronIcon size={11} className={isCollapsed ? '' : 'open'} />
-                    {group.cwd && <FolderIcon size={13} />}
                     <span className="project-name">{group.label}</span>
-                    {group.cwd && repos[group.cwd]?.isRepo && repos[group.cwd]?.branch && (
-                      <span
-                        className={`project-branch ${
-                          (repos[group.cwd]?.dirty ?? 0) > 0 ? 'dirty' : ''
-                        }`}
-                        title={`${repos[group.cwd]?.branch} · ${
-                          repos[group.cwd]?.dirty ?? 0
-                        } 个未提交改动`}
-                      >
-                        <BranchIcon size={10} />
-                        {repos[group.cwd]?.branch}
-                        {(repos[group.cwd]?.dirty ?? 0) > 0 && (
-                          <span className="project-branch-dirty">{repos[group.cwd]?.dirty}</span>
-                        )}
-                      </span>
-                    )}
+                    {isProject && <span className="project-root-count">{group.rootCount} 个目录</span>}
                   </button>
                   <div className="project-actions">
                     {group.cwd && (
                       <button
                         className="project-action"
                         title={`在 ${group.label} 新建会话`}
-                        onClick={() => onNewInProject(group.cwd!)}
+                        onClick={() => group.projectId ? onSelectProject(group.projectId) : onNewInProject(group.cwd!)}
                       >
                         <PlusIcon size={13} />
                       </button>
@@ -719,11 +714,12 @@ export function Sidebar({
                       }`}
                       title={`筛选 ${group.label}`}
                       onClick={() => {
+                        setPendingDelete(undefined)
                         setFilterKey((value) => (value === group.key ? undefined : group.key))
                         setSearchKey(undefined)
                       }}
                     >
-                      <FilterIcon size={12} />
+                      <EllipsisIcon size={13} />
                     </button>
                   </div>
                 </div>
@@ -755,6 +751,14 @@ export function Sidebar({
 
               {filterKey === group.key && (
                 <div className="project-filter" ref={projectFilterRef}>
+                  {group.projectId && <>
+                    <button className="filter-option" onClick={() => { onEditProject(group.projectId!); setFilterKey(undefined) }}>管理项目目录</button>
+                    <button className="filter-option" onClick={() => {
+                      if (pendingDelete !== group.projectId) { setPendingDelete(group.projectId); return }
+                      onDeleteProject(group.projectId!); setFilterKey(undefined); setPendingDelete(undefined)
+                    }}>{pendingDelete === group.projectId ? '确认移除项目（保留会话）' : '移除项目'}</button>
+                    <div className="filter-divider" />
+                  </>}
                   <div className="project-filter-head">筛选 {group.label}</div>
                   {STATUS_OPTIONS.map((value) => (
                     <button
@@ -782,30 +786,26 @@ export function Sidebar({
                     return (
                       <div
                         key={session.path}
-                        className={`session-item ${session.path === activePath ? 'active' : ''} ${
+                        className={`session-item ${isSelected(session) ? 'active' : ''} ${isRunning(session) ? 'running' : ''} ${
                           isArchived ? 'archived' : ''
                         }`}
                         role="button"
                         tabIndex={0}
-                        title={session.path}
+                        title={`${session.title}\n${session.cwd}\n${engineLabel(session.engine)} · ${formatTime(session.updatedAt)}${isArchived ? ' · 已归档' : ''}`}
+                        aria-current={isSelected(session) ? 'page' : undefined}
                         onClick={() => onSelect(session)}
                         onKeyDown={(event) => {
+                          if (event.target !== event.currentTarget) return
                           if (event.key === 'Enter' || event.key === ' ') {
                             event.preventDefault()
                             onSelect(session)
                           }
                         }}
                       >
+                        <span className={`session-dot ${isSelected(session) ? 'current' : ''} ${isRunning(session) ? 'running' : ''}`} role="img" aria-label={isRunning(session) ? '正在执行' : isSelected(session) ? '当前会话' : '未运行'} />
                         <div className="session-main">
                           <span className="session-title">{session.title}</span>
-                          <span className="session-meta">
-                            <span>{formatTime(session.updatedAt)}</span>
-                            <span className="session-engine">{engineLabel(session.engine)}</span>
-                            {isArchived && <span className="session-archived">已归档</span>}
-                            {session.path === activePath && (
-                              <span className="session-current">当前</span>
-                            )}
-                          </span>
+                          {isArchived && <ArchiveIcon size={11} />}
                         </div>
                         <div
                           className="session-menu-wrap"
@@ -816,6 +816,8 @@ export function Sidebar({
                             title="更多操作"
                             onClick={(event) => {
                               event.stopPropagation()
+                              const boundary = event.currentTarget.closest('.session-list')?.getBoundingClientRect()
+                              setMenuAbove(!!boundary && event.currentTarget.getBoundingClientRect().bottom + 90 > boundary.bottom)
                               setSessionMenu((current) =>
                                 current === session.path ? undefined : session.path
                               )
@@ -825,7 +827,7 @@ export function Sidebar({
                           </button>
                           {sessionMenu === session.path && (
                             <div
-                              className="session-menu"
+                              className={`session-menu ${menuAbove ? 'above' : ''}`}
                               onClick={(event) => event.stopPropagation()}
                             >
                               <button
@@ -854,12 +856,13 @@ export function Sidebar({
                   })}
                   {hidden > 0 && !group.searching && (
                     <button className="show-more" onClick={() => toggleExpanded(group.key)}>
-                      {isExpanded ? '收起' : `显示其余 ${hidden} 个`}
+                      {isExpanded ? '收起' : `显示其余 ${hidden} 条`}
                     </button>
                   )}
                 </div>
               )}
             </section>
+            </Fragment>
           )
         })}
       </div>

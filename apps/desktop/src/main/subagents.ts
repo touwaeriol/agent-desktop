@@ -1,6 +1,6 @@
 import { writeJsonAtomic } from './storage'
 /**
- * Subagent runtime: one `pi --mode rpc` child process per subagent.
+ * Subagent runtime: independent Prophey loops or pi RPC child processes, matching the parent.
  *
  * The main agent drives these through the desktop MCP tools; this module owns the processes, the
  * state machine, the collected messages/tool calls and the limits (concurrency, runtime, idle).
@@ -15,6 +15,7 @@ import path from 'node:path'
 import { PiRpcClient } from './pi-rpc'
 import { withRealBash } from './shell'
 import type { AgentMode, AgentPreset } from './agents'
+import type { AgentEngine } from './agent/engine'
 
 export type SubagentStatus = 'starting' | 'idle' | 'streaming' | 'error' | 'stopped'
 
@@ -42,6 +43,7 @@ export interface SubagentCall {
 }
 
 export interface SubagentRecord {
+  engine?: 'pi' | 'prophey'
   id: string
   label?: string
   agent?: string
@@ -61,7 +63,7 @@ export interface SubagentRecord {
   runtimeMs?: number
   timeoutMs: number
   notify: NotifyMode
-  /** The subagent's own pi session file, so a run can be inspected or resumed later. */
+  /** The subagent's own session file, so a run can be inspected later. */
   sessionFile?: string
   /** The main session that started it, for correlating runs after a restart. */
   parentSession?: string
@@ -70,6 +72,8 @@ export interface SubagentRecord {
 }
 
 export interface StartOptions {
+  engine?: 'pi' | 'prophey'
+  additional?: string[]
   task: string
   preset?: AgentPreset
   mode?: AgentMode
@@ -114,6 +118,9 @@ interface Internal {
   record: SubagentRecord
   /** Missing for records restored from disk: there is no process behind them. */
   rpc?: PiRpcClient
+  own?: AgentEngine
+  collecting?: boolean
+  interrupting?: boolean
   pendingCalls: Map<string, PendingCall>
   waiters: Array<(record: SubagentRecord) => void>
   totalTimer?: NodeJS.Timeout
@@ -137,6 +144,10 @@ export class SubagentManager {
       /** Called once per finished turn when `notify` is not `none`. */
       onSettle?: (record: SubagentRecord) => void
       resolveModel?: (provider: string, id: string) => Promise<boolean>
+      createOwnEngine?: (options: {
+        id: string; tools?: string[]; appendSystemPrompt?: string
+        onEvent: (event: Record<string, unknown>) => void
+      }) => AgentEngine
     }
   ) {
     this.restore()
@@ -242,12 +253,20 @@ export class SubagentManager {
       })
     }
     const preset = options.preset
+    if (options.engine === 'prophey' && !this.options.createOwnEngine) {
+      throw new Error('Prophey 子代理执行器尚未配置；不会回退到 pi')
+    }
+    if (options.engine === 'prophey' && options.desktopTools) {
+      throw new Error('Prophey 子代理暂不接入桌面 MCP；请关闭子代理的桌面工具选项')
+    }
+    const thinking = options.thinking ?? (preset?.model && preset.model !== 'inherit' ? preset.model.thinking : undefined)
     const mode: AgentMode = options.mode ?? preset?.mode ?? 'background'
     const cwd = options.cwd ?? process.cwd()
     if (!existsSync(cwd)) {
       throw Object.assign(new Error(`工作目录不存在：${cwd}`), { code: 'BAD_CWD' })
     }
-    const tools = options.tools ?? preset?.tools
+    const selectedTools = options.tools ?? preset?.tools
+    const tools = selectedTools?.length ? selectedTools : undefined
     const model =
       options.provider && options.model
         ? { provider: options.provider, id: options.model }
@@ -257,6 +276,7 @@ export class SubagentManager {
     const id = `sa_${randomUUID().slice(0, 8)}`
     const record: SubagentRecord = {
       id,
+      engine: options.engine ?? 'pi',
       label: options.label,
       agent: preset?.id,
       mode,
@@ -274,7 +294,7 @@ export class SubagentManager {
       notify: options.notify ?? (mode === 'background' ? 'wake' : 'none'),
       parentSession: options.parentSession
     }
-    const rpc = new PiRpcClient()
+    const rpc = options.engine === 'prophey' ? undefined : new PiRpcClient()
     const internal: Internal = {
       record,
       rpc,
@@ -287,6 +307,40 @@ export class SubagentManager {
     this.items.set(id, internal)
     this.prune()
 
+    if (!rpc) {
+      try {
+        const own = this.options.createOwnEngine!({
+          id, tools, appendSystemPrompt: preset?.appendSystemPrompt,
+          onEvent: (event) => this.onEvent(internal, event)
+        })
+        internal.own = own
+        await own.start({ primary: cwd, additional: options.additional ?? [] }, { model })
+        if (thinking) await own.setThinkingLevel(thinking)
+        if (own.state().phase !== 'ready') throw new Error(own.state().error ?? 'Prophey 子代理启动失败')
+        const actual = own.state().model
+        if (!actual) throw new Error('Prophey 子代理没有可用模型')
+        if (model && (model.provider !== actual.provider || model.id !== actual.id)) {
+          throw new Error(`Prophey 子代理无法使用指定模型 ${model.provider}/${model.id}`)
+        }
+        record.model = { provider: actual.provider, id: actual.id }
+        record.sessionFile = own.state().sessionFile
+        record.startedAt = Date.now()
+        internal.totalTimer = setTimeout(() => {
+          void this.stop(id, true, '超过子代理运行时限')
+        }, record.timeoutMs)
+        this.runOwn(internal, options.task)
+        const timedOut = mode === 'sync'
+          ? await this.waitFor(internal, Math.min(options.waitMs ?? DEFAULT_WAIT_MS, 300_000)) : false
+        return { record, resolved: { agent: preset?.id, mode, tools, model: record.model, cwd }, timedOut }
+      } catch (error) {
+        record.status = 'error'
+        record.error = error instanceof Error ? error.message : String(error)
+        internal.own?.dispose()
+        this.finish(internal)
+        throw error
+      }
+    }
+
     rpc.on('event', (event: Record<string, unknown>) => this.onEvent(internal, event))
     rpc.on('exit', () => {
       if (record.status === 'stopped' || record.status === 'error') return
@@ -298,7 +352,7 @@ export class SubagentManager {
     const args = ['--session-dir', this.sessionDir()]
     if (!options.desktopTools) args.push('--no-mcp')
     if (tools && tools.length > 0) args.push('--tools', tools.join(','))
-    if (model) args.push('--provider', model.provider, '--model', options.thinking ? `${model.id}:${options.thinking}` : model.id)
+    if (model) args.push('--provider', model.provider, '--model', thinking ? `${model.id}:${thinking}` : model.id)
     const appendPrompt = preset?.appendSystemPrompt
     if (appendPrompt) args.push('--append-system-prompt', appendPrompt)
 
@@ -333,6 +387,25 @@ export class SubagentManager {
     return { record, resolved, timedOut }
   }
 
+  private runOwn(internal: Internal, text: string): void {
+    if (!internal.own) throw new Error('Prophey 子代理不存在')
+    if (internal.idleTimer) clearTimeout(internal.idleTimer)
+    const pending = internal.own.prompt(text)
+    const run = internal.runId
+    void pending.then((result) => {
+      if (!result.ok && run === internal.runId && !internal.interrupting && internal.record.status !== 'stopped') {
+        internal.record.status = 'error'
+        internal.record.error = result.error
+        this.finish(internal)
+      }
+    }).catch((error) => {
+      if (run !== internal.runId || internal.interrupting || internal.record.status === 'stopped') return
+      internal.record.status = 'error'
+      internal.record.error = String(error)
+      this.finish(internal)
+    })
+  }
+
   private async waitReady(internal: Internal): Promise<void> {
     const rpc = internal.rpc
     if (!rpc) return
@@ -365,6 +438,7 @@ export class SubagentManager {
     switch (event.type) {
       case 'agent_start':
         internal.runId += 1
+        internal.settled = false
         record.status = 'streaming'
         this.emit(record)
         return
@@ -382,7 +456,7 @@ export class SubagentManager {
         record.calls.push({
           tool,
           ts: Date.now(),
-          ok: event.isError !== true,
+          ok: event.isError !== true && (event.result as { isError?: boolean } | undefined)?.isError !== true,
           ...(pending?.target ? { summary: pending.target } : {})
         })
         return
@@ -397,6 +471,10 @@ export class SubagentManager {
         const message = event.message as Record<string, unknown> | undefined
         if (!message || message.role !== 'assistant') return
         const text = extractText(message)
+        if (message.stopReason === 'error') {
+          record.status = 'error'
+          record.error = text
+        }
         if (!text.trim()) return
         record.messages.push({
           role: 'assistant',
@@ -412,11 +490,19 @@ export class SubagentManager {
 
   /** Pull the transcript after a turn settles; only assistant text is kept. */
   private async collect(internal: Internal): Promise<void> {
+    if (internal.collecting) return
+    internal.collecting = true
+    try { await this.collectResult(internal) } finally { internal.collecting = false }
+  }
+
+  private async collectResult(internal: Internal): Promise<void> {
     const record = internal.record
     const rpc = internal.rpc
-    if (!rpc) return
+    const own = internal.own
+    const run = internal.runId
+    if (!rpc && !own) return
     try {
-      const response = await rpc.request<{ data?: { messages?: Array<Record<string, unknown>> } }>(
+      const response = own ? { data: { messages: await own.messages() as Array<Record<string, unknown>> } } : await rpc!.request<{ data?: { messages?: Array<Record<string, unknown>> } }>(
         'get_messages',
         {},
         10_000
@@ -442,7 +528,7 @@ export class SubagentManager {
       // transcript is best effort
     }
     try {
-      const stats = await rpc.request<{ data?: { tokens?: { total?: number } } }>(
+      const stats = own ? { data: await own.stats() } : await rpc!.request<{ data?: { tokens?: { total?: number } } }>(
         'get_session_stats',
         {},
         5000
@@ -452,6 +538,7 @@ export class SubagentManager {
     } catch {
       // stats are optional
     }
+    if (run !== internal.runId) return
     if (record.status !== 'stopped' && record.status !== 'error') record.status = 'idle'
     record.settledAt = Date.now()
     record.runtimeMs = record.startedAt ? Date.now() - record.startedAt : undefined
@@ -464,6 +551,8 @@ export class SubagentManager {
   /** Tell the parent agent that a turn finished, once per run. */
   private notifySettle(internal: Internal): void {
     const record = internal.record
+    if (internal.interrupting) return
+    if (record.status === 'stopped') return
     if (record.notify === 'none') return
     if (internal.notifiedRun === internal.runId) return
     internal.notifiedRun = internal.runId
@@ -496,19 +585,25 @@ export class SubagentManager {
 
   /** Resolve when the subagent is no longer running, or after `timeoutMs`. */
   waitFor(internal: Internal, timeoutMs: number): Promise<boolean> {
+    if (internal.record.status === 'stopped' || internal.record.status === 'error' ||
+      (internal.record.status === 'idle' && internal.record.settledAt !== undefined)) return Promise.resolve(false)
     return new Promise((resolve) => {
-      const timer = setTimeout(() => resolve(true), timeoutMs)
-      internal.waiters.push(() => {
+      const done = () => {
         clearTimeout(timer)
         resolve(false)
-      })
+      }
+      const timer = setTimeout(() => {
+        internal.waiters = internal.waiters.filter((waiter) => waiter !== done)
+        resolve(true)
+      }, timeoutMs)
+      internal.waiters.push(done)
     })
   }
 
   async wait(id: string, timeoutMs: number): Promise<{ record: SubagentRecord; timedOut: boolean }> {
     const internal = this.items.get(id)
     if (!internal) throw Object.assign(new Error(`未知子代理：${id}`), { code: 'UNKNOWN_SUBAGENT' })
-    if (!internal.rpc) return { record: internal.record, timedOut: false }
+    if (!internal.rpc && !internal.own) return { record: internal.record, timedOut: false }
     if (internal.record.status === 'idle' || internal.record.status === 'stopped' || internal.record.status === 'error') {
       return { record: internal.record, timedOut: false }
     }
@@ -519,7 +614,7 @@ export class SubagentManager {
   async prompt(id: string, text: string, mode: 'interrupt' | 'steer' | 'follow-up'): Promise<SubagentRecord> {
     const internal = this.items.get(id)
     if (!internal) throw Object.assign(new Error(`未知子代理：${id}`), { code: 'UNKNOWN_SUBAGENT' })
-    if (!internal.rpc) {
+    if (!internal.rpc && !internal.own) {
       throw Object.assign(
         new Error(`子代理 ${id} 是历史记录（应用已重启），进程已结束，无法再发送消息。需要继续就在同一目录用 start_subagent 重新起一个。`),
         { code: 'SUBAGENT_GONE' }
@@ -528,12 +623,26 @@ export class SubagentManager {
     if (internal.record.status === 'stopped' || internal.record.status === 'error') {
       throw Object.assign(new Error(`子代理已结束（${internal.record.status}）`), { code: 'SUBAGENT_NOT_RUNNING' })
     }
+    if (internal.own) {
+      if (internal.own.busy()) {
+        if (mode !== 'interrupt') throw new Error('Prophey 子代理运行中不支持 steer/follow-up；请等待完成或使用 interrupt')
+        internal.interrupting = true
+        try {
+          await internal.own.abort()
+          while (internal.collecting) await new Promise((resolve) => setTimeout(resolve, 10))
+        } finally { internal.interrupting = false }
+      }
+      internal.settled = false
+      internal.record.error = undefined
+      this.runOwn(internal, text)
+      return internal.record
+    }
     if (mode === 'interrupt' && internal.record.status === 'streaming') {
-      await internal.rpc.request('abort', {}, 10_000).catch(() => undefined)
+      await internal.rpc!.request('abort', {}, 10_000).catch(() => undefined)
       await new Promise((resolve) => setTimeout(resolve, 300))
     }
     const behavior = mode === 'steer' ? 'steer' : mode === 'follow-up' ? 'followUp' : undefined
-    await internal.rpc.request(
+    await internal.rpc!.request(
       'prompt',
       behavior ? { message: text, streamingBehavior: behavior } : { message: text },
       30_000
@@ -547,6 +656,12 @@ export class SubagentManager {
     const internal = this.items.get(id)
     if (!internal) throw Object.assign(new Error(`未知子代理：${id}`), { code: 'UNKNOWN_SUBAGENT' })
     if (internal.record.status === 'stopped') return internal.record
+    const timedOutWhileRunning = !!reason && ['starting', 'streaming'].includes(internal.record.status)
+    if (internal.own) {
+      internal.record.status = 'stopped'
+      await internal.own.abort()
+      internal.own.dispose()
+    }
     const rpc = internal.rpc
     if (rpc) {
       try {
@@ -558,7 +673,10 @@ export class SubagentManager {
     }
     internal.record.status = 'stopped'
     internal.record.runtimeMs = internal.record.startedAt ? Date.now() - internal.record.startedAt : undefined
-    if (reason) internal.record.error = reason
+    if (reason) {
+      internal.record.error = reason
+      if (timedOutWhileRunning) internal.record.status = 'error'
+    }
     if (!keepMessages) {
       internal.record.messages = []
       internal.record.calls = []
@@ -575,6 +693,7 @@ export class SubagentManager {
         if (sync) internal.rpc.killNow()
         else internal.rpc.stop()
       }
+      internal.own?.dispose()
       internal.record.status = 'stopped'
       this.finish(internal)
     }

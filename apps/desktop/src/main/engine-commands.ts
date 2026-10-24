@@ -11,7 +11,8 @@ export async function executeEngineCommand(
   engine: AgentEngine,
   name: string,
   args: string,
-  onModelChanged: () => Promise<unknown>
+  onModelChanged: () => Promise<unknown>,
+  availableModels?: () => Promise<Record<string, unknown>[]>
 ): Promise<{ ok: boolean; text?: string; error?: string }> {
   try {
     const command = (await listEngineCommands(engine)).find((entry) => entry.name === name)
@@ -22,7 +23,7 @@ export async function executeEngineCommand(
         if (!engine.executeCommand) throw new Error('当前引擎没有原生命令执行入口')
         return { ok: true, ...(await engine.executeCommand(name, args)) }
       case 'model': {
-        const models = await engine.models()
+        const models = await (availableModels ? availableModels() : engine.models())
         if (!args) return { ok: true, text: models.map((m) => m.provider + '/' + m.id).join('\n') }
         const matches = models.filter((m) => m.id === args || m.provider + '/' + m.id === args)
         if (!matches.length) throw new Error('当前引擎模型目录中没有 ' + args)

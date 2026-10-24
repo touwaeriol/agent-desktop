@@ -106,7 +106,7 @@ export function AgentsPanel({
           visible: draft.visible,
           timeoutMs: draft.timeoutMs
         }),
-      '预设已保存，pi 正在重启'
+      '预设已保存'
     ).then((ok) => {
       if (ok) setDraft(undefined)
     })
@@ -131,7 +131,7 @@ export function AgentsPanel({
                 </span>
               </span>
               <span className="mcp-row-sub">
-                主会话通过桌面 MCP 工具起独立 pi 进程干活：预设负责注入工具白名单与追加系统提示词，
+                子代理跟随当前引擎：内建 agent 使用独立执行循环，pi 使用独立进程。预设配置工具白名单与提示词，
                 调用时还能逐个覆盖。
               </span>
             </div>
@@ -177,6 +177,7 @@ export function AgentsPanel({
             </div>
           )}
         </div>
+        <p className="field-hint">以上预设供内建 agent 和 pi 使用；Claude Code、Codex 使用各自原生子代理。内建子代理的思考等级按模型能力校验；暂不接入桌面 MCP，运行中可打断后重发。</p>
       </div>
 
       <div className="field">

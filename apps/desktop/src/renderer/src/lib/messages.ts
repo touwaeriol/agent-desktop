@@ -88,7 +88,7 @@ export function toChatItems(messages: RawMessage[]): ChatItem[] {
   const toolIndex = new Map<string, ToolCallView>()
 
   for (const message of messages) {
-    if (message.role === 'custom') {
+    if (message.role === 'custom' || message.customType === NOTICE_TYPE) {
       if (message.customType !== NOTICE_TYPE) continue
       const text =
         typeof message.content === 'string'

@@ -1,12 +1,12 @@
 /**
- * Subagent tools: start `pi --mode rpc` workers from the desktop app and drive them.
+ * Subagent tools: run independent workers using the parent engine (Prophey or pi).
  *
  * Output is Markdown by default. These tools are read by a model, not parsed by code, so JSON keys
  * would only burn tokens; pass `format: "json"` when a caller really wants the raw shape.
  */
 
 const DEFAULT_WAIT_MS = 120_000
-const MAX_TEXT = 8000
+const MAX_TEXT = 4000
 
 function text(value) {
   return { content: [{ type: 'text', text: value }] }
@@ -59,6 +59,7 @@ const STATUS_LABEL = {
 function statusLine(record) {
   const parts = [
     record.id,
+    record.engine ? `· ${record.engine}` : '',
     STATUS_LABEL[record.status] ?? record.status,
     record.agent ? `· ${record.agent}` : '',
     record.mode ? `· ${record.mode}` : '',
@@ -77,15 +78,15 @@ function summaryChanges(record) {
   const commands = []
   for (const call of record.calls ?? []) {
     const target = typeof call.summary === 'string' && call.summary ? call.summary : undefined
-    if (call.tool === 'edit' || call.tool === 'write' || call.tool === 'apply_patch') {
+    if (['edit', 'write', 'apply_patch', 'edit_file', 'write_file'].includes(call.tool)) {
       const file = target ?? '未知文件'
       const entry = edits.get(file) ?? { path: file, calls: 0, lastTool: call.tool }
       entry.calls += 1
       entry.lastTool = call.tool
       edits.set(file, entry)
-    } else if (call.tool === 'read') {
+    } else if (['read', 'read_file'].includes(call.tool)) {
       if (target) reads.add(target)
-    } else if (call.tool === 'bash' || call.tool === 'powershell') {
+    } else if (['bash', 'powershell', 'run_bash'].includes(call.tool)) {
       commands.push({ command: target ?? call.tool, ok: call.ok })
     }
   }
@@ -116,22 +117,42 @@ function renderChanges(record) {
         .join('\n')
     )
   }
-  return lines.join('\n')
+  return truncate(lines.join('\n'), 1800)
 }
 
-function renderMessages(record, since = 0) {
-  const messages = (record.messages ?? []).slice(since)
-  if (messages.length === 0) return '（没有新消息）'
-  const lines = []
-  for (const message of messages) {
-    const stamp = new Date(message.ts ?? Date.now())
-    const time = `${String(stamp.getHours()).padStart(2, '0')}:${String(stamp.getMinutes()).padStart(2, '0')}`
-    lines.push(`### ${message.role} ${time}`)
-    lines.push(message.text ? truncate(message.text) : '（无文本）')
-    if (message.toolCalls?.length) lines.push(`tools: ${message.toolCalls.join(', ')}`)
-    lines.push('')
+function messagePage(record, since = 0, offset = 0) {
+  const index = Math.max(0, Math.floor(Number(since) || 0))
+  const message = record.messages?.[index]
+  if (!message) return { messages: [], next_since: index, next_offset: 0 }
+  const body = message.text ?? ''
+  const start = Math.min(body.length, Math.max(0, Math.floor(Number(offset) || 0)))
+  const end = Math.min(body.length, start + MAX_TEXT)
+  return {
+    messages: [{ ...message, text: body.slice(start, end), toolCalls: message.toolCalls?.slice(0, 20) }],
+    next_since: end === body.length ? index + 1 : index,
+    next_offset: end === body.length ? 0 : end
   }
-  return lines.join('\n').trim()
+}
+
+function renderMessages(record, since = 0, offset = 0) {
+  const page = messagePage(record, since, offset)
+  const message = page.messages[0]
+  if (!message) return '（没有新消息）'
+  return [
+    `### ${message.role}`,
+    message.text || '（无文本）',
+    message.toolCalls?.length ? `tools: ${message.toolCalls.join(', ')}` : '',
+    `下一页：since=${page.next_since}, offset=${page.next_offset}（共 ${record.messages?.length ?? 0} 条消息）`
+  ].filter(Boolean).join('\n')
+}
+
+function compactRecord(record, options = {}) {
+  const { messages, calls, finalText, ...status } = record
+  return {
+    ...status, finalText: truncate(finalText), messageCount: messages?.length ?? 0,
+    callCount: calls?.length ?? 0,
+    ...(options.include?.includes('messages') ? messagePage(record, options.since, options.offset) : {})
+  }
 }
 
 function renderSubagent(record, options = {}) {
@@ -146,7 +167,7 @@ function renderSubagent(record, options = {}) {
   }
 
   if (include.includes('messages')) {
-    lines.push('', `### 消息（游标 ${record.messages?.length ?? 0}）`, renderMessages(record, options.since ?? 0))
+    lines.push('', renderMessages(record, options.since ?? 0, options.offset ?? 0))
   } else if (include.includes('last')) {
     const last = [...(record.messages ?? [])].reverse().find((message) => message.role === 'assistant')
     lines.push('', '### 最近一条', last?.text ? truncate(last.text) : '（还没有回复）')
@@ -243,7 +264,7 @@ export const startSubagent = {
   name: 'start_subagent',
   title: 'Start a subagent',
   description:
-    'Start a subagent (a separate pi process) that works on a task in this project. It starts ' +
+    'Start a subagent using the current engine (Prophey or pi) for a task in this project. It starts ' +
     'blind, so the task must carry the goal, paths and constraints. Worth it for self-contained ' +
     'work that would flood this context (broad exploration, long test loops, a diff review) and ' +
     'for independent slices run in parallel; do small or context-dependent work yourself. With ' +
@@ -306,7 +327,7 @@ export const startSubagent = {
     if (Array.isArray(args?.tools)) payload.tools = args.tools
     const response = await callBridge(context, 'POST', '/subagents', payload)
     if (args?.format === 'json') {
-      return text(JSON.stringify({ subagent: response.subagent, resolved: response.resolved }, null, 2))
+      return text(JSON.stringify({ subagent: compactRecord(response.subagent), resolved: response.resolved }, null, 2))
     }
     const record = response.subagent
     const lines = [statusLine(record)]
@@ -340,7 +361,7 @@ export const getSubagent = {
   title: 'Get a subagent result',
   description:
     'Status of a subagent plus its final answer and a summary of what it touched. Pass ' +
-    '`include: ["messages"]` for the transcript or `["last"]` for the latest assistant text.',
+    '`include: ["messages"]` for a bounded transcript page (follow next since/offset) or `["last"]` for the latest assistant text.',
   inputSchema: {
     type: 'object',
     properties: {
@@ -351,6 +372,7 @@ export const getSubagent = {
         description: 'Extra sections. Default: status + final answer + change summary.'
       },
       since: { type: 'integer', minimum: 0, description: 'Message index to start from, for include:["messages"].' },
+      offset: { type: 'integer', minimum: 0, description: 'Character offset within that message, from the previous page.' },
       format: { type: 'string', enum: ['md', 'json'], default: 'md' }
     },
     required: ['id'],
@@ -361,8 +383,9 @@ export const getSubagent = {
     const params = new URLSearchParams()
     if (include.length > 0) params.set('include', include.join(','))
     const response = await callBridge(context, 'GET', `/subagents/${encodeURIComponent(args.id)}?${params.toString()}`)
-    if (args?.format === 'json') return text(JSON.stringify({ subagent: response.subagent }, null, 2))
-    return text(renderSubagent(response.subagent, { include, since: args?.since ?? 0 }))
+    const options = { include, since: args?.since ?? 0, offset: args?.offset ?? 0 }
+    if (args?.format === 'json') return text(JSON.stringify({ subagent: compactRecord(response.subagent, options) }, null, 2))
+    return text(renderSubagent(response.subagent, options))
   }
 }
 
@@ -396,7 +419,9 @@ export const listSubagents = {
     params.set('limit', String(args?.limit ?? 10))
     const response = await callBridge(context, 'GET', `/subagents?${params.toString()}`)
     if (args?.format === 'json') {
-      return text(JSON.stringify({ total: response.total, subagents: response.subagents }, null, 2))
+      return text(JSON.stringify({ total: response.total, subagents: (response.subagents ?? []).map(record => ({
+        ...compactRecord(record), finalText: truncate(record.finalText, 120)
+      })) }, null, 2))
     }
     const runs = response.subagents ?? []
     if (runs.length === 0) {
@@ -466,7 +491,7 @@ export const sendSubagentPrompt = {
   description:
     'Send more instructions to a running subagent. `steer` inserts the message into the current ' +
     'turn (use it to ask for progress), `follow-up` queues it for after the turn, `interrupt` ' +
-    'aborts the current turn and starts a new one with this message.',
+    'aborts the current turn and starts a new one with this message. Prophey supports interrupt while busy; steer and follow-up require pi.',
   inputSchema: {
     type: 'object',
     properties: {
@@ -534,7 +559,7 @@ export const getSubagentChanges = {
     const record = response.subagent
     const lines = [`${statusLine(record)} · 改动`]
     if (detail === 'calls') {
-      const calls = record.calls ?? []
+      const calls = (record.calls ?? []).slice(-30)
       lines.push(
         calls.length === 0
           ? '- 没有工具调用记录'
@@ -546,7 +571,7 @@ export const getSubagentChanges = {
               })
               .join('\n')
       )
-      return text(lines.join('\n'))
+      return text(truncate(lines.join('\n'), 6000) + `\n（最近 ${calls.length}/${record.calls?.length ?? 0} 次调用）`)
     }
     lines.push('', renderChanges(record))
     return text(lines.join('\n'))

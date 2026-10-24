@@ -12,6 +12,7 @@ export interface StoredTranscript {
   sessionId: string
   workspace: { primary: string; additional: string[] }
   messages: Array<Record<string, unknown>>
+  preferences?: { model?: { provider: string; id: string }; thinkingLevel?: string }
 }
 
 export class TranscriptStore {
@@ -39,7 +40,7 @@ export class TranscriptStore {
       return undefined
     }
     const lines = raw.split('\n').filter((line) => line.trim())
-    let header: { sessionId?: string; workspace?: { primary: string; additional: string[] } } = {}
+    let header: { sessionId?: string; workspace?: { primary: string; additional: string[] }; preferences?: StoredTranscript['preferences'] } = {}
     const messages: Array<Record<string, unknown>> = []
     for (const [index, line] of lines.entries()) {
       let parsed: Record<string, unknown>
@@ -60,6 +61,7 @@ export class TranscriptStore {
     return {
       sessionId,
       workspace: header.workspace ?? { primary: '', additional: [] },
+      preferences: header.preferences,
       messages
     }
   }
@@ -69,10 +71,11 @@ export class TranscriptStore {
     sessionId: string,
     workspace: { primary: string; additional: string[] },
     messages: Array<Record<string, unknown>>,
-    strict = false
+    strict = false,
+    preferences?: StoredTranscript['preferences']
   ): Promise<void> {
     const body = [
-      JSON.stringify({ type: 'header', sessionId, workspace, savedAt: Date.now() }),
+      JSON.stringify({ type: 'header', sessionId, workspace, preferences, savedAt: Date.now() }),
       ...messages.map((message) => JSON.stringify({ message }))
     ].join('\n')
     try {

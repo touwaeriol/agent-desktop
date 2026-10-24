@@ -17,7 +17,7 @@ import type { SessionSummary } from '../shared/types'
  */
 export interface SessionRecord {
   engine?: EngineId
-  /** App-level id, stable across engine swaps. */
+  /** Stable app-level conversation identity. */
   id: string
   /** Stable sidebar identity, preserving existing pins when the engine-private path changes. */
   key?: string
@@ -30,6 +30,7 @@ export interface SessionRecord {
   /** Project the session was started in, if any. */
   projectId?: string
   title: string
+  titleSource?: 'prompt' | 'generated' | 'manual'
   createdAt: number
   updatedAt: number
 }
@@ -59,6 +60,8 @@ function readRecord(value: unknown): SessionRecord | undefined {
     additional,
     ...(typeof raw.projectId === 'string' ? { projectId: raw.projectId } : {}),
     title: typeof raw.title === 'string' ? raw.title : '',
+    titleSource: ['prompt', 'generated', 'manual'].includes(String(raw.titleSource))
+      ? raw.titleSource as SessionRecord['titleSource'] : undefined,
     createdAt: typeof raw.createdAt === 'number' ? raw.createdAt : 0,
     updatedAt: typeof raw.updatedAt === 'number' ? raw.updatedAt : 0
   }
@@ -71,6 +74,8 @@ export function toSummary(record: SessionRecord): SessionSummary {
     engine: record.engine ?? 'pi',
     title: record.title || path.basename(record.path || record.id, '.jsonl'),
     cwd: record.cwd,
+    projectId: record.projectId,
+    additional: [...record.additional],
     createdAt: record.createdAt,
     updatedAt: record.updatedAt
   }
@@ -148,6 +153,7 @@ export class SessionStore {
         ? { projectId: patch.projectId ?? existing?.projectId }
         : {}),
       title: patch.title || existing?.title || '',
+      titleSource: patch.titleSource ?? existing?.titleSource,
       createdAt: patch.createdAt ?? existing?.createdAt ?? now,
       updatedAt: patch.updatedAt ?? now
     }
@@ -168,8 +174,20 @@ export class SessionStore {
     const record = this.get(id)
     if (!record || !title.trim()) return
     record.title = title.trim()
+    record.titleSource = 'manual'
     record.updatedAt = Date.now()
     await this.commit()
+  }
+
+  async setGeneratedTitle(id: string, title: string): Promise<boolean> {
+    await this.load()
+    const record = this.get(id)
+    if (!record || record.titleSource === 'manual' || !title.trim()) return false
+    record.title = title.trim()
+    record.titleSource = 'generated'
+    // Generating metadata must not reorder conversations by their activity time.
+    await this.commit()
+    return true
   }
 
   /** Drop records whose engine file disappeared, so the list cannot point at nothing. */

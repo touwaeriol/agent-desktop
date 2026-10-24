@@ -35,7 +35,7 @@ export function ProjectEditor({
   const primary = roots.find((root) => root.primary) ?? roots[0]
 
   const pick = async (): Promise<void> => {
-    const picked = await window.pi.pickFolders(`向「${project.name}」添加仓库`)
+    const picked = await window.pi.pickFolders(`向「${project.name}」添加目录`)
     if (picked.length === 0) return
     const known = new Set(roots.map((root) => root.path.toLowerCase()))
     const added = picked
@@ -51,8 +51,8 @@ export function ProjectEditor({
 
   const remove = (target: string): void => {
     // A project without repositories is not a project; the last one stays.
-    if (roots.length <= 1) {
-      setError('至少要保留一个仓库')
+    if (roots.length <= 2) {
+      setError('项目至少保留两个目录；单目录请新建会话')
       return
     }
     if (pendingRemove !== target) {
@@ -83,18 +83,21 @@ export function ProjectEditor({
   const save = async (): Promise<void> => {
     setBusy(true)
     setError(undefined)
-    const result = await window.pi.updateProject(project.id, {
-      name: name.trim() || project.name,
-      roots: roots.map((root) => root.path),
-      primary: primary?.path
-    })
-    setBusy(false)
-    if (!result.ok || !result.project) {
-      setError(result.error ?? '保存失败')
-      return
-    }
-    onSaved(result.project)
-    onClose()
+    try {
+      const result = await window.pi.updateProject(project.id, {
+        name: name.trim() || project.name,
+        roots: roots.map((root) => root.path),
+        primary: primary?.path
+      })
+      if (!result.ok || !result.project) {
+        setError(result.error ?? '保存失败')
+        return
+      }
+      onSaved(result.project)
+      onClose()
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause))
+    } finally { setBusy(false) }
   }
 
   return (
@@ -119,7 +122,7 @@ export function ProjectEditor({
           </label>
 
           <div className="field">
-            <span>仓库（选中为主仓库，pi 的工作目录）</span>
+            <span>项目目录（选中为默认工作目录）</span>
             <div className="project-editor-roots">
               {roots.map((root) => (
                 <div
@@ -130,6 +133,7 @@ export function ProjectEditor({
                   title={root.path}
                   onClick={() => makePrimary(root.path)}
                   onKeyDown={(event) => {
+                    if (event.target !== event.currentTarget) return
                     if (event.key === 'Enter' || event.key === ' ') {
                       event.preventDefault()
                       makePrimary(root.path)
@@ -156,10 +160,10 @@ export function ProjectEditor({
             </div>
             <button className="project-editor-add" onClick={() => void pick()}>
               <PlusIcon size={12} />
-              <span>添加仓库…</span>
+              <span>添加目录…</span>
             </button>
             <p className="field-hint">
-              主仓库是 pi 的工作目录；其他仓库通过绝对路径访问，提示词里会列出全部仓库。
+              项目内的会话可同时访问这些目录。只需一个目录时，直接新建会话即可。
             </p>
           </div>
 

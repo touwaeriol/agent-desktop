@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import type { SubagentView } from '@shared/types'
+import { engineLabel } from '@shared/engine'
 import { ChevronIcon, RefreshIcon, SparkIcon, StopIcon } from './Icons'
 import { Markdown } from './Markdown'
 import { SUBAGENT_STATUS_LABELS, isSubagentRunning } from '../lib/subagents'
@@ -19,7 +20,7 @@ function tokenLabel(count: number | undefined): string {
 function changedFiles(record: SubagentView): string[] {
   const seen = new Set<string>()
   for (const call of record.calls) {
-    if (call.tool !== 'edit' && call.tool !== 'write' && call.tool !== 'apply_patch') continue
+    if (!['edit', 'write', 'apply_patch', 'edit_file', 'write_file'].includes(call.tool)) continue
     if (call.summary) seen.add(call.summary)
   }
   return [...seen]
@@ -141,6 +142,7 @@ export function SubagentsDrawer({
                   <span className="subagent-row-sub">
                     {SUBAGENT_STATUS_LABELS[record.status]}
                     {record.mode === 'background' ? ' · 后台' : ' · 同步'}
+                    {' · ' + engineLabel(record.engine ?? 'pi')}
                     {span(record.runtimeMs) ? ` · ${span(record.runtimeMs)}` : ''}
                     {tokenLabel(record.tokens) ? ` · ${tokenLabel(record.tokens)} tokens` : ''}
                   </span>

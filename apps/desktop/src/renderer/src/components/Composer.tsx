@@ -293,6 +293,18 @@ export function Composer({
   })
   useDismissable(contextOpen, contextRef, () => setContextOpen(false))
 
+  useEffect(() => {
+    let stale = false
+    setLevels([])
+    setThinkingOpen(false)
+    setModelOpen(false)
+    setModels([])
+    if (status.phase === 'ready' && status.model) {
+      void window.pi.listThinkingLevels().then(next => { if (!stale) setLevels(next) }).catch(() => {})
+    }
+    return () => { stale = true }
+  }, [status.engine, status.model?.provider, status.model?.id, status.phase])
+
   const openModelPicker = async (): Promise<void> => {
     if (modelOpen) {
       setModelOpen(false)
@@ -319,7 +331,7 @@ export function Composer({
     }
     setModelLoading(true)
     setModelError(undefined)
-    const result = await window.pi.setModel(model.provider, model.id)
+    const result = await window.pi.setModel(model.provider, model.id).catch(error => ({ ok: false, error: String(error) }))
     setModelLoading(false)
     if (!result.ok) {
       setModelError(result.error ?? '切换模型失败')
@@ -367,7 +379,7 @@ export function Composer({
     }
     setThinkingLoading(true)
     setThinkingError(undefined)
-    const result = await window.pi.setThinkingLevel(level)
+    const result = await window.pi.setThinkingLevel(level).catch(error => ({ ok: false, error: String(error) }))
     setThinkingLoading(false)
     if (!result.ok) {
       setThinkingError(result.error ?? '切换思考等级失败')
@@ -574,7 +586,6 @@ export function Composer({
         />
         <div className="composer-foot">
           <div className="composer-left" ref={contextRef}>
-            <EnginePicker compact status={status} disabled={disabled && status.phase === 'ready'} onNotice={onNotice} />
             <button
               className={`attach-btn ${contextOpen ? 'open' : ''}`}
               title="引用上下文（@ 文件或目录）"
@@ -620,8 +631,9 @@ export function Composer({
             )}
             <button
               className="chip"
+              disabled={status.sessionLocked || streaming}
               onClick={onChooseWorkspace}
-              title={`${status.cwd}（切换 git 仓库并新建会话）`}
+              title={`${status.cwd}${status.sessionLocked ? '（会话已开始，目录已锁定）' : '（选择工作目录）'}`}
             >
               <FolderIcon size={12} />
               <span>{workspace}</span>
@@ -654,21 +666,24 @@ export function Composer({
                 </span>
               </div>
             )}
+            <EnginePicker compact status={status} disabled={disabled && status.phase === 'ready'} onNotice={onNotice} />
             {capabilities?.models && (
               <div className="model-pill" ref={pickerRef}>
                 <button
                   className={`pill-seg model ${status.model ? '' : 'warn'} ${modelOpen ? 'open' : ''}`}
                   onClick={() => void openModelPicker()}
+                  disabled={streaming || disabled}
                   title="选择模型"
                 >
                   <span>{activeLabel}</span>
                 </button>
-                {capabilities?.thinking && (
+                {capabilities?.thinking && levels.length > 0 && (
                   <>
                     <span className="pill-sep" />
                     <button
                       className={`pill-seg thinking ${thinkingOpen ? 'open' : ''}`}
                       onClick={() => void openThinkingPicker()}
+                      disabled={streaming || disabled || levels.every(level => level === 'off')}
                       title="选择思考等级"
                     >
                       <span>

@@ -1,4 +1,4 @@
-import { toCodexItems, mergeImportedHistory, type HistoryMessage } from './history'
+import { mergeImportedHistory } from './history'
 import type { ImportedHistoryStore } from '../imported-history-store'
 import { version } from '../../../package.json'
 import type { EngineStartOptions } from './engine'
@@ -12,6 +12,29 @@ interface CodexOptions extends NativeOptions {
   binary: string
   script?: string
   sandbox?: () => 'read-only' | 'workspace-write' | undefined
+  /** Codex's `request_user_input` tool is experimental and off by default. */
+  questions?: () => boolean
+}
+
+/**
+ * Enables Codex's own question tool for one app-server process.
+ *
+ * codex-cli 0.163 needs both knobs and they are both experimental:
+ * - `tools.experimental_request_user_input.enabled` registers the tool
+ * - `features.default_mode_request_user_input` allows it outside plan mode; without it the tool
+ *   runs and fails with `request_user_input is unavailable in Default mode`
+ *
+ * Passing them as `-c` overrides keeps the user's `~/.codex/config.toml` untouched.
+ */
+export function codexQuestionArgs(enabled: boolean): string[] {
+  return enabled
+    ? [
+        '-c',
+        'tools.experimental_request_user_input.enabled=true',
+        '-c',
+        'features.default_mode_request_user_input=true'
+      ]
+    : []
 }
 /** Codex app-server owns models, tools, history, compaction and the approval policy. */
 export class CodexEngine extends NativeEngine {
@@ -67,19 +90,24 @@ export class CodexEngine extends NativeEngine {
     this.setStatus({ phase: 'starting', cwd: this.roots.primary })
     try {
       if (!this.connected) {
+        const questions = this.questionsEnabled()
         this.rpc.start(
           this.options.script ? process.execPath : this.options.binary,
           [
             ...(this.options.script ? [this.options.script] : []),
             'app-server',
             '--listen',
-            'stdio://'
+            'stdio://',
+            ...codexQuestionArgs(questions)
           ],
           this.roots.primary,
           this.options.script ? { ...process.env, ELECTRON_RUN_AS_NODE: '1' } : process.env
         )
         await this.rpc.request('initialize', {
           clientInfo: { name: 'prophey', title: 'Prophey', version },
+          // `item/tool/requestUserInput` is experimental, but 0.163 delivers it without opting into
+          // `experimentalApi` (verified against a real app-server). Leave the capability off: it
+          // opens up every other experimental method, and the ones we do not answer fail the turn.
           capabilities: { experimentalApi: false }
         })
         this.rpc.notification('initialized')
@@ -104,6 +132,9 @@ export class CodexEngine extends NativeEngine {
       this.setStatus({ phase: 'error', error: String(error) })
       throw error
     }
+  }
+  private questionsEnabled(): boolean {
+    return this.options.questions?.() !== false
   }
   private threadOptions(): Record<string, unknown> {
     const sandbox = this.options.sandbox?.()
@@ -132,21 +163,7 @@ export class CodexEngine extends NativeEngine {
       thinkingLevel: response.reasoningEffort ?? undefined
     })
   }
-  async importHistory(messages: HistoryMessage[]): Promise<void> {
-    if (this.busy()) throw new Error('请先停止当前回合')
-    const store = this.options.historyStore
-    if (!store) throw new Error('历史存储未配置')
-    await this.newSession()
-    const id = this.threadId!
-    try {
-      await this.rpc.request('thread/inject_items', { threadId: id, items: toCodexItems(messages) })
-      await store.savePrefix(id, messages)
-      this.transcript = structuredClone(messages) as unknown as Array<Record<string, unknown>>
-    } catch (error) {
-      await this.rpc.request('thread/archive', { threadId: id }).catch(() => undefined)
-      throw new Error('Codex 历史导入失败：' + String(error))
-    }
-  }
+
   private async readHistory(thread?: any): Promise<void> {
     this.transcript = []
     if (!this.threadId) return
@@ -496,9 +513,22 @@ export class CodexEngine extends NativeEngine {
   private async approval(method: string, p: any): Promise<unknown> {
     if (p.threadId && p.threadId !== this.threadId) throw new Error('请求不属于当前会话')
     if (method === 'item/tool/requestUserInput') {
-      const questions = p.questions ?? []
+      const questions: any[] = Array.isArray(p.questions) ? p.questions : []
+      if (!questions.length) throw new Error('Codex 提问没有内容')
       const result = await this.ask(
-        questions.map((q: any) => ({ question: q.question, header: q.header, options: q.options })),
+        questions.map((q: any) => ({
+          question: String(q.question ?? ''),
+          header: q.header ? String(q.header) : undefined,
+          options: Array.isArray(q.options)
+            ? q.options.map((o: any) => ({
+                label: String(o.label ?? ''),
+                description: o.description ? String(o.description) : undefined
+              }))
+            : undefined,
+          // Codex defaults `isOther` to false, but an answer is free text either way; keep the
+          // desktop panel's manual input so a question without options stays answerable.
+          secret: q.isSecret === true
+        })),
         'Codex'
       )
       return {
@@ -526,6 +556,25 @@ export class CodexEngine extends NativeEngine {
         'Codex'
       )
       return { decision: allowed ? 'accept' : 'decline' }
+    }
+    if (method === 'item/permissions/requestApproval') {
+      // Granting means echoing the requested profile back; declining grants nothing.
+      const allowed = await this.requestApproval(
+        (p.reason ?? 'Codex 请求额外权限') + '\n' + JSON.stringify(p.permissions ?? {}),
+        'Codex'
+      )
+      return allowed
+        ? { permissions: p.permissions ?? {}, scope: 'turn' }
+        : { permissions: {}, scope: 'turn' }
+    }
+    if (method === 'item/tool/call') {
+      // Dynamic tools are the client's own tools; the desktop registers none for Codex.
+      return {
+        success: false,
+        contentItems: [
+          { type: 'inputText', text: '桌面端没有注册动态工具 ' + String(p.tool ?? '') }
+        ]
+      }
     }
     throw new Error('尚不支持的 Codex 请求：' + method)
   }

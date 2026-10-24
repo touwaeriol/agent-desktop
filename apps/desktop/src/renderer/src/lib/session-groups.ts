@@ -18,6 +18,8 @@ export interface SessionGroup {
   key: string
   label: string
   cwd?: string
+  projectId?: string
+  rootCount?: number
   sessions: SessionSummary[]
   total: number
   searching: boolean
@@ -48,7 +50,7 @@ export function baseName(cwd: string): string {
 
 /** Windows compares paths case-insensitively; the same repo arrives with different casing. */
 export function pathKey(dir: string): string {
-  return /^[A-Za-z]:/.test(dir) || dir.includes('\\') ? dir.toLowerCase() : dir
+  return /^[A-Za-z]:/.test(dir) || dir.includes('\\') ? dir.replace(/\\/g, '/').replace(/\/$/, '').toLowerCase() : dir
 }
 
 interface GroupOptions {
@@ -60,137 +62,76 @@ interface GroupOptions {
   projectQueries: Record<string, string>
   cwd: string
   activeProject?: Project
+  projects?: Project[]
 }
 
 /** View policy shared by every grouping mode, independent of DOM and persisted preferences. */
 export function buildSessionGroups({
-  sessions, pinned, prefs, archived, projectStatus, projectQueries, cwd, activeProject
+  sessions, pinned, prefs, archived, projectStatus, projectQueries, cwd, activeProject, projects = []
 }: GroupOptions): SessionGroup[] {
-  // A pinned session lives in the 置顶 block only: showing it again under its project made the
-  // same conversation appear twice.
+  const catalogue = new Map(projects.map(project => [project.id, project]))
+  if (activeProject) catalogue.set(activeProject.id, activeProject)
   const pinnedPaths = new Set(pinned)
-  const belongsToProject = (dir: string): boolean =>
-    Boolean(activeProject?.roots.some((root) => pathKey(root.path) === pathKey(dir)))
-  const includeDirectory = (dir: string): boolean =>
-    !prefs.onlyActiveProject || !activeProject || belongsToProject(dir)
-  const visible = sessions.filter(
-    (session) => !pinnedPaths.has(session.path) && includeDirectory(session.cwd || '')
-  )
-  const sortSessions = (list: SessionSummary[]): SessionSummary[] =>
-    list.slice().sort((a, b) => {
-      if (prefs.sort === 'name') return a.title.localeCompare(b.title, 'zh-CN')
-      if (prefs.sort === 'created') return b.createdAt - a.createdAt
-      return b.updatedAt - a.updatedAt
-    })
-
-  const applyProjectView = (key: string, list: SessionSummary[]) => {
+  const visible = sessions.filter(session => !pinnedPaths.has(session.path) &&
+    (!prefs.onlyActiveProject || !activeProject || session.projectId === activeProject.id))
+  const applyView = (key: string, list: SessionSummary[]) => {
     const status = projectStatus[key] ?? 'active'
     const needle = (projectQueries[key] ?? '').trim().toLowerCase()
-    const filtered = list.filter((session) => {
-      const isArchived = archived.has(session.path)
-      if (status === 'active' && isArchived) return false
-      if (status === 'archived' && !isArchived) return false
-      if (needle && !`${session.title} ${session.cwd}`.toLowerCase().includes(needle)) {
-        return false
-      }
-      return true
+    const filtered = list.filter(session => {
+      const hidden = archived.has(session.path)
+      return !(status === 'active' && hidden) && !(status === 'archived' && !hidden) &&
+        (!needle || (session.title + ' ' + session.cwd).toLowerCase().includes(needle))
     })
-    return {
-      sessions: sortSessions(filtered),
-      total: list.length,
-      searching: Boolean(needle),
-      latest: list.reduce((max, session) => Math.max(max, session.updatedAt), 0)
-    }
+    filtered.sort((a, b) => prefs.sort === 'name' ? a.title.localeCompare(b.title, 'zh-CN') :
+      prefs.sort === 'created' ? b.createdAt - a.createdAt : b.updatedAt - a.updatedAt)
+    return { sessions: filtered, total: list.length, searching: !!needle,
+      latest: list.reduce((max, session) => Math.max(max, session.updatedAt), 0) }
   }
-
-  if (prefs.group === 'none') {
-    if (visible.length === 0) return []
-    const view = applyProjectView('none', visible)
-    return [
-      {
-        key: 'none',
-        label: '',
-        sessions: view.sessions,
-        total: view.total,
-        searching: view.searching,
-        latest: view.latest,
-        order: 0
-      }
-    ]
+  // Ownership comes from the saved session, never from a directory shared by multiple projects.
+  const projectBuckets = new Map<string, { project?: Project; list: SessionSummary[] }>()
+  for (const project of catalogue.values()) {
+    if (project.roots.length < 2) continue
+    if (prefs.onlyActiveProject && activeProject && project.id !== activeProject.id) continue
+    projectBuckets.set(project.id, { project, list: [] })
   }
-
-  if (prefs.group === 'date') {
-    const buckets = new Map<string, { order: number; list: SessionSummary[] }>()
-    for (const session of visible) {
-      const { label, order } = dateGroup(session.updatedAt)
-      const bucket = buckets.get(label) ?? { order, list: [] }
-      bucket.list.push(session)
-      buckets.set(label, bucket)
-    }
-    return [...buckets.entries()]
-      .sort((a, b) => a[1].order - b[1].order)
-      .map(([label, bucket]) => {
-        const key = `date:${label}`
-        const view = applyProjectView(key, bucket.list)
-        return {
-          key,
-          label,
-          sessions: view.sessions,
-          total: view.total,
-          searching: view.searching,
-          latest: view.latest,
-          order: bucket.order
-        }
-      })
-  }
-
-  const folders = new Map<string, SessionSummary[]>()
-  // Sessions are keyed by repository, but a project groups several of them under one head so the
-  // list reads as "the thing I am working on" instead of three unrelated folders.
-  const projectKey = (dir: string): string => {
-    if (!activeProject) return dir
-    const needle = pathKey(dir)
-    const belongs = activeProject.roots.some((root) => pathKey(root.path) === needle)
-    return belongs ? 'project:' + activeProject.id : dir
-  }
+  const standalone: SessionSummary[] = []
   for (const session of visible) {
-    const key = projectKey(session.cwd || '')
-    const list = folders.get(key) ?? []
-    list.push(session)
-    folders.set(key, list)
+    const project = session.projectId ? catalogue.get(session.projectId) : undefined
+    const multiRoot = project ? project.roots.length > 1 : (session.additional?.length ?? 0) > 0
+    if (multiRoot) {
+      const id = session.projectId ?? 'roots:' + [session.cwd, ...(session.additional ?? [])].map(pathKey).sort().join('|')
+      const bucket = projectBuckets.get(id) ?? { project, list: [] }
+      bucket.list.push(session)
+      projectBuckets.set(id, bucket)
+    } else standalone.push(session)
   }
-  if (prefs.showEmptyGroups) {
-    const known = new Set<string>([cwd])
-    for (const session of visible) known.add(session.cwd || '')
-    for (const key of known) {
-      if (!includeDirectory(key)) continue
-      const groupKey = projectKey(key)
-      if (!folders.has(groupKey)) folders.set(groupKey, [])
-    }
-  }
-  const result = [...folders.entries()].map(([cwd, list]) => {
-    const isProject = cwd.startsWith('project:')
-    const key = isProject ? cwd : `folder:${cwd}`
-    const view = applyProjectView(key, list)
-    const primary = isProject
-      ? (activeProject?.roots.find((root) => root.primary) ?? activeProject?.roots[0])
-      : undefined
-    return {
-      key,
-      label: isProject
-        ? `${activeProject?.name ?? '项目'} · ${activeProject?.roots.length ?? 0} 个仓库`
-        : baseName(cwd) || '未命名目录',
-      // "+ new session" and the branch badge use the primary repository.
-      cwd: isProject ? (primary?.path ?? cwd) : cwd,
-      sessions: view.sessions,
-      total: view.total,
-      searching: view.searching,
-      latest: view.latest,
-      order: 0
-    }
+  const projectGroups: SessionGroup[] = [...projectBuckets].map(([id, bucket]) => {
+    const primary = bucket.project?.roots.find(root => root.primary) ?? bucket.project?.roots[0]
+    const key = 'project:' + id
+    return { key, label: bucket.project?.name ?? '多目录项目',
+      projectId: bucket.project?.id, rootCount: bucket.project?.roots.length ?? 1 + (bucket.list[0]?.additional?.length ?? 0),
+      cwd: primary?.path ?? bucket.list[0]?.cwd, order: 0, ...applyView(key, bucket.list) }
   })
-  result.sort((a, b) =>
-    prefs.sort === 'name' ? a.label.localeCompare(b.label, 'zh-CN') : b.latest - a.latest
-  )
-  return result
+  projectGroups.sort((a, b) => prefs.sort === 'name' ? a.label.localeCompare(b.label, 'zh-CN') : b.latest - a.latest)
+
+  const buckets = new Map<string, { label: string; cwd?: string; order: number; list: SessionSummary[] }>()
+  const add = (session: SessionSummary | undefined, directory: string) => {
+    const date = dateGroup(session?.updatedAt ?? Date.now())
+    const key = prefs.group === 'none' ? 'none' : prefs.group === 'date' ? 'date:' + date.label : 'folder:' + pathKey(directory)
+    const bucket = buckets.get(key) ?? {
+      label: prefs.group === 'none' ? '全部会话' : prefs.group === 'date' ? date.label : baseName(directory) || '未命名目录',
+      cwd: prefs.group === 'folder' ? directory : undefined,
+      order: prefs.group === 'date' ? date.order : 0, list: []
+    }
+    if (session) bucket.list.push(session)
+    buckets.set(key, bucket)
+  }
+  for (const session of standalone) add(session, session.cwd)
+  if (prefs.showEmptyGroups && prefs.group === 'folder' && (!prefs.onlyActiveProject || !activeProject)) add(undefined, cwd)
+  const ordinary: SessionGroup[] = [...buckets].map(([key, bucket]) => ({
+    key, label: bucket.label, cwd: bucket.cwd, order: bucket.order, ...applyView(key, bucket.list)
+  }))
+  ordinary.sort((a, b) => prefs.group === 'date' ? a.order - b.order :
+    prefs.sort === 'name' ? a.label.localeCompare(b.label, 'zh-CN') : b.latest - a.latest)
+  return [...projectGroups, ...ordinary]
 }

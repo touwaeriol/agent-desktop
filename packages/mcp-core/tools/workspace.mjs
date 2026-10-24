@@ -38,8 +38,8 @@ const SKIP_DIRS = new Set([
   '__pycache__'
 ])
 
-function roots() {
-  const raw = process.env.AGENT_DESKTOP_ROOTS
+function roots(context) {
+  const raw = context?.roots ? JSON.stringify(context.roots) : process.env.AGENT_DESKTOP_ROOTS
   if (!raw) return []
   try {
     const parsed = JSON.parse(raw)
@@ -56,15 +56,15 @@ function roots() {
   }
 }
 
-function rootListText() {
-  return roots()
+function rootListText(context) {
+  return roots(context)
     .map((root) => `- ${root.name}${root.primary ? '（主目录）' : ''}  ${root.path}`)
     .join('\n')
 }
 
 /** The root named by the caller, or the primary one. */
-function pickRoot(name) {
-  const all = roots()
+function pickRoot(name, context) {
+  const all = roots(context)
   if (all.length === 0) throw new Error('当前会话没有配置工作目录')
   if (name === undefined || name === null || String(name).trim() === '') {
     return all.find((root) => root.primary) ?? all[0]
@@ -74,7 +74,7 @@ function pickRoot(name) {
   if (byName) return byName
   const byPath = all.find((root) => root.path.toLowerCase() === path.resolve(String(name)).toLowerCase())
   if (byPath) return byPath
-  throw new Error(`没有名为「${name}」的目录。可用目录：\n${rootListText()}`)
+  throw new Error(`没有名为「${name}」的目录。可用目录：\n${rootListText(context)}`)
 }
 
 /** Resolve inside the root; anything that escapes it is refused rather than silently followed. */
@@ -102,11 +102,11 @@ export const workspaceRoots = {
     'List the directories this session works on: name, absolute path, and which one is the primary ' +
     'working directory. Other tools take these names as their `root` argument.',
   inputSchema: { type: 'object', properties: {}, additionalProperties: false },
-  async call() {
+  async call(_args, context) {
     try {
-      const all = roots()
+      const all = roots(context)
       if (all.length === 0) return text('当前会话只有一个工作目录，没有额外目录。')
-      return text(`这个会话覆盖 ${all.length} 个目录：\n${rootListText()}`)
+      return text(`这个会话覆盖 ${all.length} 个目录：\n${rootListText(context)}`)
     } catch (error) {
       return failure(error)
     }
@@ -131,9 +131,9 @@ export const readFile = {
     required: ['path'],
     additionalProperties: false
   },
-  async call(args) {
+  async call(args, context) {
     try {
-      const root = pickRoot(args?.root)
+      const root = pickRoot(args?.root, context)
       const target = inside(root, args?.path)
       const stat = await fs.stat(target)
       if (stat.isDirectory()) throw new Error(`${args?.path} 是目录，不是文件`)
@@ -240,9 +240,9 @@ export const grepFiles = {
     required: ['pattern'],
     additionalProperties: false
   },
-  async call(args) {
+  async call(args, context) {
     try {
-      const root = pickRoot(args?.root)
+      const root = pickRoot(args?.root, context)
       const pattern = String(args?.pattern ?? '')
       if (!pattern) throw new Error('pattern 不能为空')
       const limit = Math.min(Number(args?.limit) || MAX_MATCHES, MAX_MATCHES)
@@ -282,9 +282,9 @@ export const writeFile = {
     required: ['path', 'content'],
     additionalProperties: false
   },
-  async call(args) {
+  async call(args, context) {
     try {
-      const root = pickRoot(args?.root)
+      const root = pickRoot(args?.root, context)
       const target = inside(root, args?.path)
       const content = typeof args?.content === 'string' ? args.content : String(args?.content ?? '')
       let previous = null
@@ -333,9 +333,9 @@ export const editFile = {
     required: ['path', 'edits'],
     additionalProperties: false
   },
-  async call(args) {
+  async call(args, context) {
     try {
-      const root = pickRoot(args?.root)
+      const root = pickRoot(args?.root, context)
       const target = inside(root, args?.path)
       const original = await fs.readFile(target, 'utf8')
       let next = original
@@ -375,20 +375,23 @@ export const runBash = {
     required: ['command'],
     additionalProperties: false
   },
-  async call(args) {
+  async call(args, context) {
     try {
-      const root = pickRoot(args?.root)
+      const root = pickRoot(args?.root, context)
       const cwd = inside(root, args?.cwd)
       const command = String(args?.command ?? '')
       if (!command.trim()) throw new Error('command 不能为空')
       const seconds = Math.min(Math.max(Number(args?.timeout) || 120, 1), 1800)
+      if (context?.runBash) {
+        return await context.runBash({ ...args, cwd, command, timeout: seconds }, context.signal)
+      }
       // The app resolves Git Bash for us: this process does not inherit the fixed PATH.
-      const shell = process.env.AGENT_DESKTOP_SHELL || 'bash'
+      const shell = context?.shell || process.env.AGENT_DESKTOP_SHELL || 'bash'
       const result = await new Promise((resolve, reject) => {
         execFile(
           shell,
           ['-lc', command],
-          { cwd, timeout: seconds * 1000, maxBuffer: 8 * 1024 * 1024, windowsHide: true },
+          { cwd, signal: context?.signal, timeout: seconds * 1000, maxBuffer: 8 * 1024 * 1024, windowsHide: true },
           (error, stdout, stderr) => {
             if (error && error.killed) {
               reject(new Error(`命令超时（${seconds} 秒）：${command.slice(0, 120)}`))
@@ -414,8 +417,38 @@ export const runBash = {
   }
 }
 
+export const listFiles = {
+  name: 'list_files',
+  title: 'List workspace files',
+  description: 'List files and directories relative to root. Set recursive for file discovery. Returns at most 200 entries.',
+  inputSchema: {
+    type: 'object', properties: {
+      root: { type: 'string' }, path: { type: 'string' }, recursive: { type: 'boolean' }
+    }, additionalProperties: false
+  },
+  async call(args, context) {
+    try {
+      const root = pickRoot(args?.root, context)
+      const pending = [inside(root, args?.path)]
+      const entries = []
+      while (pending.length && entries.length < 200) {
+        const dir = pending.shift()
+        for (const item of await fs.readdir(dir, { withFileTypes: true })) {
+          if (entries.length >= 200) break
+          if (item.isSymbolicLink() || SKIP_DIRS.has(item.name)) continue
+          const full = path.join(dir, item.name)
+          entries.push(path.relative(root.path, full).split(path.sep).join('/') + (item.isDirectory() ? '/' : ''))
+          if (args?.recursive && item.isDirectory()) pending.push(full)
+        }
+      }
+      return text(entries.join('\n') + (entries.length === 200 ? '\n…最多显示 200 项，请缩小 path' : ''))
+    } catch (error) { return failure(error) }
+  }
+}
+
 export const workspaceTools = [
   workspaceRoots,
+  listFiles,
   readFile,
   grepFiles,
   writeFile,

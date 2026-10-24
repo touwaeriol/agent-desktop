@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import type { SubagentView } from '@shared/types'
+import type { SubagentView, PiStatus } from '@shared/types'
 import { ChevronIcon, SparkIcon } from './Icons'
 import { SUBAGENT_STATUS_LABELS, isSubagentRunning } from '../lib/subagents'
 
@@ -28,6 +28,9 @@ export function RunStatusBar({
   tokens,
   runningTools,
   subagents,
+  activity,
+  backgroundTasks = [],
+  onStop,
   onOpenSubagent
 }: {
   active: boolean
@@ -35,16 +38,19 @@ export function RunStatusBar({
   tokens?: number
   runningTools: number
   subagents: SubagentView[]
+  activity?: PiStatus['activity']
+  backgroundTasks?: NonNullable<PiStatus['backgroundTasks']>
+  onStop?: () => void
   onOpenSubagent: (id?: string) => void
 }) {
   const [, setTick] = useState(0)
   const running = subagents.filter(isSubagentRunning)
 
   useEffect(() => {
-    if (running.length === 0) return
+    if (running.length === 0 && backgroundTasks.length === 0) return
     const timer = setInterval(() => setTick((value) => value + 1), 1000)
     return () => clearInterval(timer)
-  }, [running.length])
+  }, [running.length, backgroundTasks.length])
 
   return (
     <div className="run-status">
@@ -65,13 +71,19 @@ export function RunStatusBar({
             </>
           )}
           <span className="run-sep">·</span>
-          <span>运行中</span>
+          <span>{activity?.label ?? '运行中'}</span>
         </>
       ) : (
         <span className="run-idle-label">
-          子代理运行中{running.length > 0 ? ` ${running.length}` : ''}
+          {running.length > 0 ? `子代理运行中 ${running.length}` : `后台命令运行中 ${backgroundTasks.length}`}
         </span>
       )}
+      {backgroundTasks.length > 0 && <div className="run-tasks">
+        {backgroundTasks.map(task => <span key={task.id} className="run-task" title={`${task.id} · ${task.command}`}>
+          后台命令 · {formatElapsed(Date.now() - task.startedAt)}
+        </span>)}
+        <button className="run-task" onClick={onStop}>停止运行</button>
+      </div>}
 
       {running.length > 0 && (
         <div className="run-tasks">

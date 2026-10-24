@@ -1,11 +1,15 @@
-import { toPiHistory, type HistoryMessage } from './history'
+import path from 'node:path'
+import os from 'node:os'
+import { setTimeout as delay } from 'node:timers/promises'
+import { BashTasks } from './bash-tasks'
+import { guardedStream } from './stream-guard'
 import type { EngineStartOptions } from './engine'
 import { engineCapabilities } from '../../shared/engine'
-import type { Model } from '@earendil-works/pi-ai'
+import type { Model, ThinkingLevel } from '@earendil-works/pi-ai'
 import type { PiModel, PiStatus, PromptImage, PromptResult } from '@shared/types'
 import * as providers from '../providers'
 import * as speed from '../speed'
-import type { TranscriptStore } from '../transcript-store'
+import type { TranscriptStore, StoredTranscript } from '../transcript-store'
 import { loadMcpTools } from './mcp-client'
 import {
   bridgeContext,
@@ -32,6 +36,12 @@ export class PropheyEngine implements AgentEngine {
   private autoCompact: { enabled: boolean; percent: number } = { enabled: false, percent: 50 }
   private loaded = false
   private controller?: AbortController
+  private notices: Array<{ text: string; wake: boolean; session?: string }> = []
+  private noticeTimer?: ReturnType<typeof setTimeout>
+  private bashTasks = new Map<string | undefined, BashTasks>()
+  private lastAbortAt = 0
+  private levels: string[] = []
+  private restoring = false
 
   constructor(
     private readonly options: {
@@ -40,6 +50,10 @@ export class PropheyEngine implements AgentEngine {
       onSettled(): void
       /** Absolute path of `tools/workspace.mjs`; the tools are shared with pi's MCP server. */
       toolModulePath?: string
+      shellPath?: string
+      bashLogDirectory?: string
+      allowedTools?: string[]
+      appendSystemPrompt?: string
       /** Where our own transcripts live; without it the conversation stays in memory. */
       transcripts?: TranscriptStore
       /** Current session id; the app allocates it. */
@@ -56,6 +70,8 @@ export class PropheyEngine implements AgentEngine {
       askModulePath?: string
       /** The processing tier the window selected; resolved per model. */
       speedMode?: () => 'standard' | 'fast' | 'ultrafast'
+      /** Max time without a model stream event, not a limit on a whole task. */
+      streamIdleTimeoutMs?: number
       /** The app's MCP endpoints (`/mcp/<key>` on the bridge), configured for this workspace. */
       mcpEndpoints?: (
         workspace: AgentWorkspace
@@ -105,7 +121,8 @@ export class PropheyEngine implements AgentEngine {
         : (workspace ?? this.roots)
     this.roots = { primary: wanted.primary, additional: [...wanted.additional] }
     this.tools = undefined
-    this.snapshot = { phase: 'ready', cwd: wanted.primary, isStreaming: false, compacting: false }
+    this.snapshot = { phase: 'ready', cwd: wanted.primary, isStreaming: false, compacting: false,
+      thinkingLevel: this.snapshot.thinkingLevel }
     this.options.onStatus(this.snapshot)
     // Pick a model up front: the window reads it from the status, and an unset model shows as
     // "未登录 / 无可用模型" even though the engine is perfectly able to run.
@@ -121,12 +138,18 @@ export class PropheyEngine implements AgentEngine {
       options.session === this.transcriptPath()
     if (options.session && !currentEmptySession) await this.switchSession(options.session)
     else await this.resume()
+    if (options.model) await this.setModel(options.model.provider, options.model.id).catch(() => undefined)
     this.setStatus({ sessionFile: this.transcriptPath() })
     return this.snapshot
   }
 
   stop(): void {
+    if (this.noticeTimer) clearTimeout(this.noticeTimer)
+    this.noticeTimer = undefined
     this.controller?.abort()
+    for (const tasks of this.bashTasks.values()) tasks.dispose()
+    this.bashTasks.clear()
+    this.tools = undefined
     this.snapshot = { ...this.snapshot, phase: 'stopped' }
     this.options.onStatus(this.snapshot)
   }
@@ -136,6 +159,7 @@ export class PropheyEngine implements AgentEngine {
   }
 
   setStatus(patch: Partial<PiStatus>): void {
+    if ('sessionFile' in patch) patch = { ...patch, backgroundTasks: this.bashTasks.get(this.sessionId)?.active() ?? [] }
     this.snapshot = { ...this.snapshot, ...patch }
     this.options.onStatus(this.snapshot)
   }
@@ -166,7 +190,7 @@ export class PropheyEngine implements AgentEngine {
 
   /** The provider catalogue, in the shape the window's picker expects. */
   async models(): Promise<Record<string, unknown>[]> {
-    const choices = await providers.listModelChoices({ includeUnconfigured: true })
+    const choices = await providers.listModelChoices()
     return choices.map((choice) => ({
       provider: choice.provider,
       id: choice.id,
@@ -176,22 +200,44 @@ export class PropheyEngine implements AgentEngine {
   }
 
   async setModel(provider: string, modelId: string): Promise<PiModel | undefined> {
+    return this.selectModel(provider, modelId)
+  }
+
+  private async selectModel(provider: string, modelId: string, initializing = false): Promise<PiModel | undefined> {
+    if (!initializing && this.busy()) throw new Error('请等当前回合结束后切换模型')
+    const choices = await providers.listModelChoices()
+    if (!choices.some(choice => choice.provider === provider && choice.id === modelId)) {
+      throw new Error(`模型 ${provider}/${modelId} 未在服务商中启用或尚未配置凭据`)
+    }
     const runtime = await providers.getRuntime()
     const model = runtime.getModel(provider, modelId) as Model<string> | undefined
     if (!model) throw new Error(`找不到模型 ${provider}/${modelId}`)
+    const levels = await providers.thinkingLevelsFor(model)
+    if (!initializing && this.busy()) throw new Error('请等当前回合结束后切换模型')
+    const sameModel = this.model?.provider === model.provider && this.model?.id === model.id
+    let officialDeepSeek = false
+    try { officialDeepSeek = new URL(model.baseUrl).hostname === 'api.deepseek.com' } catch { /* No official endpoint. */ }
+    const current = this.snapshot.thinkingLevel
+    const thinkingLevel = officialDeepSeek && levels.includes('high') && !sameModel
+      ? 'high'
+      : levels.includes(current ?? '') ? current : officialDeepSeek && levels.includes('high')
+        ? 'high' : levels.includes('medium') ? 'medium' : levels[0]
     this.model = model
+    this.levels = levels
     const info = modelInfo(model)
-    this.setStatus({ model: info })
+    this.setStatus({ model: info, thinkingLevel })
+    this.persist()
     return info
   }
 
-  /** This engine does not model thinking levels: one level, whatever the provider does. */
   thinkingLevels(): Promise<string[]> {
-    return Promise.resolve([])
+    return Promise.resolve([...this.levels])
   }
 
-  setThinkingLevel(): Promise<void> {
-    return Promise.reject(new Error('当前引擎不支持独立设置思考等级'))
+  async setThinkingLevel(level: string): Promise<void> {
+    if (!this.levels.includes(level)) throw new Error('当前模型不支持思考等级 ' + level)
+    this.setStatus({ thinkingLevel: level })
+    this.persist()
   }
 
   /**
@@ -217,17 +263,6 @@ export class PropheyEngine implements AgentEngine {
     }
   }
 
-  async importHistory(messages: HistoryMessage[]): Promise<void> {
-    if (this.busy()) throw new Error('请先停止当前回合')
-    if (!this.options.transcripts) throw new Error('历史存储未配置')
-    const id = (await this.options.newSessionId?.()) ?? 's_' + crypto.randomUUID()
-    const transcript = toPiHistory(messages, this.snapshot.model)
-    await this.options.transcripts.save(id, this.roots, transcript, true)
-    this.loaded = true
-    this.sessionId = id
-    this.transcript = transcript
-    this.setStatus({ sessionFile: this.transcriptPath(), sessionName: undefined })
-  }
 
   async messages(): Promise<unknown[]> {
     return [...this.transcript]
@@ -265,10 +300,10 @@ export class PropheyEngine implements AgentEngine {
     if (!model) throw new Error('没有可用的模型，无法压缩')
     if (this.transcript.length === 0) return {}
     const runtime = await providers.getRuntime()
-    this.setStatus({ compacting: true })
+    this.setStatus({ compacting: true, activity: { label: '正在压缩上下文', since: Date.now() } })
     this.options.onEvent({ type: 'compaction_start', reason: 'manual' })
     try {
-      const stream = runtime.streamSimple(
+      const stream = guardedStream<Record<string, unknown>>(signal => runtime.streamSimple(
         model,
         {
           systemPrompt:
@@ -280,10 +315,10 @@ export class PropheyEngine implements AgentEngine {
 
 用户额外要求：${instructions.trim()}`
               : ''),
-          messages: [...this.transcript] as never
+          messages: structuredClone(this.transcript) as never
         },
-        { signal: this.controller.signal }
-      )
+        { signal }
+      ) as AsyncIterable<Record<string, unknown>>, this.controller.signal, this.options.streamIdleTimeoutMs ?? 180_000)
       let text = ''
       let partial: Record<string, unknown> | undefined
       for await (const event of stream as AsyncIterable<Record<string, unknown>>) {
@@ -292,6 +327,7 @@ export class PropheyEngine implements AgentEngine {
         }
         if (event.type === 'text_end')
           text = String((event as { content?: unknown }).content ?? text)
+        if (event.type === 'done' && event.message) text = textOf(event.message as Record<string, unknown>)
         if (event.type === 'error') throw new Error(describeError(event.error))
       }
       if (!text.trim() && partial) text = textOf(partial)
@@ -308,7 +344,7 @@ ${text.trim()}`,
       this.options.onEvent({ type: 'compaction_end', summary: text.trim() })
       return { summary: text.trim() }
     } finally {
-      this.setStatus({ compacting: false })
+      this.setStatus({ compacting: false, activity: undefined })
       if (!this.isBusy) {
         this.controller = undefined
         this.options.onEvent({ type: 'agent_settled' })
@@ -318,6 +354,7 @@ ${text.trim()}`,
   }
 
   async newSession(): Promise<{ cancelled?: boolean }> {
+    this.tools = undefined
     this.transcript = []
     // A new session means a new transcript file; the app owns the id so it can persist it.
     this.sessionId =
@@ -338,8 +375,9 @@ ${text.trim()}`,
     const store = this.options.transcripts
     if (!store) this.unimplemented('会话克隆')
     const forkId = `s_${Math.random().toString(16).slice(2, 14)}`
-    await store.save(forkId, this.roots, this.transcript)
+    await store.save(forkId, this.roots, this.transcript, false, this.preferences())
     this.sessionId = forkId
+    this.tools = undefined
     this.setStatus({ sessionFile: this.transcriptPath() })
     return this.transcriptPath()
   }
@@ -356,11 +394,15 @@ ${text.trim()}`,
     if (!stored) throw new Error('会话不存在：' + sessionPath)
     this.loaded = true
     this.sessionId = id
+    this.tools = undefined
+    if (stored.workspace.primary) this.roots = stored.workspace
     this.transcript = stored.messages
+    await this.restorePreferences(stored)
     this.setStatus({ sessionFile: this.transcriptPath() })
     for (const message of this.transcript) {
       this.options.onEvent({ type: 'message_end', message })
     }
+    if (this.drainNotices()) this.scheduleNoticeTurn()
   }
 
   async discardSession(sessionPath: string): Promise<void> {
@@ -373,7 +415,11 @@ ${text.trim()}`,
   }
 
   async abort(): Promise<void> {
+    this.lastAbortAt = Date.now()
+    if (this.noticeTimer) clearTimeout(this.noticeTimer)
+    this.noticeTimer = undefined
     this.controller?.abort()
+    await this.bashTasks.get(this.sessionId)?.stopAll()
     await this.waitForSettle(15_000)
   }
 
@@ -399,8 +445,7 @@ ${text.trim()}`,
     if (!first) return undefined
     const model = runtime.getModel(first.provider, first.id) as Model<string> | undefined
     if (model) {
-      this.model = model
-      this.setStatus({ model: modelInfo(model) })
+      await this.selectModel(first.provider, first.id, true)
     }
     return model
   }
@@ -415,6 +460,7 @@ ${text.trim()}`,
     const stored = await store.load(this.sessionId).catch(() => undefined)
     if (!stored) return
     this.transcript = stored.messages
+    await this.restorePreferences(stored)
     // The window draws the transcript from the engine, so it has to hear about the restored one.
     for (const message of this.transcript) {
       this.options.onEvent({ type: 'message_end', message })
@@ -430,8 +476,23 @@ ${text.trim()}`,
 
   private persist(): void {
     const store = this.options.transcripts
-    if (!store || !this.sessionId) return
-    void store.save(this.sessionId, this.roots, this.transcript).catch(() => undefined)
+    if (!store || !this.sessionId || this.restoring) return
+    void store.save(this.sessionId, this.roots, this.transcript, false, this.preferences()).catch(() => undefined)
+  }
+
+  private preferences(): StoredTranscript['preferences'] {
+    return { model: this.model ? { provider: this.model.provider, id: this.model.id } : undefined,
+      thinkingLevel: this.snapshot.thinkingLevel }
+  }
+
+  private async restorePreferences(stored: StoredTranscript): Promise<void> {
+    this.restoring = true
+    try {
+      const selected = stored.preferences?.model
+      if (selected) await this.setModel(selected.provider, selected.id).catch(() => undefined)
+      const level = stored.preferences?.thinkingLevel
+      if (level && this.levels.includes(level)) this.setStatus({ thinkingLevel: level })
+    } finally { this.restoring = false }
   }
 
   /** Tools are loaded once; the module is the same one pi's MCP server serves. */
@@ -439,12 +500,35 @@ ${text.trim()}`,
     if (this.tools) return this.tools
     const modulePath = this.options.toolModulePath
     if (!modulePath) return []
-    // The module reads these from the environment: the same contract the MCP server gets.
-    process.env.AGENT_DESKTOP_ROOTS = JSON.stringify([
+    // Per-instance context: parallel workers must never overwrite each other's roots.
+    const roots = [
       { name: basename(this.roots.primary), path: this.roots.primary, primary: true },
       ...this.roots.additional.map((root) => ({ name: basename(root), path: root }))
-    ])
-    const workspace = await loadWorkspaceTools(modulePath).catch(() => [])
+    ]
+    const owner = this.sessionId
+    let commands = this.bashTasks.get(owner)
+    if (!commands) {
+      commands = new BashTasks({
+        directory: this.options.bashLogDirectory ?? path.join(os.tmpdir(), 'prophey-command-logs'),
+        shell: this.options.shellPath ?? 'bash',
+        notify: text => this.queueNotice(text, true, owner),
+        onChange: tasks => { if (owner === this.sessionId) this.setStatus({ backgroundTasks: tasks }) }
+      })
+      this.bashTasks.set(owner, commands)
+    }
+    const workspace = await loadWorkspaceTools(modulePath, {
+      roots, shell: this.options.shellPath,
+      runBash: (args: Record<string, unknown>, signal?: AbortSignal) => commands!.run(args, signal)
+    })
+    const bash = workspace.find(tool => tool.name === 'run_bash')
+    if (bash) {
+      bash.description += ' Output is saved to a log; returns at most 4000 bytes. Use run_in_background for immediate return. Otherwise commands still running after yield_time_ms (default 1000) continue in the background. Use read_bash_task for output and stop_bash_task to stop. Completion sends a short notice. Tasks stop when this engine is stopped or the app exits; logs are retained.'
+      bash.parameters = { ...bash.parameters, properties: {
+        ...(bash.parameters.properties as Record<string, unknown>),
+        run_in_background: { type: 'boolean' },
+        yield_time_ms: { type: 'integer', minimum: 0, maximum: 10000 }
+      } }
+    }
     // Subagents are app-level (they spawn their own processes); the tools just call the bridge.
     const bridge = this.options.bridge?.()
     const subagentPath = this.options.subagentModulePath
@@ -456,8 +540,25 @@ ${text.trim()}`,
     // MCP servers (codegraph / warpgrep / web) over the same bridge endpoints pi connects to.
     const endpoints = await this.options.mcpEndpoints?.(this.workspace()).catch(() => [])
     const mcp =
-      endpoints && endpoints.length > 0 ? await loadMcpTools(endpoints).catch(() => []) : []
-    this.tools = [...workspace, ...subagents, ...ask, ...mcp]
+      endpoints && endpoints.length > 0 ? await loadMcpTools(endpoints, this.controller?.signal) : []
+    this.tools = [...workspace, ...commands.tools(), ...subagents, ...ask, ...mcp]
+    if (this.options.allowedTools) {
+      const aliases: Record<string, string> = {
+        read: 'read_file', grep: 'grep_files', find: 'list_files', ls: 'list_files',
+        edit: 'edit_file', write: 'write_file', bash: 'run_bash'
+      }
+      const allowed = new Set(this.options.allowedTools.map((name) => aliases[name] ?? name))
+      if (allowed.has('run_bash')) {
+        allowed.add('read_bash_task')
+        allowed.add('stop_bash_task')
+      }
+      const unknown = [...allowed].filter((name) => !this.tools!.some((tool) => tool.name === name))
+      if (unknown.length) {
+        this.tools = undefined
+        throw new Error('Prophey 子代理不支持这些工具：' + unknown.join(', '))
+      }
+      this.tools = this.tools.filter((tool) => tool.name === 'workspace_roots' || allowed.has(tool.name))
+    }
     return this.tools
   }
 
@@ -470,12 +571,59 @@ ${text.trim()}`,
       '你是 Prophey 内置引擎的助手。',
       '工具都带 `root` 参数（目录名），路径相对该目录；越界会被拒绝。用 workspace_roots 查目录名。',
       '改文件前先读，改完再读回确认；命令用 run_bash 并指明目录。',
+      '长命令会后台执行，输出写入日志。完成通知不包含完整输出；需要时用 read_bash_task 的游标增量读取，避免重复读取日志。任务需要命令结果时，应等待完成后再下结论。',
+      this.options.appendSystemPrompt ?? '',
       ...roots
     ].join('\n')
   }
 
+  notify(text: string, wake: boolean): void {
+    this.queueNotice(text, wake, this.sessionId)
+  }
+
+  private queueNotice(text: string, wake: boolean, session?: string): void {
+    this.notices.push({ text: text.slice(0, 2000), wake: wake && Date.now() - this.lastAbortAt > 30_000, session })
+    if (session === this.sessionId && !this.busy()) {
+      const shouldWake = this.drainNotices()
+      if (shouldWake) this.scheduleNoticeTurn()
+    }
+  }
+
+  private drainNotices(): boolean {
+    if (this.notices.length === 0) return false
+    let wake = false
+    const current = this.notices.filter(notice => notice.session === this.sessionId)
+    this.notices = this.notices.filter(notice => notice.session !== this.sessionId)
+    for (const notice of current) {
+      wake ||= notice.wake
+      const message = {
+        role: 'user', customType: 'subagent_notice', timestamp: Date.now(),
+        content: '<system-reminder source="background-task">\n' + notice.text + '\n</system-reminder>'
+      }
+      this.transcript.push(message)
+      this.options.onEvent({ type: 'message_end', message: { ...message, role: 'custom' } })
+    }
+    this.persist()
+    return wake
+  }
+
+  private scheduleNoticeTurn(): void {
+    if (this.noticeTimer || !this.running()) return
+    this.noticeTimer = setTimeout(() => {
+      this.noticeTimer = undefined
+      if (this.running() && !this.busy()) void this.run(undefined)
+    }, 0)
+  }
+
   async prompt(
     message: string,
+    options: { behavior?: 'steer' | 'followUp'; images?: PromptImage[] } = {}
+  ): Promise<PromptResult> {
+    return this.run(message, options)
+  }
+
+  private async run(
+    message: string | undefined,
     options: { behavior?: 'steer' | 'followUp'; images?: PromptImage[] } = {}
   ): Promise<PromptResult> {
     if (this.snapshot.phase !== 'ready') return { ok: false, error: '引擎未就绪' }
@@ -483,16 +631,9 @@ ${text.trim()}`,
     this.controller = new AbortController()
     const signal = this.controller.signal
     this.isBusy = true
-    this.setStatus({ isStreaming: true })
+    this.setStatus({ isStreaming: true, activity: { label: '正在准备模型与工具', since: Date.now() } })
     this.options.onEvent({ type: 'agent_start' })
     try {
-      const runtime = await providers.getRuntime()
-      const model = this.model ?? (await this.pickModel())
-      if (!model) throw new Error('没有已配置的服务商，请先登录')
-      const tools = await this.toolSet()
-      signal.throwIfAborted()
-      if (this.shouldCompact()) await this.compact()
-      signal.throwIfAborted()
       const user: Record<string, unknown> = {
         role: 'user',
         content: options.images?.length
@@ -500,15 +641,29 @@ ${text.trim()}`,
           : message,
         timestamp: Date.now()
       }
-      this.transcript.push(user)
-      this.persist()
-      this.options.onEvent({ type: 'message_start', message: user })
-      for (let round = 0; round < MAX_ROUNDS; round++) {
+      this.drainNotices()
+      if (message !== undefined) {
+        this.transcript.push(user)
+        this.persist()
+        this.options.onEvent({ type: 'message_start', message: user })
+      }
+      const runtime = await providers.getRuntime()
+      const model = this.model ?? (await this.pickModel())
+      if (!model) throw new Error('没有已配置的服务商，请先登录')
+      const tools = await this.toolSet()
+      signal.throwIfAborted()
+      // A task ends when the model finishes or the user stops it, never at a silent tool count.
+      for (;;) {
         signal.throwIfAborted()
+        if (this.shouldCompact()) await this.compact()
+        this.drainNotices()
         const answer = await this.streamRoundWithRetry(runtime, model, tools)
         if (!answer.ok) throw new Error(answer.error)
         const calls = toolCallsOf(answer.message)
-        if (!calls.length) break
+        if (!calls.length) {
+          if (this.notices.some((notice) => notice.session === this.sessionId && notice.wake)) continue
+          break
+        }
         for (const call of calls) {
           signal.throwIfAborted()
           this.transcript.push(await this.runTool(call, tools))
@@ -518,19 +673,22 @@ ${text.trim()}`,
       return { ok: true, disposition: 'started' }
     } catch (error) {
       const text = signal.aborted ? '已停止' : describeError(error)
-      if (!signal.aborted)
-        this.options.onEvent({
-          type: 'message_end',
-          message: { role: 'assistant', content: [{ type: 'text', text }], stopReason: 'error' }
-        })
+      if (!signal.aborted) {
+        const failure = { role: 'assistant', content: [{ type: 'text', text }], stopReason: 'error', timestamp: Date.now() }
+        this.transcript.push(failure)
+        this.persist()
+        this.options.onEvent({ type: 'message_end', message: failure })
+      }
       return { ok: false, error: text }
     } finally {
+      const wake = this.drainNotices()
       this.isBusy = false
       this.controller = undefined
-      this.setStatus({ isStreaming: false, compacting: false })
+      this.setStatus({ isStreaming: false, compacting: false, activity: undefined })
       this.options.onEvent({ type: 'agent_end' })
       this.options.onEvent({ type: 'agent_settled' })
       this.options.onSettled()
+      if (wake && !signal.aborted) this.scheduleNoticeTurn()
     }
   }
 
@@ -548,17 +706,18 @@ ${text.trim()}`,
     let lastError = ''
     for (let attempt = 0; attempt < RETRY_DELAYS_MS.length; attempt += 1) {
       this.controller?.signal.throwIfAborted()
-      const result = await this.streamRound(runtime, model, tools)
+      const result = await this.streamRound(runtime, model, tools).catch(error => ({ ok: false as const, error: describeError(error) }))
       if (result.ok) return result
       lastError = result.error
       if (!isRetryable(lastError)) return result
+      this.setStatus({ activity: { label: `连接异常，正在重试（${attempt + 1}/${RETRY_DELAYS_MS.length}）`, since: Date.now() } })
       this.options.onEvent({
         type: 'auto_retry_start',
         attempt: attempt + 1,
         delayMs: RETRY_DELAYS_MS[attempt],
         error: lastError
       })
-      await new Promise((resolve) => setTimeout(resolve, RETRY_DELAYS_MS[attempt]))
+      await delay(RETRY_DELAYS_MS[attempt], undefined, { signal: this.controller?.signal })
       this.options.onEvent({ type: 'auto_retry_end', success: false })
     }
     return { ok: false, error: lastError }
@@ -595,18 +754,22 @@ ${text.trim()}`,
               : {})
           }
     this.options.onEvent({ type: 'message_start', message: { role: 'assistant' } })
-    const stream = runtime.streamSimple(
+    this.setStatus({ activity: { label: '正在等待模型回复', since: Date.now() } })
+    const stream = guardedStream<Record<string, unknown>>(signal => runtime.streamSimple(
       model,
       {
         systemPrompt: this.systemPrompt(),
-        // A copy: the SDK normalizes the array in place, and a system message must not end up in
-        // our transcript (it would be replayed and persisted on every turn).
-        messages: [...this.transcript] as never,
+        // Keep the original provider metadata/signatures untouched. The same pi SDK adapters
+        // translate this copy into the target model's protocol at request time.
+        messages: structuredClone(this.transcript) as never,
         tools: toolDeclarations(tools)
       },
-      { ...fastOptions, signal: this.controller?.signal }
-    )
+      { ...fastOptions, signal,
+        reasoning: this.snapshot.thinkingLevel === 'off' ? undefined : this.snapshot.thinkingLevel as ThinkingLevel | undefined }
+    ) as AsyncIterable<Record<string, unknown>>, this.controller?.signal, this.options.streamIdleTimeoutMs ?? 180_000)
     let partial: Record<string, unknown> | undefined
+    let completed = false
+    let received = false
     for await (const event of stream as AsyncIterable<Record<string, unknown>>) {
       if (
         event.type === 'text_delta' ||
@@ -614,6 +777,10 @@ ${text.trim()}`,
         event.type === 'text_end' ||
         event.type === 'thinking_end'
       ) {
+        if (!received) {
+          received = true
+          this.setStatus({ activity: { label: event.type.startsWith('thinking') ? '模型正在思考' : '正在生成回复', since: Date.now() } })
+        }
         partial = event.partial as Record<string, unknown>
         this.options.onEvent({
           type: 'message_update',
@@ -625,10 +792,14 @@ ${text.trim()}`,
         return { ok: false, error: describeError(event.error) }
       }
       if (event.type === 'done' && event.message) {
+        completed = true
         partial = event.message as Record<string, unknown>
       }
     }
-    const message = (partial ?? { role: 'assistant', content: [] }) as Record<string, unknown>
+    if (!completed || !partial) return { ok: false, error: '模型流提前关闭，没有完整回复' }
+    if (!textOf(partial).trim() && toolCallsOf(partial).length === 0) return { ok: false, error: '模型返回了空回复，请检查模型配置后重试' }
+    const message = { ...partial, api: partial.api ?? model.api,
+      provider: partial.provider ?? model.provider, model: partial.model ?? model.id }
     this.transcript.push(message)
     this.options.onEvent({ type: 'message_end', message })
     this.persist()
@@ -642,6 +813,7 @@ ${text.trim()}`,
   ): Promise<Record<string, unknown>> {
     const tool = tools.find((entry) => entry.name === call.name)
     const started = Date.now()
+    this.setStatus({ activity: { label: `正在执行 ${call.name}`, since: started } })
     this.options.onEvent({
       type: 'tool_execution_start',
       toolCallId: call.id,
@@ -700,7 +872,6 @@ function textOf(message: Record<string, unknown>): string {
 }
 
 /** Rounds per turn: a tool-using answer rarely needs more, and it bounds a runaway loop. */
-const MAX_ROUNDS = 16
 
 /** Backoff before each retry; length is the retry budget. */
 const RETRY_DELAYS_MS = [1500, 4000, 9000]

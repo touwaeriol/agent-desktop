@@ -1,4 +1,3 @@
-import type { HistoryMessage } from './history'
 import type {
   PiStatus,
   PiModel,
@@ -154,7 +153,6 @@ export abstract class NativeEngine implements AgentEngine {
   abstract thinkingLevels(): Promise<string[]>
   abstract setThinkingLevel(level: string): Promise<void>
   abstract compact(instructions?: string): Promise<{ summary?: string }>
-  abstract importHistory(messages: HistoryMessage[]): Promise<void>
   abstract newSession(): Promise<{ cancelled?: boolean }>
   abstract switchSession(path: string): Promise<void>
   abstract clone(): Promise<string | undefined>

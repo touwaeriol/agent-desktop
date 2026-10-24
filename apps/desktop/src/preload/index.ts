@@ -26,8 +26,8 @@ const bridge: PiBridge = {
   getStatus: () => ipcRenderer.invoke('pi:get-status') as Promise<PiStatus>,
   listWorkspaceFiles: () => ipcRenderer.invoke('workspace:files') as Promise<string[]>,
   restart: (cwd?: string) => ipcRenderer.invoke('pi:restart', cwd) as Promise<PiStatus>,
-  newProjectSession: (cwd: string) =>
-    ipcRenderer.invoke('pi:new-project-session', cwd) as Promise<PiStatus>,
+  newProjectSession: (cwd, options) =>
+    ipcRenderer.invoke('pi:new-project-session', cwd, options) as Promise<PiStatus>,
   repoInfo: (dir?: string) => ipcRenderer.invoke('pi:repo-info', dir) as Promise<RepoInfo>,
   listRepos: (dirs: string[]) =>
     ipcRenderer.invoke('pi:repos', dirs) as Promise<Record<string, RepoInfo>>,
@@ -41,20 +41,20 @@ const bridge: PiBridge = {
   createProjectFromDialog: () => ipcRenderer.invoke('projects:create-from-dialog'),
   addProjectRoot: (id: string) => ipcRenderer.invoke('projects:add-root', id),
   removeProject: (id) => ipcRenderer.invoke('projects:remove', id),
-  activateProject: (id?: string) => ipcRenderer.invoke('projects:activate', id),
-  openSession: (sessionPath: string, cwd: string) =>
-    ipcRenderer.invoke('pi:open-session', sessionPath, cwd) as Promise<PiStatus>,
+  activateProject: (id?: string, options?: { stop?: boolean }) =>
+    ipcRenderer.invoke('projects:activate', id, options),
+  openSession: (sessionPath: string, cwd: string, options?: { stop?: boolean }) =>
+    ipcRenderer.invoke('pi:open-session', sessionPath, cwd, options) as Promise<PiStatus>,
   getEngineCommands: () => ipcRenderer.invoke('engine:commands'),
   executeEngineCommand: (name, args) => ipcRenderer.invoke('engine:command', name, args),
   setEngineSandbox: (mode) => ipcRenderer.invoke('engine:sandbox', mode),
+  setEngineCodexQuestions: (enabled) => ipcRenderer.invoke('engine:codex-questions', enabled),
   getDesktopConfig: () => ipcRenderer.invoke('desktop:config'),
   setEngine: (engine: 'pi' | 'prophey' | 'claude' | 'codex') =>
     ipcRenderer.invoke('desktop:set-engine', engine),
   setDefaultEngine: (engine) => ipcRenderer.invoke('desktop:set-default-engine', engine),
   setSessionMode: (mode: 'shared' | 'isolated') =>
     ipcRenderer.invoke('desktop:set-session-mode', mode) as Promise<PiStatus>,
-  setProfile: (mode: 'shared' | 'desktop') => ipcRenderer.invoke('desktop:set-profile', mode),
-  importCliConfig: () => ipcRenderer.invoke('providers:import-cli'),
   getUpdateSnapshot: () => ipcRenderer.invoke('updates:snapshot') as Promise<AppUpdateSnapshot>,
   checkForUpdates: () => ipcRenderer.invoke('updates:check') as Promise<AppUpdateSnapshot>,
   installUpdate: () => ipcRenderer.invoke('updates:install') as Promise<AppUpdateSnapshot>,
@@ -63,11 +63,12 @@ const bridge: PiBridge = {
     ipcRenderer.invoke('updates:auto', enabled) as Promise<AppUpdateSnapshot>,
   onUpdate: (listener) => subscribe('app-update', listener),
   getProxyInfo: () => ipcRenderer.invoke('app:proxy'),
-  chooseWorkspace: () => ipcRenderer.invoke('pi:choose-workspace') as Promise<PiStatus | null>,
+  chooseWorkspace: (options?: { stop?: boolean }) =>
+    ipcRenderer.invoke('pi:choose-workspace', options) as Promise<PiStatus | null>,
   prompt: (message: string, streamingBehavior?: 'steer' | 'followUp', images?: PromptImage[]) =>
     ipcRenderer.invoke('pi:prompt', message, streamingBehavior, images),
   abort: () => ipcRenderer.invoke('pi:abort') as Promise<void>,
-  newSession: () => ipcRenderer.invoke('pi:new-session'),
+  newSession: (options) => ipcRenderer.invoke('pi:new-session', options),
   switchSession: (sessionPath: string) => ipcRenderer.invoke('pi:switch-session', sessionPath),
   getMessages: () => ipcRenderer.invoke('pi:get-messages') as Promise<AgentMessage[]>,
   getSessionStats: () => ipcRenderer.invoke('pi:session-stats'),

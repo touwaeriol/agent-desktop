@@ -61,6 +61,7 @@ const server = http.createServer((req, res) => {
 })
 async function run(phase, port) {
   const env = { ...process.env, PROPHEY_HANDOFF_ROOT: root, PROPHEY_HANDOFF_TEMP: temporary,
+    PI_CODING_AGENT_DIR: path.join(data, 'pi'),
     PROPHEY_HANDOFF_NATIVE: native ? '1' : '', PROPHEY_HANDOFF_PHASE: String(phase),
     CODEX_HOME: path.join(temporary, 'codex'), CLAUDE_CONFIG_DIR: path.join(temporary, 'claude'),
     ANTHROPIC_BASE_URL: 'http://127.0.0.1:' + port, ANTHROPIC_API_KEY: 'local-proof-not-a-secret',
@@ -96,7 +97,7 @@ async function run(phase, port) {
       await run(phase, port)
     }
     assert(fs.readFileSync(source, 'utf8').includes('PRIVATE_THOUGHT_SENTINEL'), 'source transcript must stay unchanged')
-    console.log('Handoff integration passed: native files, UI, engine changes, restart, rollback and source preservation')
+    console.log('Handoff integration passed: locked sessions, fresh-session engine choices, restart, rollback and source preservation')
   } finally {
     server.closeAllConnections(); server.close()
     assert.equal(path.dirname(temporary), path.resolve(os.tmpdir()))

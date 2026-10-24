@@ -1,9 +1,9 @@
-import { randomUUID } from 'node:crypto'
-import type { AgentMessage, ContentBlock, PiModel } from '../../shared/types'
+import type { AgentMessage, ContentBlock } from '../../shared/types'
+
+// Read compatibility for previously imported sessions only. Live model switches use pi SDK's
+// adapters on a cloned transcript, never this lossy legacy normalization.
 
 export type HistoryMessage = AgentMessage & { role: 'user' | 'assistant' | 'toolResult' }
-const emptyUsage = () => ({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,
-  cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } })
 
 function toolArguments(value: unknown): Record<string, unknown> {
   if (typeof value === 'string') {
@@ -41,7 +41,7 @@ export function normalizeHistory(input: unknown[]): HistoryMessage[] {
   const finishPending = (): void => {
     for (const tool of pending.values()) out.push({ role: 'toolResult', toolCallId: tool.id,
       toolName: tool.name, isError: true, content: [{ type: 'text',
-        text: '切换引擎前未收到此工具的结果；执行状态未知，请先检查实际状态，不要假定成功。' }] })
+        text: '旧历史中缺少此工具的结果；执行状态未知，请先检查实际状态，不要假定成功。' }] })
     pending.clear()
   }
   for (const value of input) {
@@ -81,51 +81,6 @@ export function normalizeHistory(input: unknown[]): HistoryMessage[] {
   }
   finishPending()
   return out
-}
-
-export function toPiHistory(history: HistoryMessage[], model?: PiModel): Array<Record<string, unknown>> {
-  return history.map((message) => ({ ...structuredClone(message), timestamp: message.timestamp ?? Date.now(),
-    ...(message.role === 'assistant' ? { api: 'openai-completions', provider: model?.provider ?? 'imported',
-      model: model?.id || 'imported', usage: emptyUsage(),
-      stopReason: Array.isArray(message.content) && message.content.some((b) => b.type === 'toolCall') ? 'toolUse' : 'stop' } : {}) }))
-}
-
-export function toClaudeEntries(history: HistoryMessage[], sessionId: string, cwd: string): Array<Record<string, unknown> & { type: string }> {
-  let parentUuid: string | null = null
-  return history.map((entry) => {
-    const uuid = randomUUID()
-    const content = blocks(entry.content, true).map((block) => {
-      if (block.type === 'toolCall') return { type: 'tool_use', id: block.id, name: block.name, input: block.arguments }
-      if (block.type === 'image') return { type: 'image', source: { type: 'base64', media_type: block.mimeType, data: block.data } }
-      return block
-    })
-    const role = entry.role === 'toolResult' ? 'user' : entry.role
-    const message = { role,
-      content: entry.role === 'toolResult' ? [{ type: 'tool_result', tool_use_id: entry.toolCallId, content, is_error: entry.isError }] : content,
-      ...(role === 'assistant' ? { id: randomUUID(), type: 'message', model: 'imported',
-        stop_reason: content.some((b) => b.type === 'tool_use') ? 'tool_use' : 'end_turn',
-        stop_sequence: null, usage: { input_tokens: 0, output_tokens: 0 } } : {}) }
-    const record = { type: role, uuid, parentUuid, sessionId, cwd, isSidechain: false,
-      userType: 'external', timestamp: new Date(entry.timestamp ?? Date.now()).toISOString(), message }
-    parentUuid = uuid
-    return record
-  })
-}
-
-export function toCodexItems(history: HistoryMessage[]): Record<string, unknown>[] {
-  return history.flatMap((entry): Record<string, unknown>[] => {
-    const content = blocks(entry.content, true)
-    const text = content.filter((b) => b.type !== 'toolCall').map((block) => block.type === 'image'
-      ? { type: 'input_image', image_url: 'data:' + block.mimeType + ';base64,' + block.data }
-      : { type: entry.role === 'assistant' ? 'output_text' : 'input_text', text: block.text ?? '' })
-    if (entry.role === 'toolResult') return [{ type: 'function_call_output', call_id: entry.toolCallId,
-      output: entry.isError ? [{ type: 'input_text', text: '工具返回错误或状态未知：' }, ...text] : text }]
-    return [
-      ...(text.length ? [{ type: 'message', role: entry.role, content: text }] : []),
-      ...content.filter((b) => b.type === 'toolCall').map((b) => ({ type: 'function_call',
-        name: b.name, call_id: b.id, arguments: JSON.stringify(b.arguments ?? {}) }))
-    ]
-  })
 }
 
 /** Codex model-visible imports may not be projected into thread.turns by the native server. */

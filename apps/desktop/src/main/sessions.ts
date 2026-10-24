@@ -68,12 +68,16 @@ export async function readSummary(file: string): Promise<SessionSummary | null> 
           if (!Number.isNaN(parsed)) createdAt = parsed
         }
       }
+      if (entry.type === 'header') {
+        const workspace = entry.workspace as { primary?: string } | undefined
+        if (typeof workspace?.primary === 'string') cwd = workspace.primary
+      }
       if (entry.type === 'session_info' && typeof entry.name === 'string' && entry.name.trim()) {
         title = entry.name.trim()
       }
-      if (!fallback && entry.type === 'message' && entry.message) {
+      if (!fallback && entry.message) {
         const message = entry.message as Record<string, unknown>
-        if (message.role === 'user') {
+        if (message.role === 'user' && !message.customType) {
           const textContent = textOfContent(message.content).replace(/\s+/g, ' ').trim()
           if (textContent) fallback = textContent
         }

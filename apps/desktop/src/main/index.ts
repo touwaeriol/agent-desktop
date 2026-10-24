@@ -1,7 +1,8 @@
 import { ImportedHistoryStore } from './imported-history-store'
-import { normalizeHistory } from './agent/history'
 import { writeJsonAtomic } from './storage'
 import { listEngineCommands, executeEngineCommand } from './engine-commands'
+import { conversationHasStarted } from '../shared/session-policy'
+import { recentDirectories } from '../shared/recent-directories'
 import { compactionRatio, compactionPercent, reserveFor, ratioFromPercent, ratioFromTokens } from './compaction-policy'
 import { isNativeSessionReference, type EngineId } from '../shared/engine'
 import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron'
@@ -13,8 +14,10 @@ import { ClaudeCodeEngine } from './agent/claude-engine'
 import { CodexEngine } from './agent/codex-engine'
 import { PropheyEngine } from './agent/prophey-engine'
 import { PiEngine } from './agent/pi-engine'
+import { idleBeforeSwitch } from './agent/switch-guard'
 import { listSessions, readSummary } from './sessions'
 import { SessionStore, toSummary, type SessionRecord } from './session-store'
+import { generateSessionTitle, promptTitle } from './session-title'
 import { TranscriptStore } from './transcript-store'
 import * as providers from './providers'
 import * as updates from './updates'
@@ -100,18 +103,43 @@ async function importPiSessions(): Promise<void> {
 }
 
 let sessionWrite: Promise<void> = Promise.resolve()
+const titleJobs = new Map<string, { title: string; source: 'prompt' | 'generated' }>()
+
+function requestSessionTitle(file: string, prompt: string, model?: PiModel): void {
+  if (titleJobs.has(file)) return
+  const job = { title: promptTitle(prompt), source: 'prompt' as 'prompt' | 'generated' }
+  titleJobs.set(file, job)
+  void rememberSession()
+  void generateSessionTitle(prompt, model).then(title => {
+    job.title = title
+    job.source = 'generated'
+    const write = sessionWrite.then(async () => {
+      const record = sessionStore?.byPath(file)
+      if (!record || !sessionStore) return // First transcript write has not completed yet.
+      if (await sessionStore.setGeneratedTitle(record.id, title)) {
+        mainWindow?.webContents.send('pi:event', { type: 'session_title_updated', sessionKey: toSummary(record).path, title })
+        broadcastStatus()
+      }
+      titleJobs.delete(file)
+    })
+    sessionWrite = write.catch(() => undefined)
+    return write
+  }).catch(() => {
+    // Keep the first-prompt title. A metadata failure must never stop the main task.
+  })
+}
 
 /** Finish earlier observations before committing an engine change to the same session. */
 function rememberSession(
-  extra: { title?: string } = {}, duringSwitch = false, previous?: SessionRecord
+  extra: { title?: string } = {}, duringSwitch = false
 ): Promise<void> {
-  const next = sessionWrite.then(() => recordCurrentSession(extra, duringSwitch, previous))
+  const next = sessionWrite.then(() => recordCurrentSession(extra, duringSwitch))
   sessionWrite = next.catch(() => undefined)
   return next
 }
 
 async function recordCurrentSession(
-  extra: { title?: string } = {}, duringSwitch = false, previous?: SessionRecord
+  extra: { title?: string } = {}, duringSwitch = false
 ): Promise<void> {
   if (switchingEngine && !duringSwitch) return
   if (!sessionStore || btwActive) return
@@ -119,8 +147,9 @@ async function recordCurrentSession(
   const snapshot = { ...status }
   const file = snapshot.sessionFile
   if (!file) return
-  // Engines can assign a path before the first durable turn; never persist a missing transcript.
-  if (!isNativeSessionReference(file) && !existsSync(file)) return
+  // Show a real first turn immediately, even while its atomic transcript write is in flight.
+  if (!isNativeSessionReference(file) && !existsSync(file) &&
+    (!owner.busy() || !conversationHasStarted(await owner.messages()))) return
   // Native IDs can exist before a durable session is materialized. Do not save an empty ID.
   if (isNativeSessionReference(file) && (await owner.messages()).length === 0) return
   if (owner !== currentEngine || (switchingEngine && !duringSwitch)) return
@@ -129,9 +158,11 @@ async function recordCurrentSession(
   const projectId = desktopConfig.activeProject
   if (desktopConfig.engineSessions?.[engineId] !== file)
     await saveConfig({ engineSessions: { ...desktopConfig.engineSessions, [engineId]: file } })
-  let title = previous?.title || snapshot.sessionName || extra.title
-  const known = previous ?? sessionStore.byPath(file)
-  if (!title && (!known || !known.title)) {
+  const known = sessionStore.byPath(file)
+  const job = titleJobs.get(file)
+  const protectedTitle = known?.titleSource === 'manual' || known?.titleSource === 'generated'
+  let title = protectedTitle ? known?.title : job?.title || snapshot.sessionName || extra.title
+  if (!title && (!known?.title || known.title === path.basename(file, '.jsonl'))) {
     if (isNativeSessionReference(file)) {
       const messages = await owner.messages().catch(() => [])
       const first = messages.find((m: any) => m?.role === 'user') as
@@ -148,17 +179,19 @@ async function recordCurrentSession(
   }
   if (owner !== currentEngine || (switchingEngine && !duringSwitch)) return
   const saved = await sessionStore.upsert({
-      ...(previous ? { id: previous.id, key: previous.key || previous.path || previous.id } : {}),
       engine: engineId,
       path: file,
       cwd: snapshot.cwd,
       ...(title ? { title } : {}),
+      ...(job && !protectedTitle ? { titleSource: job.source } : {}),
       additional: workspace.additional,
       ...(projectId ? { projectId } : {}),
       updatedAt: Date.now()
-    }, Boolean(previous))
+    })
   const activeSession = toSummary(saved).path
   if (desktopConfig.activeSession !== activeSession) await saveConfig({ activeSession })
+  if (!known || known.title !== saved.title) mainWindow?.webContents.send('pi:event', { type: 'session_title_updated', sessionKey: activeSession, title: saved.title })
+  if (job?.source === 'generated') titleJobs.delete(file)
   broadcastStatus()
 }
 
@@ -220,10 +253,12 @@ function codexLaunch(): { command: string; script?: string } {
 }
 
 let engineGeneration = 0
+let conversationStarted = false
 
 /** Engine factory: Prophey is the default; `pi` stays available as the other engine. */
 function createEngine(): AgentEngine {
   const generation = ++engineGeneration
+  conversationStarted = false
   const shared = {
     ask: bridge.askEngine,
     onStatus: (next: PiStatus) => {
@@ -236,6 +271,10 @@ function createEngine(): AgentEngine {
     },
     onEvent: (record: Record<string, unknown>) => {
       if (generation !== engineGeneration) return
+      if (!conversationStarted && !btwActive && record.message && conversationHasStarted([record.message])) {
+        conversationStarted = true
+        broadcastStatus()
+      }
       // While the /btw panel is open the window must not see the fork's transcript.
       if (btwActive || switchingEngine) return
       mainWindow?.webContents.send('pi:event', record)
@@ -268,13 +307,16 @@ function createEngine(): AgentEngine {
       binary: command,
       historyStore: new ImportedHistoryStore(path.join(app.getPath('userData'), 'imports', 'codex')),
       script,
-      sandbox: () => desktopConfig.codexSandbox
+      sandbox: () => desktopConfig.codexSandbox,
+      questions: () => desktopConfig.codexRequestUserInput !== false
     })
   }
   if (desktopConfig.engine !== 'pi') {
     return new PropheyEngine({
       ...shared,
       toolModulePath: coreToolsModule(),
+      shellPath: realBashPath(),
+      bashLogDirectory: path.join(app.getPath('userData'), 'command-logs'),
       transcripts: new TranscriptStore(path.join(app.getPath('userData'), 'transcripts')),
       sessionId: () => desktopConfig.propheySessionId,
       // The app owns the id, so it is saved before the engine starts writing the new transcript.
@@ -294,7 +336,7 @@ function createEngine(): AgentEngine {
         const token = desktopConfig.mcp?.bridgeToken
         return port && token ? { url: `http://127.0.0.1:${port}`, token } : undefined
       },
-      subagentModulePath: coreToolModule('subagent.mjs'),
+      subagentModulePath: subagentConfig().enabled ? coreToolModule('subagent.mjs') : undefined,
       askModulePath: coreToolModule('ask-user.mjs'),
       mcpEndpoints: (workspace) => mcpEndpointsFor(workspace),
       speedMode: () => currentSpeedMode()
@@ -302,13 +344,11 @@ function createEngine(): AgentEngine {
   }
   return new PiEngine({
     ...shared,
-    historyDir: path.join(app.getPath('userData'), 'imports', 'pi'),
     prepare: async (workspace) => {
       await applySystemProxy()
       cancelPendingAsks('pi 已重启')
       const launch = await mcpLaunch(workspace)
-      // An isolated profile is just this variable: pi then reads auth/models/settings/mcp/sessions
-      // from the desktop directory instead of the CLI's.
+      // Keep the child process and SDK on the same configuration directory.
       const env = withRealBash({ ...launch.env })
       // Read by the extension's request hooks; it re-checks the model before touching the payload.
       env.AGENT_DESKTOP_SPEED = speed.resolveSpeedMode(status.model, currentSpeedMode())
@@ -335,7 +375,7 @@ function createEngine(): AgentEngine {
           ]
         })
       }
-      if (profile.isIsolatedProfile()) env.PI_CODING_AGENT_DIR = profile.agentDir()
+      env.PI_CODING_AGENT_DIR = profile.agentDir()
       return { args: launch.args, env }
     },
     sessionArgs: () => sessionArgs(),
@@ -426,12 +466,12 @@ interface DesktopConfig {
   pendingEngineSwitch?: { engine: EngineId; cwd: string; session?: string;
     propheySessionId?: string; activeProject?: string; record?: SessionRecord }
   codexSandbox?: 'read-only' | 'workspace-write'
+  /** Codex's experimental `request_user_input` tool, so the model can ask instead of guessing. */
+  codexRequestUserInput?: boolean
   /** Repositories the user worked in, most recent first (sidebar "切换仓库" menu). */
   recentRepos?: string[]
   /** Per-repository defaults applied to a new session in that repository. */
   repoDefaults?: Record<string, { provider?: string; model?: string; thinkingLevel?: string }>
-  /** `shared` uses the pi CLI's `~/.pi/agent`; `desktop` keeps its own copy under userData. */
-  profile?: 'shared' | 'desktop'
 }
 
 function configPath(): string {
@@ -457,18 +497,9 @@ function currentSessionMode(): SessionMode {
   return desktopConfig.sessionMode === 'isolated' ? 'isolated' : 'shared'
 }
 
-/** Where an isolated profile lives: `auth.json`, `models.json`, `settings.json`, `mcp.json`, sessions. */
-function desktopProfileDir(): string {
-  return path.join(app.getPath('userData'), 'pi')
-}
-
-function currentProfile(): 'shared' | 'desktop' {
-  return desktopConfig.profile === 'desktop' ? 'desktop' : 'shared'
-}
-
-/** Point every module at the profile the config asks for. Safe to call more than once. */
+/** All provider and MCP configuration follows the same directory as pi. */
 function applyProfile(): void {
-  profile.setAgentDir(currentProfile() === 'desktop' ? desktopProfileDir() : profile.CLI_AGENT_DIR)
+  profile.setAgentDir(profile.CLI_AGENT_DIR)
   providers.invalidateCache()
 }
 
@@ -498,14 +529,9 @@ async function syncAutoCompact(options: { restart?: boolean } = {}): Promise<num
   return reserve
 }
 
-/**
- * Session root for "shared" mode. With an isolated profile pi would put its sessions under the
- * profile directory anyway, so the window has to follow it instead of pointing at the CLI's.
- */
+/** Default session directory follows the common configuration directory. */
 function sharedSessionDir(): string {
-  return profile.isIsolatedProfile()
-    ? profile.profileSessionDir()
-    : path.join(os.homedir(), '.pi', 'agent', 'sessions')
+  return profile.profileSessionDir()
 }
 
 function currentSessionDir(): string {
@@ -683,6 +709,8 @@ function desktopToolAvailable(): boolean {
 
 let agentSettings: agents.AgentSettings = { exposure: 'prompt', promptLimit: 8, presets: [] }
 let subagents: SubagentManager | null = null
+const pendingSubagentNotices: SubagentRecord[] = []
+let flushingSubagentNotices = false
 /** Last time the user stopped a run, used to keep subagent notices from restarting it. */
 let lastAbortAt = 0
 
@@ -694,20 +722,47 @@ function subagentManager(): SubagentManager {
   if (!subagents) {
     subagents = new SubagentManager({
       userData: app.getPath('userData'),
-      onUpdate: (record) =>
-        mainWindow?.webContents.send('subagents:update', serializeSubagent(record)),
+      createOwnEngine: ({ id, tools, appendSystemPrompt, onEvent }) => new PropheyEngine({
+        onStatus: () => {}, onEvent, onSettled: () => {},
+        toolModulePath: coreToolsModule(), shellPath: realBashPath(), allowedTools: tools,
+        bashLogDirectory: path.join(app.getPath('userData'), 'command-logs'),
+        appendSystemPrompt: '你是独立子代理。只完成分配的任务，返回简短结论和必要的文件位置。\n' + (appendSystemPrompt ?? ''),
+        transcripts: new TranscriptStore(path.join(app.getPath('userData'), 'subagents-prophey')),
+        sessionId: () => id,
+        autoCompact: () => ({ enabled: autoCompactEnabled, percent: compactionPercent(autoCompactRatio()) }),
+        speedMode: () => currentSpeedMode()
+      }),
+      onUpdate: (record) => {
+        mainWindow?.webContents.send('subagents:update', serializeSubagent(record))
+        broadcastStatus()
+      },
       onSettle: (record) => {
-        bridge.publishEvent({
-          type: 'subagent_settled',
-          text: subagentNotice(record),
-          // Do not restart a run the user just stopped; queue the notice for their next turn.
-          wake: record.notify === 'wake' && Date.now() - lastAbortAt > 30_000
-        })
+        if (record.parentSession) pendingSubagentNotices.push({ ...record })
+        flushSubagentNotices()
       }
     })
     subagents.setMaxConcurrent(subagentConfig().maxConcurrent)
   }
   return subagents
+}
+
+function flushSubagentNotices(): void {
+  if (flushingSubagentNotices) return
+  if (!currentEngine || switchingEngine || btwActive || !currentEngine.running() || !status.sessionFile) return
+  if (currentEngine.id !== 'prophey' && currentEngine.id !== 'pi') return
+  flushingSubagentNotices = true
+  try {
+    const current = toSummaryKey(status.sessionFile)
+    for (let i = pendingSubagentNotices.length - 1; i >= 0; i--) {
+      const record = pendingSubagentNotices[i]
+      if (!record.parentSession || toSummaryKey(record.parentSession) !== current) continue
+      pendingSubagentNotices.splice(i, 1)
+      const text = subagentNotice(record)
+      const wake = record.notify === 'wake' && Date.now() - lastAbortAt > 30_000
+      if (currentEngine.notify) currentEngine.notify(text, wake)
+      else bridge.publishEvent({ type: 'subagent_settled', text, wake })
+    }
+  } finally { flushingSubagentNotices = false }
 }
 
 /** Three lines at most: the parent reads this inside its own transcript. */
@@ -716,7 +771,7 @@ function subagentNotice(record: SubagentRecord): string {
     record.calls
       .filter(
         (call) =>
-          (call.tool === 'edit' || call.tool === 'write' || call.tool === 'apply_patch') &&
+          ['edit', 'write', 'apply_patch', 'edit_file', 'write_file'].includes(call.tool) &&
           typeof call.summary === 'string' &&
           call.summary
       )
@@ -733,12 +788,12 @@ function subagentNotice(record: SubagentRecord): string {
     .filter(Boolean)
     .join(' ')
   const conclusion = record.error
-    ? `错误：${record.error}`
+    ? `错误：${record.error.slice(0, 240)}`
     : (record.finalText ?? '').replace(/\s+/g, ' ').trim().slice(0, 240) || '（没有结论）'
   return [
     head,
     `结论：${conclusion}`,
-    `详情用 mcp__desktop__get_subagent（id ${record.id}），不要重复询问。`
+    `详情调用子代理结果查询工具 get_subagent（id ${record.id}），无需轮询。`
   ].join('\n')
 }
 
@@ -755,6 +810,7 @@ function formatTokens(count: number): string {
 function serializeSubagent(record: SubagentRecord): Record<string, unknown> {
   return {
     id: record.id,
+    engine: record.engine ?? 'pi',
     label: record.label,
     agent: record.agent,
     mode: record.mode,
@@ -1132,6 +1188,7 @@ async function getDeviceId(): Promise<string> {
 
 function broadcastStatus(): void {
   mainWindow?.webContents.send('pi:status', statusSnapshot())
+  flushSubagentNotices()
 }
 
 /** pi's own default is on, so the window starts assuming 90% until settings say otherwise. */
@@ -1139,8 +1196,16 @@ let autoCompactEnabled = true
 
 /** Status as the window should see it: the compaction target belongs with the model info. */
 function statusSnapshot(): PiStatus {
+  const record = status.sessionFile ? sessionStore?.byPath(status.sessionFile) : undefined
+  const running = new Set((subagents?.list() ?? [])
+    .filter(item => !item.restored && (item.status === 'starting' || item.status === 'streaming') && item.parentSession)
+    .map(item => toSummaryKey(item.parentSession!)))
+  if (status.sessionFile && (status.isStreaming || status.compacting || status.backgroundTasks?.length)) running.add(toSummaryKey(status.sessionFile))
   return {
     ...status,
+    sessionLocked: conversationStarted,
+    sessionName: record?.title || status.sessionName,
+    runningSessionKeys: [...running],
     engine: currentEngineId(),
     sessionKey: status.sessionFile
       ? toSummaryKey(status.sessionFile)
@@ -1157,6 +1222,14 @@ function statusSnapshot(): PiStatus {
       : { mode: 'standard', available: ['standard'] },
     repo: currentRepo
   }
+}
+
+async function selectableModels(owner: AgentEngine): Promise<Record<string, unknown>[]> {
+  const models = await owner.models()
+  if (!owner.capabilities().providerSettings) return models
+  const choices = await providers.listModelChoices()
+  const allowed = new Set(choices.map(model => `${model.provider}/${model.id}`))
+  return models.filter(model => allowed.has(`${model.provider}/${model.id}`))
 }
 
 /**
@@ -1214,6 +1287,10 @@ function setStatus(patch: Partial<PiStatus>): void {
  */
 function currentWorkspace(cwd?: string): AgentWorkspace {
   const primary = cwd ?? status.cwd
+  const saved = desktopConfig.activeSession ? sessionStore?.byPath(desktopConfig.activeSession) : undefined
+  if (saved && path.resolve(saved.cwd) === path.resolve(primary)) {
+    return { primary: saved.cwd, additional: [...saved.additional] }
+  }
   const project = activeProject()
   if (!project) return { primary, additional: [] }
   const key = path.resolve(primary)
@@ -1251,17 +1328,19 @@ async function startPi(cwd?: string, extraArgs: string[] = []): Promise<PiStatus
  * so the defaults only apply when there is no session file to restore.
  */
 async function afterStart(workspace: string, extraArgs: string[]): Promise<void> {
+  const owner = currentEngine
+  const started = conversationHasStarted(await owner.messages())
+  if (owner === currentEngine) {
+    conversationStarted ||= started
+    broadcastStatus()
+  }
   // The engine owns the start now, so the app refreshes the repository facts here.
   void refreshRepo(workspace)
   // Index every repository of the project, not just the one pi is sitting in: code search that
   // silently only covered the primary root would be worse than no index at all.
   const roots = activeProject()?.roots.map((root) => root.path) ?? [workspace]
   for (const root of new Set([workspace, ...roots])) startCodegraphIndex(root)
-  const recent = [
-    workspace,
-    ...(desktopConfig.recentRepos ?? []).filter((dir) => dir !== workspace)
-  ]
-  await saveConfig({ recentRepos: recent.slice(0, 12) })
+  await saveConfig({ recentRepos: recentDirectories([workspace, ...roots, ...(desktopConfig.recentRepos ?? [])]) })
   if (extraArgs.includes('--session')) return
   const defaults = desktopConfig.repoDefaults?.[workspace]
   if (!defaults) return
@@ -1371,7 +1450,23 @@ function submitPrompt(
     return Promise.resolve({ ok: false, error: '当前引擎不支持图片' })
   if (behavior === 'steer' && currentEngine.busy() && !caps.steer)
     return Promise.resolve({ ok: false, error: '当前引擎不支持运行中引导，请排队发送' })
-  return currentEngine.prompt(message, { behavior, images })
+  const owner = currentEngine
+  const firstRequest = !conversationStarted && owner.running() && Boolean(message.trim() || images?.length)
+  const titleModel = owner.state().model ? { ...owner.state().model! } : undefined
+  if (currentEngine.running() && (message.trim() || images?.length)) {
+    conversationStarted = true
+    broadcastStatus()
+  }
+  const pending = owner.prompt(message, { behavior, images })
+  if (firstRequest) {
+    const file = owner.state().sessionFile
+    if (file) requestSessionTitle(file, message, titleModel)
+    else void pending.then(() => {
+      const created = owner.state().sessionFile
+      if (created) requestSessionTitle(created, message, titleModel)
+    }).catch(() => undefined)
+  }
+  return pending
 }
 
 async function reloadPiConfig(): Promise<void> {
@@ -1394,10 +1489,28 @@ function sendLoginMessage(message: LoginMessage): void {
 }
 
 /** Open the selected conversation, or allocate a fresh one using the creation default. */
-async function activateConversation(options: { cwd: string; sessionPath?: string; projectId?: string }): Promise<PiStatus> {
+async function activateConversation(options: {
+  cwd: string
+  sessionPath?: string
+  projectId?: string
+  /** The window already asked: stop the running turn instead of refusing the switch. */
+  stop?: boolean
+}): Promise<PiStatus> {
   if (switchingEngine || currentEngine.starting()) throw new Error('正在切换会话，请稍候')
   if (btwActive) await closeSideChat()
-  if (currentEngine.busy()) throw new Error('请先停止当前回合')
+  if (currentEngine.busy()) {
+    // The switch disposes this engine, so the running turn dies with it. Mark the switch first:
+    // `agent_settled` would otherwise fire a queued config restart against the engine we are about
+    // to replace. The window asks for consent; a caller without it gets a readable error.
+    switchingEngine = currentEngineId()
+    broadcastStatus()
+    try {
+      cancelPendingAsks('会话已切换')
+      await idleBeforeSwitch(currentEngine, options.stop === true)
+    } finally {
+      switchingEngine = undefined
+    }
+  }
   const record = options.sessionPath ? sessionStore?.byPath(options.sessionPath) : undefined
   const file = record?.path || options.sessionPath
   const target: EngineId = file ? record?.engine ??
@@ -1460,24 +1573,30 @@ function registerIpc(): void {
   const handle: typeof ipcMain.handle = (channel, listener) => ipcMain.handle(channel, (event, ...args) => {
     const mutatesEngine =
       (channel.startsWith('pi:') && !/^pi:(get-|list-|repo|session-stats|open-agent-dir)/.test(channel)) ||
-      /^desktop:set-|^engine:(command$|sandbox)|^projects:(activate|create|update|remove|add-root)|^mcp:(set-|add-|remove-)|^agents:(save-|delete-|set-)|^providers:(save-|set-|logout|import-cli)|^settings:save/.test(channel)
+      /^desktop:set-|^engine:(command$|sandbox|codex-questions)|^projects:(activate|create|update|remove|add-root)|^mcp:(set-|add-|remove-)|^agents:(save-|delete-|set-)|^providers:(save-|set-|logout|import-cli)|^settings:save/.test(channel)
     if (switchingEngine && mutatesEngine) throw new Error('正在迁移对话，请等待引擎切换完成')
     return listener(event, ...args)
   })
   handle('pi:get-status', () => statusSnapshot())
 
   handle('pi:restart', async (_event, cwd?: string) => {
+    if (conversationStarted && cwd && path.resolve(cwd) !== path.resolve(status.cwd)) {
+      throw new Error('会话已开始，不能修改目录；请新建会话')
+    }
     if (btwActive) await closeSideChat()
     if (cwd) await saveConfig({ cwd })
     return startPi(cwd ?? status.cwd, sessionArgs())
   })
 
-  handle('pi:new-project-session', async (_event, cwd: string) => {
+  handle('pi:new-project-session', async (_event, cwd: string, options?: { stop?: boolean }) => {
+    if (typeof cwd !== 'string' || !path.isAbsolute(cwd) || !(await fs.stat(cwd).catch(() => undefined))?.isDirectory()) {
+      throw new Error('目录不存在或不可访问，请选择其他目录')
+    }
     if (btwActive) await closeSideChat()
     // A session belongs to one repository: a subdirectory lands on the repo root instead, so the
     // sidebar groups by repository and the agent's cwd is the repo it is working on.
     const workspace = await repo.repoRoot(cwd).then((root) => root ?? cwd)
-    return activateConversation({ cwd: workspace, projectId: desktopConfig.activeProject })
+    return activateConversation({ cwd: workspace, stop: options?.stop === true })
   })
 
   handle('pi:repo-info', async (_event, dir?: string) => {
@@ -1537,7 +1656,7 @@ function registerIpc(): void {
   handle('projects:create-from-dialog', async () => {
     if (!projectStore) return { ok: false, error: '项目存储未就绪' }
     const result = await dialog.showOpenDialog(mainWindow!, {
-      title: '新建项目：选择仓库（可多选）',
+      title: '选择目录：一个目录创建会话，多个目录创建项目',
       defaultPath: status.cwd,
       properties: ['openDirectory', 'multiSelections']
     })
@@ -1546,10 +1665,12 @@ function registerIpc(): void {
       const roots = await Promise.all(
         result.filePaths.map(async (dir) => (await repo.repoRoot(dir)) ?? dir)
       )
+      const unique = [...new Map(roots.map(dir => [process.platform === 'win32' ? dir.toLowerCase() : dir, dir])).values()]
+      if (unique.length === 1) return { ok: true, cwd: unique[0] }
       const project = await projectStore.create({
-        name: path.basename(roots[0]),
-        roots,
-        primary: roots[0]
+        name: path.basename(unique[0]),
+        roots: unique,
+        primary: unique[0]
       })
       return { ok: true, project }
     } catch (error) {
@@ -1590,14 +1711,21 @@ function registerIpc(): void {
    * Work in a project: restart pi on its primary repository. The other roots reach the model
    * through the extension's `<project>` section (see `prepare`).
    */
-  handle('projects:activate', async (_event, id?: string) => {
+  handle('projects:activate', async (_event, id?: string, options?: { stop?: boolean }) => {
     const project = id ? projectStore?.get(id) : undefined
     if (id && !project) return { ok: false, error: '项目不存在' }
     const primary = project?.roots.find((root) => root.primary) ?? project?.roots[0]
-    return activateConversation({ cwd: primary?.path ?? status.cwd, projectId: project?.id })
+    return activateConversation({
+      cwd: primary?.path ?? status.cwd,
+      projectId: project?.id,
+      stop: options?.stop === true
+    })
   })
 
-  handle('repos:recent', () => desktopConfig.recentRepos ?? [])
+  handle('repos:recent', () => recentDirectories([
+    ...(desktopConfig.recentRepos ?? []),
+    ...(sessionStore?.list().map(record => record.cwd) ?? [])
+  ]))
 
   /** Folder picker without side effects, resolved to git roots; used by the project editor. */
   handle('repos:pick-folders', async (_event, title?: string) => {
@@ -1624,50 +1752,22 @@ function registerIpc(): void {
     return { ok: true }
   })
 
-  handle('pi:open-session', (_event, sessionPath: string, cwd: string) =>
-    activateConversation({ sessionPath, cwd }))
+  handle('pi:open-session', (_event, sessionPath: string, cwd: string, options?: { stop?: boolean }) =>
+    activateConversation({ sessionPath, cwd, stop: options?.stop === true }))
 
   handle('desktop:config', () => ({
     engine: currentEngineId(),
     defaultEngine: defaultEngineId(),
     capabilities: currentEngine.capabilities(),
     codexSandbox: desktopConfig.codexSandbox,
+    codexRequestUserInput: desktopConfig.codexRequestUserInput !== false,
     cwd: status.cwd,
     sessionMode: currentSessionMode(),
     sessionDir: currentSessionDir(),
     sharedSessionDir: sharedSessionDir(),
     isolatedSessionDir: path.join(app.getPath('userData'), 'sessions'),
-    profile: currentProfile(),
-    profileDir: desktopProfileDir(),
-    cliDir: profile.CLI_AGENT_DIR,
     activeProject: desktopConfig.activeProject
   }))
-
-  /**
-   * Switch between the CLI's profile and the desktop's own.
-   *
-   * Nothing is moved: the window simply starts reading the other directory. Switching to `desktop`
-   * leaves it empty until `providers:import-cli` copies the CLI's files in.
-   */
-  handle('desktop:set-profile', async (_event, next: 'shared' | 'desktop') => {
-    if (btwActive) await closeSideChat()
-    await saveConfig({ profile: next === 'desktop' ? 'desktop' : 'shared' })
-    applyProfile()
-    if (next === 'desktop') await fs.mkdir(profile.agentDir(), { recursive: true })
-    await startPi(status.cwd)
-    return { ok: true, profile: currentProfile(), profileDir: desktopProfileDir() }
-  })
-
-  handle('providers:import-cli', async () => {
-    try {
-      const result = await providers.importFromCli()
-      if (result.error) return { ok: false, error: result.error }
-      await reloadPiConfig()
-      return { ok: true, copied: result.copied, skipped: result.skipped }
-    } catch (error) {
-      return { ok: false, error: error instanceof Error ? error.message : String(error) }
-    }
-  })
 
   handle('updates:snapshot', () => updates.getSnapshot())
   handle('updates:check', () => updates.check())
@@ -1682,64 +1782,44 @@ function registerIpc(): void {
     return { ok: true }
   })
 
+  // Engine choice is setup for an empty conversation, never a history migration.
   handle('desktop:set-engine', async (_event, next: EngineId) => {
     if (!['pi', 'prophey', 'claude', 'codex'].includes(next)) throw new Error('未知引擎')
-    if (switchingEngine) throw new Error('正在切换引擎，请稍候')
+    if (switchingEngine || currentEngine.starting()) throw new Error('正在切换会话，请稍候')
     if (next === currentEngineId()) return statusSnapshot()
-    if (currentEngine.starting()) throw new Error('引擎正在启动，请稍候')
+    if (conversationStarted || currentEngine.busy() || btwActive) throw new Error('会话已开始，不能更换 agent；请新建会话后选择')
+    const source = currentEngine
+    const workspace = source.workspace()
+    const original = { ...desktopConfig }
+    const ref = source.state().sessionFile
+    const sourceRef = ref && !isNativeSessionReference(ref) && existsSync(ref) ? ref : undefined
+    let replaced = false
     switchingEngine = next
     broadcastStatus()
-    let originalConfig = { ...desktopConfig }
-    let source = currentEngine
-    let sourceRef: string | undefined
-    let sourceRecord: SessionRecord | undefined
-    let replaced = false
     try {
-      if (btwActive) await closeSideChat()
-      source = currentEngine
-      cancelPendingAsks('正在切换引擎')
-      lastAbortAt = Date.now()
-      if (source.busy()) {
-        await source.abort()
-        if (!(await source.waitForIdle(15_000))) throw new Error('当前工具尚未停止，暂未切换引擎')
-      }
-      const history = normalizeHistory(await source.messages())
-      const workspace = source.workspace()
-      const ref = source.state().sessionFile
-      sourceRef = ref && (isNativeSessionReference(ref) ? history.length > 0 : existsSync(ref)) ? ref : undefined
-      await rememberSession({}, true)
-      sourceRecord = sourceRef ? sessionStore?.byPath(sourceRef) : undefined
-      originalConfig = { ...desktopConfig }
-      await saveConfig({ pendingEngineSwitch: { engine: source.id as EngineId,
-        cwd: workspace.primary, session: sourceRef, propheySessionId: desktopConfig.propheySessionId,
-        activeProject: desktopConfig.activeProject, record: sourceRecord } })
+      if (conversationHasStarted(await source.messages())) throw new Error('会话已开始，不能更换 agent；请新建会话后选择')
+      await saveConfig({ pendingEngineSwitch: { engine: source.id as EngineId, cwd: workspace.primary,
+        session: sourceRef, propheySessionId: original.propheySessionId, activeProject: original.activeProject } })
       source.dispose()
       replaced = true
-      await saveConfig({ engine: next,
+      await saveConfig({ engine: next, activeSession: undefined,
+        engineSessions: { ...desktopConfig.engineSessions, [next]: undefined },
         ...(next === 'prophey' ? { propheySessionId: 's_' + randomUUID() } : {}) })
       currentEngine = createEngine()
       currentEngine.poll()
       const started = await currentEngine.start(workspace)
       if (started.phase !== 'ready') throw new Error(started.error ?? '目标引擎启动失败')
-      if (history.length) await currentEngine.importHistory(history)
       await afterStart(workspace.primary, [])
-      await rememberSession({}, true, sourceRecord)
       await saveConfig({ pendingEngineSwitch: undefined })
     } catch (error) {
       if (replaced) {
         currentEngine.dispose()
-        if (sourceRecord) await sessionStore?.upsert(sourceRecord, true)
-        await saveConfig({ ...originalConfig, propheySessionId: originalConfig.propheySessionId,
-          engineSessions: originalConfig.engineSessions, activeSession: originalConfig.activeSession,
+        await saveConfig({ ...original, activeSession: original.activeSession,
+          engineSessions: original.engineSessions, propheySessionId: original.propheySessionId,
           pendingEngineSwitch: undefined })
         currentEngine = createEngine()
         currentEngine.poll()
-        try {
-          const restored = await currentEngine.start(source.workspace(), { session: sourceRef })
-          if (restored.phase !== 'ready') throw new Error(restored.error)
-        } catch (restoreError) {
-          throw new Error('切换失败，原会话恢复也失败；原历史仍保留：' + String(error) + '；' + String(restoreError))
-        }
+        await currentEngine.start(workspace, { session: sourceRef })
       }
       throw new Error('未切换引擎：' + (error instanceof Error ? error.message : String(error)))
     } finally {
@@ -1755,7 +1835,7 @@ function registerIpc(): void {
     return startPi(status.cwd)
   })
 
-  handle('pi:choose-workspace', async () => {
+  handle('pi:choose-workspace', async (_event, options?: { stop?: boolean }) => {
     const result = await dialog.showOpenDialog(mainWindow!, {
       title: '选择一个 git 仓库（将在该仓库新建会话）',
       defaultPath: status.cwd,
@@ -1765,7 +1845,7 @@ function registerIpc(): void {
     // Picking a subdirectory is normal (people browse to `src/`); the session still belongs to the
     // repository, so start at its root and keep the grouping honest.
     const cwd = (await repo.repoRoot(result.filePaths[0])) ?? result.filePaths[0]
-    return activateConversation({ cwd })
+    return activateConversation({ cwd, stop: options?.stop === true })
   })
 
   handle(
@@ -1792,9 +1872,13 @@ function registerIpc(): void {
     await currentEngine.refresh()
   })
 
-  handle('pi:new-session', async () => {
+  handle('pi:new-session', async (_event, options?: { stop?: boolean }) => {
     try {
-      await activateConversation({ cwd: status.cwd, projectId: desktopConfig.activeProject })
+      await activateConversation({
+        cwd: status.cwd,
+        projectId: desktopConfig.activeProject,
+        stop: options?.stop === true
+      })
       return { ok: true }
     } catch (error) {
       return { ok: false, error: error instanceof Error ? error.message : String(error) }
@@ -1819,9 +1903,16 @@ function registerIpc(): void {
     if (!sessionStore) return listSessions(currentSessionDir())
     await sessionStore.load()
     await importPiSessions()
+    for (const record of sessionStore.list()) {
+      if (record.titleSource || record.title !== path.basename(record.path, '.jsonl') || isNativeSessionReference(record.path)) continue
+      const summary = await readSummary(record.path)
+      if (summary?.title && summary.title !== record.title) {
+        await sessionStore.upsert({ id: record.id, title: promptTitle(summary.title), titleSource: 'prompt', updatedAt: record.updatedAt })
+      }
+    }
     // A session deleted from disk (or by another window) must not stay in the list.
     await sessionStore
-      .prune((file) => !isNativeSessionReference(file) && !existsSync(file))
+      .prune((file) => !(file === status.sessionFile && currentEngine.busy()) && !isNativeSessionReference(file) && !existsSync(file))
       .catch(() => undefined)
     return sessionStore.list().map(toSummary)
   })
@@ -2030,6 +2121,12 @@ function registerIpc(): void {
   })
 
   handle('engine:commands', () => listEngineCommands(currentEngine))
+  handle('engine:codex-questions', async (_event, enabled: boolean) => {
+    // Like the sandbox mode this is a spawn-time override, so an active Codex session restarts.
+    await saveConfig({ codexRequestUserInput: Boolean(enabled) })
+    if (currentEngineId() === 'codex') await reloadPiConfig()
+    return { ok: true }
+  })
   handle('engine:sandbox', async (_event, mode: string) => {
     if (!['default', 'read-only', 'workspace-write'].includes(mode))
       return { ok: false, error: '无效的沙箱模式' }
@@ -2043,7 +2140,7 @@ function registerIpc(): void {
     const owner = currentEngine
     return executeEngineCommand(owner, name, args, async () => {
       if (owner === currentEngine) await syncAutoCompact({ restart: true })
-    })
+    }, () => selectableModels(owner))
   })
 
   handle('pi:compact', async (_event, instructions?: string) => {
@@ -2383,7 +2480,7 @@ function registerIpc(): void {
   handle('pi:list-models', async () => {
     if (!currentEngine.running()) return []
     try {
-      const models = await currentEngine.models()
+      const models = await selectableModels(currentEngine)
       const names = new Map<string, string>()
       try {
         for (const provider of await providers.listProviders()) {
@@ -2417,6 +2514,15 @@ function registerIpc(): void {
   handle('pi:set-model', async (_event, provider: string, modelId: string) => {
     if (!currentEngine.running()) return { ok: false, error: 'pi 未运行' }
     try {
+      if (currentEngine.busy()) throw new Error('请等当前回合结束后切换模型')
+      const models = await currentEngine.models()
+      if (!models.some(model => model.provider === provider && model.id === modelId)) {
+        throw new Error('只能选择当前 agent 可用且已配置的模型')
+      }
+      if (currentEngine.capabilities().providerSettings) {
+        const choices = await providers.listModelChoices()
+        if (!choices.some(model => model.provider === provider && model.id === modelId)) throw new Error('请先在服务商中配置并启用这个模型')
+      }
       await currentEngine.setModel(provider, modelId)
       // A different window means a different 90% point; pi only reads the reserve at startup, so
       // this restarts when (and only when) the number actually changed.
@@ -2439,6 +2545,8 @@ function registerIpc(): void {
   handle('pi:set-thinking-level', async (_event, level: string) => {
     if (!currentEngine.running()) return { ok: false, error: 'pi 未运行' }
     try {
+      if (currentEngine.busy()) throw new Error('请等当前回合结束后调整思考等级')
+      if (!(await currentEngine.thinkingLevels()).includes(level)) throw new Error('当前模型不支持这个思考等级')
       await currentEngine.setThinkingLevel(level)
       setStatus({ thinkingLevel: level })
       return { ok: true }
@@ -2638,6 +2746,9 @@ app.whenReady().then(async () => {
       defaultMode: () => subagentConfig().defaultMode,
       desktopTools: () => subagentConfig().desktopTools,
       parentSession: () => status.sessionFile,
+      engine: currentEngineId,
+      parentWorkspace: () => currentEngine.workspace(),
+      parentModel: () => status.model,
       resolveModel: (provider, id) => providers.resolveModelChoice(provider, id)
     })
   )

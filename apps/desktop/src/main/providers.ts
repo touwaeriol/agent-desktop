@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto'
 import path from 'node:path'
 import { shell } from 'electron'
 import type { ModelRuntime } from '@earendil-works/pi-coding-agent'
+import type { Model } from '@earendil-works/pi-ai'
 import type {
   AppSettings,
   LoginEvent,
@@ -19,8 +20,6 @@ import type {
 import {
   agentDir,
   authPath,
-  CLI_AGENT_DIR,
-  isIsolatedProfile,
   mcpPath,
   modelsPath,
   settingsPath
@@ -36,6 +35,12 @@ const DEFAULT_MODELS_JSON = JSON.stringify(
 )
 
 let runtimePromise: Promise<ModelRuntime> | null = null
+
+/** Use the SDK's model-specific map, including disabled and extended thinking levels. */
+export async function thinkingLevelsFor(model: Model<string>): Promise<string[]> {
+  const sdk = await import('@earendil-works/pi-ai/models')
+  return sdk.getSupportedThinkingLevels(model)
+}
 let builtinIdsPromise: Promise<Set<string>> | null = null
 
 async function getBuiltinProviderIds(): Promise<Set<string>> {
@@ -296,77 +301,6 @@ function providersOf(file: Record<string, unknown>): ModelsJsonProviders {
   const providers = file.providers
   if (!providers || typeof providers !== 'object' || Array.isArray(providers)) return {}
   return { ...(providers as ModelsJsonProviders) }
-}
-
-/**
- * Copy the CLI's config into the desktop profile.
- *
- * `auth.json` is **merged**: pi creates an empty one the first time it starts in a new directory,
- * so "skip if the file exists" would silently leave the user with no credentials. Every other file
- * is copied only when the target does not exist yet — this bootstraps an isolated profile, it does
- * not overwrite what the window has changed since.
- */
-export async function importFromCli(): Promise<{
-  copied: string[]
-  skipped: string[]
-  error?: string
-}> {
-  if (!isIsolatedProfile()) return { copied: [], skipped: [], error: '当前是共用 pi 配置，无需导入' }
-  await fs.mkdir(agentDir(), { recursive: true })
-  const copied: string[] = []
-  const skipped: string[] = []
-
-  // auth.json: provider id -> credential. Add what is missing, keep what the window already has.
-  const cliAuth = await readJsonObject(path.join(CLI_AGENT_DIR, 'auth.json'))
-  if (cliAuth) {
-    const target = (await readJsonObject(authPath())) ?? {}
-    const added = Object.keys(cliAuth).filter((providerId) => !(providerId in target))
-    if (added.length > 0) {
-      for (const providerId of added) target[providerId] = cliAuth[providerId]
-      await fs.writeFile(authPath(), `${JSON.stringify(target, null, 2)}\n`)
-      copied.push(`auth.json（${added.join('、')}）`)
-    } else {
-      skipped.push('auth.json')
-    }
-  } else {
-    skipped.push('auth.json')
-  }
-
-  for (const [name, target] of [
-    ['models.json', modelsPath()],
-    ['settings.json', settingsPath()],
-    ['mcp.json', mcpPath()]
-  ] as Array<[string, string]>) {
-    const exists = await fs.access(target).then(
-      () => true,
-      () => false
-    )
-    if (exists) {
-      skipped.push(name)
-      continue
-    }
-    const content = await fs.readFile(path.join(CLI_AGENT_DIR, name)).catch(() => undefined)
-    if (content === undefined) {
-      skipped.push(name)
-      continue
-    }
-    await fs.writeFile(target, content)
-    copied.push(name)
-  }
-  resetRuntime()
-  return { copied, skipped }
-}
-
-async function readJsonObject(file: string): Promise<Record<string, unknown> | undefined> {
-  try {
-    const parsed = JSON.parse(await fs.readFile(file, 'utf8')) as unknown
-    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-      return parsed as Record<string, unknown>
-    }
-  } catch {
-    // missing or not JSON
-  }
-  return undefined
 }
 
 /** provider id -> configured base URL override (absent when the provider uses its default). */export async function getBaseUrlOverrides(): Promise<Record<string, string>> {
@@ -654,7 +588,7 @@ export async function resolveModelChoice(
   if (!id && !provider) return {}
   const runtime = await getRuntime()
   const configured = await configuredProviderIds(runtime)
-  const models = runtime.getModels()
+  const models = await listModelChoices({ includeUnconfigured: true })
   const providerIds = runtime.getProviders().map((entry) => entry.id)
 
   if (provider && !providerIds.includes(provider)) {

@@ -75,7 +75,7 @@ function describeCalls(calls: ToolCallView[]): string {
 }
 
 function Activity({ calls }: { calls: ToolCallView[] }) {
-  const [open, setOpen] = useState(false)
+  const [open, setOpen] = useState(true)
   const running = calls.some((call) => call.status === 'running')
   const failed = calls.some((call) => call.status === 'error')
   return (
@@ -83,7 +83,8 @@ function Activity({ calls }: { calls: ToolCallView[] }) {
       <button
         className={`activity-row ${running ? 'running' : ''}`}
         onClick={() => setOpen((value) => !value)}
-        title="展开工具调用"
+        title={open ? '收起工具标题' : '展开工具标题'}
+        aria-expanded={open}
       >
         {(running || failed) && (
           <span className={`activity-dot ${running ? 'running' : 'error'}`} />
@@ -104,10 +105,10 @@ function Activity({ calls }: { calls: ToolCallView[] }) {
 
 function ToolCard({ call }: { call: ToolCallView }) {
   const [open, setOpen] = useState(false)
-  const expanded = open || call.status === 'running'
+  const expanded = open
   return (
     <div className={`tool-card ${call.status}`}>
-      <button className="tool-head" onClick={() => setOpen((value) => !value)}>
+      <button className="tool-head" aria-expanded={expanded} onClick={() => setOpen((value) => !value)}>
         <span className={`tool-chevron ${expanded ? 'open' : ''}`}>
           <ChevronIcon size={12} />
         </span>

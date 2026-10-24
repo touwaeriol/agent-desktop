@@ -38,7 +38,7 @@ export function engineCapabilities(id: EngineId): EngineCapabilities {
     compactInstructions: id !== 'codex',
     autoCompaction: cli ? 'native' : 'configurable',
     fork: true,
-    thinking: id !== 'prophey',
+    thinking: true,
     models: true,
     images: true,
     steer: id === 'pi' || id === 'codex',
@@ -78,7 +78,7 @@ export function isNativeSessionReference(ref: string): boolean {
 }
 
 export function engineLabel(id?: EngineId): string {
-  return ({ prophey: 'Prophey', pi: 'pi', claude: 'Claude Code', codex: 'Codex' } as const)[
+  return ({ prophey: '内建', pi: 'pi', claude: 'Claude Code', codex: 'Codex' } as const)[
     id ?? 'prophey'
   ]
 }

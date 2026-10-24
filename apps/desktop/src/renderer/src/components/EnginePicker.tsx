@@ -15,8 +15,8 @@ export function EnginePicker({ status, compact = false, disabled = false, onNoti
   const [changing, setChanging] = useState(false)
   const current = status.engine ?? 'prophey'
   const busy = Boolean(status.isStreaming || status.compacting)
-  const unavailable = disabled || changing || Boolean(status.switchingEngine) || status.phase === 'starting'
-  const title = busy ? '更换当前会话的引擎，先停止本轮；其他会话不变' : '当前会话的引擎；切换时保留正文和工具记录，其他会话不变'
+  const unavailable = disabled || busy || status.sessionLocked || changing || Boolean(status.switchingEngine) || status.phase === 'starting'
+  const title = status.sessionLocked ? '会话已开始，agent 已锁定；如需更换请新建会话' : '开始会话前选择 agent'
   const change = async (next: EngineId): Promise<void> => {
     if (next === current || unavailable) return
     setChanging(true)
@@ -35,16 +35,15 @@ export function EnginePicker({ status, compact = false, disabled = false, onNoti
     <div className="theme-switch storage-switch" title={title}>
       {engines.map((id) => <button key={id} disabled={unavailable}
         className={current === id ? 'active' : ''} onClick={() => void change(id)}>
-        {busy && id !== current ? '停止并切换到 ' : ''}{engineLabel(id)}
+        {engineLabel(id)}
       </button>)}
     </div>
   )
   return <label className="engine-picker" title={title}>
-    <span className="engine-picker-label">会话引擎</span>
-    <select aria-label="当前会话引擎" disabled={unavailable} value={status.switchingEngine ?? current}
+    <select aria-label="当前会话 agent" disabled={unavailable} value={status.switchingEngine ?? current}
       onChange={(event) => void change(event.target.value as EngineId)}>
       {engines.map((id) => <option key={id} value={id}>
-        {busy && id !== current ? '停止并切换到 ' : ''}{engineLabel(id)}
+        {engineLabel(id)}
       </option>)}
     </select>
   </label>

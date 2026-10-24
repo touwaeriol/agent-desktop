@@ -1,4 +1,3 @@
-import type { HistoryMessage } from './history'
 import type { EngineCapabilities, EngineCommand } from '../../shared/engine'
 export type { EngineCapabilities } from '../../shared/engine'
 import type { PiModel, PiStatus, PromptImage, PromptResult } from '@shared/types'
@@ -52,6 +51,8 @@ export interface AgentEngine {
   nativeCommands?(): Promise<EngineCommand[]>
   executeCommand?(name: string, args: string): Promise<{ text?: string }>
   discardSession?(sessionPath: string): Promise<void>
+  /** Deliver a scoped background-task notice without pretending it is a user prompt. */
+  notify?(text: string, wake: boolean): void
   /** Directories this session works on. */
   workspace(): AgentWorkspace
   /** Start (or restart) the session; resolves once the engine answers `get_state`. */
@@ -86,8 +87,6 @@ export interface AgentEngine {
     cost?: number
     contextUsage?: { tokens?: number | null; contextWindow?: number; percent?: number | null }
   }>
-  /** Create a fresh native session from portable context; never replay imported tool calls. */
-  importHistory(messages: HistoryMessage[]): Promise<void>
   messages(): Promise<unknown[]>
   lastAssistantText(): Promise<string | null>
   compact(instructions?: string): Promise<{ summary?: string }>

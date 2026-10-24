@@ -25,7 +25,11 @@ app.on('browser-window-created', (_event, window) => {
       await until(() => evaluate('window.pi.getStatus().then(s => s.phase === "ready")'), 'engine ready')
       const config = await evaluate('window.pi.getDesktopConfig()')
       assert.equal(config.engine, 'prophey')
-      assert.equal(config.profile, 'desktop')
+      assert.equal(config.profile, undefined)
+      const settingsPaths = await evaluate('window.pi.getAppSettings()')
+      assert.equal(settingsPaths.authPath, path.join(process.env.PI_CODING_AGENT_DIR, 'auth.json'))
+      assert.equal(config.sharedSessionDir, path.join(process.env.PI_CODING_AGENT_DIR, 'sessions'))
+      assert.equal((await evaluate('window.pi.getMcpState()')).userConfigPath, path.join(process.env.PI_CODING_AGENT_DIR, 'mcp.json'))
       assert.equal(config.capabilities.autoCompaction, 'configurable')
       assert.equal((await evaluate('window.pi.getStatus()')).autoCompactPercent, 0.1)
       assert.equal((await evaluate('window.pi.setAutoCompactRatio(75)')).ok, true)
@@ -33,7 +37,7 @@ app.on('browser-window-created', (_event, window) => {
       assert.equal((await evaluate('window.pi.setCompactThreshold(NaN)')).ok, false)
       const commands = await evaluate('window.pi.getEngineCommands()')
       assert(commands.some(command => command.name === '/compact'))
-      assert(!commands.some(command => command.name === '/thinking'))
+      assert(commands.some(command => command.name === '/thinking'))
       assert.equal((await evaluate('window.pi.executeEngineCommand("/unknown", "")')).ok, false)
       assert.equal((await evaluate('window.pi.executeEngineCommand("/status", "")')).ok, true)
       await until(() => evaluate('!!document.querySelector(".attach-btn")'), 'composer')
@@ -47,6 +51,9 @@ app.on('browser-window-created', (_event, window) => {
       assert.match(nav, /服务商/)
       assert.match(nav, /MCP/)
       await require('./provider-settings-smoke.cjs')(evaluate, until)
+      await evaluate('Array.from(document.querySelectorAll(".settings-nav button")).find(b => b.textContent.trim() === "通用").click()')
+      await until(() => evaluate('!!document.querySelector(".settings-content.general")'), 'general settings')
+      assert(!await evaluate('document.querySelector(".settings-body").textContent.includes("配置来源")'))
       await evaluate('document.querySelector(".modal-backdrop").dispatchEvent(new MouseEvent("mousedown", { bubbles: true }))')
       await until(() => evaluate('!document.querySelector(".settings")'), 'settings dismiss')
       const pi = await evaluate('window.pi.setEngine("pi")')
@@ -56,6 +63,38 @@ app.on('browser-window-created', (_event, window) => {
       const own = await evaluate('window.pi.setEngine("prophey")')
       assert.equal(own.phase, 'ready')
       assert.equal(own.engine, 'prophey')
+      const proofModels = { providers: {
+        'proof': { api: 'openai-completions', baseUrl: 'https://example.invalid', apiKey: 'local-test', models: [
+          { id: 'reasoning', name: 'Reasoning', contextWindow: 32000, maxTokens: 2048, reasoning: true,
+            thinkingLevelMap: { off: null, minimal: null, medium: null, xhigh: null, max: null } },
+          { id: 'plain', name: 'Plain', contextWindow: 32000, maxTokens: 2048, reasoning: false }
+        ] },
+        'unconfigured-proof': { api: 'openai-completions', baseUrl: 'https://example.invalid', models: [
+          { id: 'hidden', contextWindow: 32000, maxTokens: 2048 }
+        ] }
+      } }
+      assert.equal((await evaluate('window.pi.saveModelsJson(' + JSON.stringify(JSON.stringify(proofModels)) + ')')).ok, true)
+      const selectable = await evaluate('window.pi.listModels()')
+      assert(selectable.length > 0 && selectable.every(model => model.provider === 'proof'))
+      assert.equal((await evaluate('window.pi.setModel("unconfigured-proof", "hidden")')).ok, false)
+      assert.equal((await evaluate('window.pi.setModel("proof", "reasoning")')).ok, true)
+      assert.deepEqual(await evaluate('window.pi.listThinkingLevels()'), ['low', 'high'])
+      await until(() => evaluate('!!document.querySelector(".pill-seg.thinking")'), 'model-specific thinking control')
+      await evaluate('document.querySelector(".pill-seg.thinking").click()')
+      await until(() => evaluate('document.querySelectorAll(".thinking-option").length === 2'), 'supported thinking choices')
+      await evaluate('Array.from(document.querySelectorAll(".thinking-option")).find(e => e.querySelector("code")?.textContent === "high").click()')
+      await until(() => evaluate('window.pi.getStatus().then(s => s.thinkingLevel === "high")'), 'thinking applied')
+      assert.equal((await evaluate('window.pi.setThinkingLevel("max")')).ok, false)
+      assert.equal((await evaluate('window.pi.setModel("proof", "plain")')).ok, true)
+      assert.deepEqual(await evaluate('window.pi.listThinkingLevels()'), ['off'])
+      // Verify authoritative background status is visible even without agent_start events.
+      const state = await evaluate('window.pi.getStatus()')
+      window.webContents.send('pi:status', { ...state, isStreaming: false, backgroundTasks: [{ id: 'proof', command: 'test fixture', startedAt: Date.now() }] })
+      await until(() => evaluate('document.querySelector(".run-status")?.textContent.includes("后台命令运行中 1")'), 'background status without foreground turn')
+      window.webContents.send('pi:status', state)
+      await require('./ask-panel-smoke.cjs')(evaluate, until)
+      await require('./session-switch-smoke.cjs')(evaluate, until, window)
+      await require('./session-title-smoke.cjs')(evaluate, until)
       const version = (await evaluate('window.pi.getUpdateSnapshot()')).currentVersion
       assert.equal(version, require(path.join(desktop, 'package.json')).version)
       console.log('Electron smoke passed: isolated startup, IPC, compaction, command menus, settings, dismissal, pi/Prophey switching, version ' + version)

@@ -1,4 +1,3 @@
-import { toPiHistory, type HistoryMessage } from './history'
 import type { EngineStartOptions } from './engine'
 import { engineCapabilities, type EngineCommand } from '../../shared/engine'
 import { existsSync } from 'node:fs'
@@ -8,7 +7,6 @@ import { PiRpcClient } from '../pi-rpc'
 import type { AgentEngine, AgentWorkspace, EngineCapabilities } from './engine'
 
 export interface PiEngineOptions {
-  historyDir?: string
   ask?: import('./native-engine').NativeOptions['ask']
   /**
    * Launch args and environment for a workspace (MCP servers, extension, profile, speed tier).
@@ -435,17 +433,6 @@ export class PiEngine implements AgentEngine {
     }
   }
 
-  async importHistory(messages: HistoryMessage[]): Promise<void> {
-    if (this.busy()) throw new Error('请先停止当前回合')
-    if (!this.options.historyDir) throw new Error('历史存储未配置')
-    const { SessionManager } = await import('@earendil-works/pi-coding-agent')
-    const session = SessionManager.create(this.roots.primary, this.options.historyDir)
-    for (const message of toPiHistory(messages, this.snapshot.model))
-      session.appendMessage(message as unknown as Parameters<typeof session.appendMessage>[0])
-    const file = session.getSessionFile()
-    if (!file) throw new Error('未能创建 pi 历史会话')
-    await this.switchSession(file)
-  }
 
   async messages(): Promise<unknown[]> {
     const response = await this.request<{ data?: { messages?: unknown[] } }>('get_messages')

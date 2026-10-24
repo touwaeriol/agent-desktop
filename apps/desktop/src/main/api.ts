@@ -7,6 +7,8 @@
 import type { ApiRequest, ApiResponse } from './bridge'
 import { rankAgents, type AgentSettings } from './agents'
 import type { SubagentManager } from './subagents'
+import type { EngineId } from '../shared/engine'
+import type { AgentWorkspace } from './agent/engine'
 
 export interface ApiDeps {
   agentSettings: () => AgentSettings
@@ -25,6 +27,9 @@ export interface ApiDeps {
   desktopTools: () => boolean
   /** Session file of the main conversation, so a subagent can be traced back to it. */
   parentSession?: () => string | undefined
+  engine?: () => EngineId
+  parentWorkspace?: () => AgentWorkspace
+  parentModel?: () => { provider: string; id: string } | undefined
   /** Check a requested provider/model against the catalog before starting a run. */
   resolveModel?: (
     provider: string | undefined,
@@ -93,6 +98,10 @@ export function createApiHandler(deps: ApiDeps): (request: ApiRequest) => Promis
     }
 
     if (path === '/subagents' && method === 'POST') {
+      const engine = deps.engine?.() ?? 'pi'
+      if (engine === 'claude' || engine === 'codex') {
+        return fail(400, 'NATIVE_SUBAGENTS', '当前引擎使用自带子代理，不适用桌面子代理 MCP')
+      }
       const manager = deps.subagents()
       const settings = deps.agentSettings()
       const agentId = typeof body.agent === 'string' ? body.agent : undefined
@@ -113,15 +122,20 @@ export function createApiHandler(deps: ApiDeps): (request: ApiRequest) => Promis
         resolvedModel = resolution.model
       }
       try {
+        const parent = deps.parentWorkspace?.()
+        const inherited = !preset?.model || preset.model === 'inherit' ? deps.parentModel?.() : undefined
+        const selected = resolvedModel ?? inherited
         const result = await manager.start({
+          engine,
           task,
           preset,
           mode: (body.mode as 'sync' | 'background' | undefined) ?? undefined,
-          provider: resolvedModel?.provider,
-          model: resolvedModel?.id,
+          provider: selected?.provider,
+          model: selected?.id,
           thinking: typeof body.thinking === 'string' ? body.thinking : undefined,
           tools: Array.isArray(body.tools) ? body.tools.map(String) : undefined,
-          cwd: typeof body.cwd === 'string' ? body.cwd : undefined,
+          cwd: typeof body.cwd === 'string' ? body.cwd : parent?.primary,
+          additional: !body.cwd || body.cwd === parent?.primary ? parent?.additional : [],
           label: typeof body.label === 'string' ? body.label : undefined,
           timeoutMs: typeof body.timeoutMs === 'number' ? body.timeoutMs : undefined,
           waitMs: typeof body.waitMs === 'number' ? body.waitMs : undefined,

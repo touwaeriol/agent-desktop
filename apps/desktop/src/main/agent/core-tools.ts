@@ -52,7 +52,7 @@ export function bridgeContext(options: BridgeOptions): Record<string, unknown> {
   // system proxy, and loopback requests through it fail (`fetch failed`) — the same reason the
   // MCP server uses raw http. It also avoids undici's 300s headers timeout, which a question
   // waiting for the user would otherwise hit.
-  const request = (method: string, target: string, payload?: unknown): Promise<unknown> =>
+  const request = (method: string, target: string, payload?: unknown, signal?: AbortSignal): Promise<unknown> =>
     new Promise((resolve, reject) => {
       let url: URL
       try {
@@ -68,6 +68,7 @@ export function bridgeContext(options: BridgeOptions): Record<string, unknown> {
           port: url.port,
           path: `${url.pathname}${url.search}`,
           method,
+          signal,
           headers: {
             ...(body ? { 'content-type': 'application/json', 'content-length': body.length } : {}),
             'x-agent-desktop-token': options.token
@@ -94,7 +95,7 @@ export function bridgeContext(options: BridgeOptions): Record<string, unknown> {
     })
   return {
     request,
-    post: (target: string, payload?: unknown) => request('POST', target, payload),
+    post: (target: string, payload?: unknown, signal?: AbortSignal) => request('POST', target, payload, signal),
     signal: undefined,
     log: () => {}
   }
@@ -136,7 +137,7 @@ export async function loadAskTool(
 }
 
 /** Import the workspace tool module by absolute path (dev checkout or packaged resources). */
-export async function loadWorkspaceTools(modulePath: string): Promise<CoreTool[]> {
+export async function loadWorkspaceTools(modulePath: string, context: Record<string, unknown> = {}): Promise<CoreTool[]> {
   const module = (await import(pathToFileURL(modulePath).href)) as { workspaceTools?: ModuleTool[] }
-  return (module.workspaceTools ?? []).map((tool) => adaptModuleTool(tool))
+  return (module.workspaceTools ?? []).map((tool) => adaptModuleTool(tool, context))
 }

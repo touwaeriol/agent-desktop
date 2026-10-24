@@ -17,6 +17,7 @@ adapters; the desktop owns projects, session navigation and UI.
 - Session storage shared with pi, or isolated to the desktop app
 - Four engines: Prophey provider loop, pi RPC, Claude Agent SDK and Codex app-server
 - Capability-driven slash commands, native compaction, model selection and approval dialogs
+- Native questions from every engine: Claude Code's `AskUserQuestion`, Codex's `request_user_input` and pi/Prophey's desktop tool all use the same panel above the composer
 - Multi-directory projects: one session can work across several folders, with `root`-scoped tools
 - MCP settings: master switch, server list, and a built-in desktop tool
 - `ask_user_question` tool: agents ask questions in a desktop dialog (single choice, multi-select, free text, answered in order)
@@ -79,6 +80,17 @@ Settings → MCP controls MCP support: a master switch (pi starts with `--no-mcp
 The built-in tool is `mcp__desktop__ask_user_question`. It is registered by a pi extension the app loads with `--extension`, so nothing is written into `mcp.json` and terminal pi sessions are unaffected. Agents call it to ask you something: the question appears in a panel directly above the composer, supports single choice, multi-select, and free-form typing (no need to pick "other" first), and multiple questions are answered one at a time with the option to go back and change earlier answers. The answer goes back to the model as the tool result.
 
 The pieces live in `packages/mcp-core` (stdio MCP server — the core interaction server; new desktop tools go in `packages/mcp-core/tools`), `apps/desktop/resources/extension` (pi extension that registers it), and `apps/desktop/src/main/bridge.ts` (loopback bridge between the MCP server and the window).
+
+### Native questions from the CLI engines
+
+Claude Code and Codex ask through their own channels, and the desktop answers them in the same panel — no extra MCP server, no prompt injected into their configs:
+
+| Engine | Channel | Desktop handling |
+| --- | --- | --- |
+| Claude Code | `canUseTool` → `AskUserQuestion` | questions go to the panel; the answer comes back as `updatedInput.answers` |
+| Codex | server request `item/tool/requestUserInput` | answers come back as `answers[questionId].answers` |
+
+Codex's tool is experimental in codex-cli 0.163 and stays off unless the app turns it on, so a Codex session is started with `-c tools.experimental_request_user_input.enabled=true -c features.default_mode_request_user_input=true` (a per-launch override; `~/.codex/config.toml` is never rewritten). Settings → General → “原生提问” turns it off. Approval requests (`item/commandExecution/requestApproval`, `item/fileChange/requestApproval`, `item/permissions/requestApproval`) use the same panel with a deny/allow choice, and a missing window means deny — never a silent grant.
 
 ### Built-in engines: CodeGraph and WarpGrep
 

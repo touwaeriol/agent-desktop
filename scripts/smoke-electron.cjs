@@ -12,7 +12,7 @@ fs.mkdirSync(userData)
 fs.writeFileSync(path.join(workspace, 'sample.ts'), 'export const sample = true\n')
 fs.writeFileSync(path.join(userData, 'config.json'), JSON.stringify({ engine: 'prophey', profile: 'desktop', cwd: workspace, autoCompact: { enabled: true, ratio: 0.001 }, mcp: { enabled: false, subagents: { enabled: false } } }))
 fs.writeFileSync(path.join(userData, 'updates.json'), JSON.stringify({ autoCheck: false }))
-const env = { ...process.env, PROPHEY_SMOKE_ROOT: root, PROPHEY_SMOKE_DATA: userData }
+const env = { ...process.env, PROPHEY_SMOKE_ROOT: root, PROPHEY_SMOKE_DATA: userData, PI_CODING_AGENT_DIR: path.join(temporary, 'agent-config') }
 delete env.ELECTRON_RUN_AS_NODE
 delete env.ELECTRON_RENDERER_URL
 delete env.PI_DEBUG_PORT

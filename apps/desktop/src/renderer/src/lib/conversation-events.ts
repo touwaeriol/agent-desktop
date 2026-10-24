@@ -98,12 +98,12 @@ function patchPendingUser(items: ChatItem[], content?: unknown): ChatItem[] {
 }
 
 function finishMessage(items: ChatItem[], message: MessagePayload, now: number): ChatItem[] {
-  if (message.role === 'user') return patchPendingUser(items, message.content)
-  if (message.role === 'custom') {
+  if (message.role === 'custom' || message.customType === NOTICE_TYPE) {
     if (message.customType !== NOTICE_TYPE) return items
     const text = noticeText(textFromBlocks(message.content))
     return text ? [...items, { id: 'notice-' + now + '-' + items.length, role: 'system', text, toolCalls: [] }] : items
   }
+  if (message.role === 'user') return patchPendingUser(items, message.content)
   if (message.role !== 'assistant') return items
   return patchLastAssistant(items, (item) => {
     const calls = toolCallsFromBlocks(message.content)

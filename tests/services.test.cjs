@@ -10,11 +10,38 @@ const root = path.resolve(__dirname, '..')
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'prophey-services-tests-'))
 const electron = path.join(temp, 'electron.cjs')
 fs.writeFileSync(electron, 'exports.shell = {}; exports.app = { getPath(){return ""}, getAppPath(){return ""} }')
-const sources = ['storage', 'session-store', 'transcript-store', 'projects', 'agents', 'mcp', 'providers', 'profile', 'bridge', 'web']
+const sources = ['storage', 'session-store', 'transcript-store', 'projects', 'agents', 'mcp', 'providers', 'profile', 'bridge', 'web', 'sessions']
 esbuild.buildSync({ stdin: { contents: sources.map((name, i) => `export * as m${i} from './${name}'`).join('\n'), resolveDir: path.join(root, 'apps/desktop/src/main'), loader: 'ts' }, outfile: path.join(temp, 'services.cjs'), bundle: true, platform: 'node', format: 'cjs', packages: 'external', alias: { electron } })
 const { m0: storage, m1: { SessionStore }, m2: { TranscriptStore }, m3: { ProjectStore }, m4: agents, m5: mcp, m6: providers, m7: profile, m8: bridge, m9: web } = require(path.join(temp, 'services.cjs'))
 after(() => { bridge.stopBridge(); fs.rmSync(temp, { recursive: true, force: true }) })
 const read = async file => JSON.parse(await fsp.readFile(file, 'utf8'))
+
+test('built-in transcripts use the first user prompt instead of their UUID as a fallback title', async () => {
+  const file = path.join(temp, 'own-title.jsonl')
+  await fsp.writeFile(file, [
+    { type: 'header', workspace: { primary: temp, additional: [] } },
+    { message: { role: 'user', customType: 'subagent_notice', content: 'ignore background notice' } },
+    { message: { role: 'user', content: '修复登录界面\n和错误提示' } }
+  ].map(item => JSON.stringify(item)).join('\n'))
+  const summary = await require(path.join(temp, 'services.cjs')).m10.readSummary(file)
+  assert.equal(summary.title, '修复登录界面 和错误提示')
+  assert.equal(summary.cwd, temp)
+})
+
+test('generated titles survive future updates and cannot overwrite manually renamed sessions', async () => {
+  const store = new SessionStore(path.join(temp, 'title-sessions.json'))
+  const record = await store.upsert({ path: 'title-session', cwd: temp, title: 'First prompt', titleSource: 'prompt', updatedAt: 10 })
+  assert.equal(await store.setGeneratedTitle(record.id, 'Generated title'), true)
+  assert.equal(store.get(record.id).updatedAt, 10)
+  await store.upsert({ id: record.id, updatedAt: 20 })
+  assert.equal(store.get(record.id).titleSource, 'generated')
+  await store.rename(record.id, 'My title')
+  assert.equal(await store.setGeneratedTitle(record.id, 'Late title'), false)
+  const restored = new SessionStore(path.join(temp, 'title-sessions.json'))
+  await restored.load()
+  assert.equal(restored.get(record.id).title, 'My title')
+  assert.equal(restored.get(record.id).titleSource, 'manual')
+})
 
 test('atomic storage preserves call order, snapshots and cleans temporary files', async () => {
   const file = path.join(temp, 'atomic', 'state.json')
