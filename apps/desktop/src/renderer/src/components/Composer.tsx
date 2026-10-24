@@ -450,6 +450,42 @@ export function Composer({
   return (
     <div className="composer-wrap">
       {statusBar}
+      {queued.length > 0 && (
+        <div className="queue-panel">
+          <div className="queue-head">
+            <span className="queue-count">{queued.length} 条排队消息</span>
+            <span className="queue-hint">
+              {queued.some((item) => item.command)
+                ? '回合结束后自动发送 / 执行；点「引导」可立即插入当前回合'
+                : '回合结束后自动发送；点「引导」可立即插入当前回合'}
+            </span>
+          </div>
+          {queued.map((item) => (
+            <div className="queue-item" key={item.id}>
+              {item.command && <span className="queue-tag">命令</span>}
+              <span className="queue-text" title={item.text}>
+                {item.text || `${item.images.length} 张图片`}
+              </span>
+              {!item.command && capabilities?.steer && (
+                <button
+                  className="queue-steer"
+                  title="作为引导立即插入当前回合（不打断生成）"
+                  onClick={() => onQueueSteer(item.id)}
+                >
+                  <SendIcon size={10} />
+                  引导
+                </button>
+              )}
+              <button className="queue-btn" title="编辑" onClick={() => onQueueEdit(item.id)}>
+                <PencilIcon size={11} />
+              </button>
+              <button className="queue-btn" title="删除" onClick={() => onQueueRemove(item.id)}>
+                <CloseIcon size={11} />
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
       <div
         className={`composer ${disabled ? 'disabled' : ''} ${dragging ? 'dragging' : ''}`}
         onDragOver={(event) => {
@@ -491,41 +527,6 @@ export function Composer({
             ))}
           </div>
         )}
-        {queued.length > 0 && (
-          <div className="queue-panel">
-            <div className="queue-head">
-              <span className="queue-count">{queued.length} 条排队消息</span>
-              <span className="queue-hint">
-                {queued.some((item) => item.command)
-                  ? '当前回合结束后自动发送 / 执行命令'
-                  : '当前回复结束后自动发送'}
-              </span>
-            </div>
-            {queued.map((item) => (
-              <div className="queue-item" key={item.id}>
-                {item.command && <span className="queue-tag">命令</span>}
-                <span className="queue-text" title={item.text}>
-                  {item.text || `${item.images.length} 张图片`}
-                </span>
-                <button className="queue-btn" title="编辑" onClick={() => onQueueEdit(item.id)}>
-                  <PencilIcon size={11} />
-                </button>
-                <button className="queue-btn" title="删除" onClick={() => onQueueRemove(item.id)}>
-                  <CloseIcon size={11} />
-                </button>
-                {!item.command && capabilities?.steer && (
-                  <button
-                    className="queue-btn"
-                    title="立即发送（打断当前回合）"
-                    onClick={() => onQueueSteer(item.id)}
-                  >
-                    <SendIcon size={11} />
-                  </button>
-                )}
-              </div>
-            ))}
-          </div>
-        )}
         <DraftImageStrip images={images} onRemove={removeImage} onPreview={setPreview} />
         <textarea
           ref={ref}
@@ -537,7 +538,7 @@ export function Composer({
               ? '正在压缩上下文，结束后会自动继续…'
               : streaming
                 ? capabilities?.steer
-                  ? '继续输入，Enter 排队，Ctrl+Enter 强制引导'
+                  ? '继续输入，Enter 引导（立即插入当前回合），Ctrl+Enter 排队'
                   : '继续输入，Enter 排队'
                 : '发送消息…（可直接粘贴图片）'
           }
@@ -577,11 +578,11 @@ export function Composer({
             if (event.nativeEvent.isComposing) return
             if (event.shiftKey) return
             event.preventDefault()
-            if (event.ctrlKey || event.metaKey) {
-              onSend(capabilities?.steer ? 'steer' : 'send')
-            } else {
-              onSend('send')
-            }
+            // Running turn: Enter steers (the message joins the current run), Ctrl+Enter queues it
+            // for after the run. Idle, both just send.
+            if (event.ctrlKey || event.metaKey) onSend('send')
+            else if (streaming && !status.compacting && capabilities?.steer) onSend('steer')
+            else onSend('send')
           }}
         />
         <div className="composer-foot">
@@ -853,7 +854,7 @@ export function Composer({
       </div>
       <div className="composer-hint">
         {streaming
-          ? 'Enter 排队 · Shift+Enter 换行 · Ctrl+Enter 强制引导（打断当前回合） · 粘贴或拖入图片'
+          ? 'Enter 引导（立即插入当前回合） · Shift+Enter 换行 · Ctrl+Enter 排队 · 粘贴或拖入图片'
           : 'Enter 发送 · Shift+Enter 换行 · Ctrl+Enter 发送 · 粘贴或拖入图片'}
       </div>
 

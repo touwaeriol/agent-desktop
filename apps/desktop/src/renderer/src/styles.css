@@ -747,6 +747,26 @@ button:disabled {
   gap: 8px;
 }
 
+/* The sidebar toggle sits on the window chrome: give it a visible chip instead of a ghost icon. */
+.tabbar-right .icon-btn {
+  color: var(--text-dim);
+  border: 1px solid var(--border-strong);
+  background: var(--bg-elev);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.16);
+}
+
+.tabbar-right .icon-btn:hover {
+  color: var(--text-strong);
+  background: var(--bg-hover);
+  border-color: var(--accent-soft);
+}
+
+.tabbar-right .icon-btn.on {
+  color: var(--accent-text);
+  background: var(--accent-soft);
+  border-color: var(--accent-soft);
+}
+
 .connection {
   font-size: 11px;
   padding: 2px 8px;
@@ -4649,11 +4669,13 @@ button:disabled {
   background: var(--accent-soft);
 }
 
+/* Queued messages sit above the composer box, not inside it: the input keeps its own bounds. */
 .queue-panel {
   display: flex;
   flex-direction: column;
   gap: 3px;
-  margin-bottom: 8px;
+  max-width: 860px;
+  margin: 0 auto 6px;
   padding: 6px;
   border-radius: 9px;
   border: 1px solid var(--border);
@@ -4714,6 +4736,26 @@ button:disabled {
   height: 20px;
   border-radius: 5px;
   color: var(--faint);
+}
+
+/* Turn a queued message into an immediate steer without waiting for the run to end. */
+.queue-steer {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 1px 7px;
+  border-radius: 6px;
+  border: 1px solid var(--accent-soft);
+  background: var(--bg-elev);
+  color: var(--accent-text);
+  font-size: 10.4px;
+  line-height: 1.7;
+}
+
+.queue-steer:hover {
+  background: var(--accent-soft);
+  color: var(--text-strong);
 }
 
 .queue-btn:hover {

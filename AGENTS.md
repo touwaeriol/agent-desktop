@@ -118,8 +118,8 @@ npm run typecheck    # node + web 两个 tsconfig 分别检查
 
 ## 消息队列
 
-- 运行中（`status.isStreaming` 或 `status.compacting`）发消息**默认进队列**，不再直接 `steer`：队列在渲染层（`App.tsx` 的 `queued`），输入框上方显示「N 条排队消息」，每条可编辑（放回输入框）、删除、立即发送。
-- 「立即发送」和 `Ctrl+Enter` 是**强制引导**：走 `prompt(text, 'steer')` 注入当前回合，不等待本轮结束。
+- 运行中（`status.isStreaming` 或 `status.compacting`）发消息**默认是引导（steer）**：`Enter` 直接把这条消息插进当前回合，`Ctrl+Enter` 才是**加入队列**（等本轮结束后自动发送）。空闲时两者都是发送。2026-10 之前是反的（Enter 排队、Ctrl+Enter 强制引导），被用户否掉了——「发送就该发送，不想被打断时才按 Ctrl」。
+- 队列在渲染层（`App.tsx` 的 `queued`），渲染在**输入框外面**（`.composer-wrap > .queue-panel`，不是 `.composer` 里）：输入框本身的边界不被队列改动。每条可编辑（放回输入框）、删除，非命令条目还有「引导」按钮（`.queue-steer`）——排队后想立刻插进当前回合就点它（走 `prompt(text, 'steer')`）。布局上的 `max-width: 860px; margin: 0 auto` 要和 `.composer` 对齐。
 - 回合结束后自动按顺序发送队列里的下一条。**flush 的 effect 只能依赖 `status.isStreaming` / `status.compacting` / `status.phase`，不能依赖 `queued`**——否则加入第二条时会和第一条抢跑（`isStreaming` 还没变 true 就再发一次），实测第二条会被 pi 拒绝并丢失。
 - 发送失败时把该条放回队首并提示，避免静默丢消息。放回后必须**自己再排一次**（`restore()` 重新读 `pi:get-status` 并 2 秒后 `setQueueTick`）：条目出队又回队不产生任何状态变化，flush 不会重跑，否则排队项会永远躺在那里。
 
@@ -171,7 +171,7 @@ npm run typecheck    # node + web 两个 tsconfig 分别检查
 - 手动压缩走原生接口：Claude 的 /compact，Codex 的 thread/compact/start。Codex 请求返回只代表接受，必须等完成事件；Claude 只有 compact_boundary 才能证明成功。不要将普通摘要回答当成原生压缩。
 - 自动压缩分 configurable/native/none。原生管理时隐藏桌面阈值，后端也拒绝覆写 pi 配置。未知上下文用量不能显示成 0%，原生自动压缩不能显示成已关闭。
 - 命令来源：桌面公共命令 + pi get_commands / Claude supportedCommands / Codex skills/list 与 review/start。未知命令明确拒绝，不作为普通提示词。重名时由公共适配入口处理。
-- 运行中引导只对支持 steer 的引擎开放；其他引擎排队。原生审批和提问复用 ask 回调与桌面问答队列，缺少 UI 时拒绝，不静默授权。
+- 运行中引导只对支持 steer 的引擎开放（`engineCapabilities().steer`：pi / Prophey / Codex 为 true，Claude 为 false——SDK 没有中途注入，只能排队）。原生审批和提问复用 ask 回调与桌面问答队列，缺少 UI 时拒绝，不静默授权。
 - **原生提问（CC / Codex）走同一套 UI**：引擎侧只调 `ask(questions, tool)`（`native-engine.ts`），它走桥接的 `askEngine` → `ask:request` → `AskQuestionPanel`，和 pi/Prophey 的 `ask_user_question` 共用队列与面板，不另做一套弹窗。
   - Claude Code：在 `canUseTool` 拦 `AskUserQuestion`，问题**原样**交给面板；回答回 `{ behavior: 'allow', updatedInput: { ...input, answers } }`（键=问题文本，值=选项 + 手输用 `, ` 拼接），取消回 `deny`。其他工具的审批也走这个回调（拒绝 / 允许本次）。
   - Codex：处理服务端请求 `item/tool/requestUserInput`，问题映射成 `AskQuestion`（`header`、`options[].description`、`isSecret → secret`），回答回 `{ answers: { <question id>: { answers: [...] } } }`（形状照 `codex app-server generate-json-schema` 的 `ToolRequestUserInputResponse`）。另外 `item/permissions/requestApproval` 同意时把请求的权限原样回传（`scope: 'turn'`）、拒绝回 `{ permissions: {} }`；`item/tool/call` 明确回 `success: false`（桌面没注册动态工具）；其余方法抛「尚不支持的 Codex 请求」。
@@ -370,4 +370,5 @@ npm run typecheck    # node + web 两个 tsconfig 分别检查
 - Prophey/pi 模型选择器与 `/model` 只允许已配置且 enabledModels 启用的服务商模型。CC/Codex 只接受原生目录返回的模型，不接受任意字符串。
 - Prophey 思考等级复用 pi-ai 的 getSupportedThinkingLevels，尊重 reasoning/thinkingLevelMap，发送到 streamSimple 的 reasoning；off 不发送 reasoning。会话头保存模型/思考等级并在恢复后校验。
 - Prophey 不再在 16 轮工具后静默结束。每轮检查自动压缩；流提前关闭、空回复和 180 秒无新数据均明确报错/重试，可随时中止。
+- **Prophey 支持运行中引导（steer）**：`prompt(message, { behavior: 'steer' })` 在 `busy()` 时不再报「上一轮还没结束」，而是 `steer()`：把这条 user 消息**直接推进 transcript** 并发 `message_start`/`message_end`（渲染层靠 `patchPendingUser` 把乐观气泡转正），并置 `steerPending`。主循环每轮开头清 `steerPending`，这一轮跑完若发现它又被置上，就 `continue` 再跑一轮（模型因此看得到这条插话）；万一它在循环退出后才到，`finally` 里用 `scheduleNoticeTurn()` 补一轮。`streamRound` 每轮都 `structuredClone(transcript)`，所以流式中途 append 不会弄脏在飞的请求。非 `steer` 的 `prompt` 在忙时仍然拒绝（不静默丢）。
 - 状态栏依据 status.isStreaming/compacting 而非仅依赖事件计数；activity 给出准备/等待模型/执行工具/重试状态，backgroundTasks 单独报告仍在运行的 Bash，前台结束时不得隐藏后台任务。

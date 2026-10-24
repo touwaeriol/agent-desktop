@@ -28,6 +28,8 @@ export class PropheyEngine implements AgentEngine {
   private snapshot: PiStatus = { phase: 'stopped', cwd: process.cwd() }
   private roots: AgentWorkspace = { primary: process.cwd(), additional: [] }
   private isBusy = false
+  /** Set by `steer()`: the running loop must answer one more round before it settles. */
+  private steerPending = false
   private model: Model<string> | undefined
   private transcript: Array<Record<string, unknown>> = []
   private tools: CoreTool[] | undefined
@@ -619,7 +621,29 @@ ${text.trim()}`,
     message: string,
     options: { behavior?: 'steer' | 'followUp'; images?: PromptImage[] } = {}
   ): Promise<PromptResult> {
+    // A steer joins the run that is already going instead of waiting for it to settle.
+    if (this.busy() && options.behavior === 'steer') return this.steer(message, options.images)
     return this.run(message, options)
+  }
+
+  /**
+   * A steer goes straight into the transcript; the running loop answers it in its next round.
+   *
+   * `streamRound` hands the provider a `structuredClone` of the transcript, so appending while a
+   * model call is in flight cannot disturb that call.
+   */
+  private steer(message: string, images?: PromptImage[]): PromptResult {
+    const user: Record<string, unknown> = {
+      role: 'user',
+      content: images?.length ? [{ type: 'text', text: message }, ...images] : message,
+      timestamp: Date.now()
+    }
+    this.transcript.push(user)
+    this.persist()
+    this.options.onEvent({ type: 'message_start', message: user })
+    this.options.onEvent({ type: 'message_end', message: user })
+    this.steerPending = true
+    return { ok: true, disposition: 'started' }
   }
 
   private async run(
@@ -657,10 +681,13 @@ ${text.trim()}`,
         signal.throwIfAborted()
         if (this.shouldCompact()) await this.compact()
         this.drainNotices()
+        this.steerPending = false
         const answer = await this.streamRoundWithRetry(runtime, model, tools)
         if (!answer.ok) throw new Error(answer.error)
         const calls = toolCallsOf(answer.message)
         if (!calls.length) {
+          // A steer that landed during that round still needs an answer.
+          if (this.steerPending) continue
           if (this.notices.some((notice) => notice.session === this.sessionId && notice.wake)) continue
           break
         }
@@ -682,13 +709,16 @@ ${text.trim()}`,
       return { ok: false, error: text }
     } finally {
       const wake = this.drainNotices()
+      // A steer that arrived after the loop decided to stop still has to be answered.
+      const steered = this.steerPending
+      this.steerPending = false
       this.isBusy = false
       this.controller = undefined
       this.setStatus({ isStreaming: false, compacting: false, activity: undefined })
       this.options.onEvent({ type: 'agent_end' })
       this.options.onEvent({ type: 'agent_settled' })
       this.options.onSettled()
-      if (wake && !signal.aborted) this.scheduleNoticeTurn()
+      if ((wake || steered) && !signal.aborted) this.scheduleNoticeTurn()
     }
   }
 

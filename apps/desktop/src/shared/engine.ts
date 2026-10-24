@@ -41,7 +41,8 @@ export function engineCapabilities(id: EngineId): EngineCapabilities {
     thinking: true,
     models: true,
     images: true,
-    steer: id === 'pi' || id === 'codex',
+    // Steering is what Enter does mid-run; Claude Code's SDK has no mid-turn injection, so it queues.
+    steer: id !== 'claude',
     mcp: cli ? 'native' : 'managed',
     providerSettings: !cli,
     speed: !cli,

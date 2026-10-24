@@ -463,3 +463,39 @@ test('session switches stop a running turn only with consent', async () => {
   await idleBeforeSwitch(engine(true, true), true)
   assert.deepEqual(calls, ['abort', 'stop'])
 })
+
+test('Prophey: Enter mid-run steers into the running turn instead of queueing', async () => {
+  const { PropheyEngine } = require(path.join(temp, 'prophey-engine.cjs'))
+  const events = []
+  const engine = new PropheyEngine(callbacks(events))
+  engine.model = { id: 'mock', provider: 'mock', api: 'mock', contextWindow: 1000 }
+  engine.tools = []
+  engine.setStatus({ phase: 'ready' })
+  let rounds = 0
+  engine.streamRoundWithRetry = async () => {
+    rounds += 1
+    if (rounds === 1) {
+      // The user hits Enter while the model is answering.
+      const steered = await engine.prompt('改成中文回答', { behavior: 'steer' })
+      assert.deepEqual(steered, { ok: true, disposition: 'started' })
+      assert.equal(engine.steerPending, true, 'the loop is asked for one more round')
+      return { ok: true, message: { role: 'assistant', content: [{ type: 'text', text: '好的' }] } }
+    }
+    return { ok: true, message: { role: 'assistant', content: [{ type: 'text', text: '收到' }] } }
+  }
+  assert.equal((await engine.prompt('开始')).ok, true)
+  assert.equal(rounds, 2, 'the steered message gets its own round')
+  assert.equal(engine.steerPending, false)
+  assert.equal(engine.busy(), false)
+  const users = (await engine.messages()).filter((message) => message.role === 'user')
+  assert.deepEqual(users.map((message) => message.content), ['开始', '改成中文回答'])
+  assert.equal(
+    events.filter((event) => event.type === 'message_end' && event.message?.role === 'user').length,
+    1,
+    'the window gets the steered message as a user message'
+  )
+  // Without the steer behaviour a busy engine still refuses, so nothing is silently dropped.
+  engine.isBusy = true
+  assert.match((await engine.prompt('普通发送')).error, /上一轮还没结束/)
+  engine.isBusy = false
+})
