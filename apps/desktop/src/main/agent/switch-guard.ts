@@ -1,12 +1,12 @@
 import type { AgentEngine } from './engine'
 
 /**
- * A session switch replaces the engine — a new session is a new process/transcript, and opening
- * another conversation disposes the current one — so a running turn would be killed with it.
+ * A running engine is normally parked when the window switches sessions (see `parkEngine`), so this
+ * is only the fallback for a run that has no session file yet and therefore cannot be reopened.
  *
- * The window asks the user before passing `stop`; this only decides what to do once it has. Without
- * consent the switch is refused instead of silently dropping work mid-turn, and an engine that will
- * not settle after `abort` is stopped so the switch cannot hang on it.
+ * With `stop` it aborts the turn and waits for it to settle; an engine that refuses to abort is
+ * stopped so the switch cannot hang on it. Without `stop` the switch is refused rather than
+ * silently dropping work mid-turn.
  */
 export async function idleBeforeSwitch(
   engine: Pick<AgentEngine, 'busy' | 'abort' | 'stop' | 'waitForSettle'>,

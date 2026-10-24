@@ -1,7 +1,7 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import type { SubagentView } from '@shared/types'
 import { engineLabel } from '@shared/engine'
-import { ChevronIcon, RefreshIcon, SparkIcon, StopIcon } from './Icons'
+import { ChevronIcon, RefreshIcon, SparkIcon, StopIcon, ToolIcon } from './Icons'
 import { Markdown } from './Markdown'
 import { SUBAGENT_STATUS_LABELS, isSubagentRunning } from '../lib/subagents'
 
@@ -26,6 +26,79 @@ function changedFiles(record: SubagentView): string[] {
   return [...seen]
 }
 
+type TimelineEntry =
+  | {
+      kind: 'call'
+      key: string
+      ts: number
+      tool: string
+      target?: string
+      ok: boolean
+      durationMs?: number
+      running: boolean
+    }
+  | {
+      kind: 'message'
+      key: string
+      ts: number
+      role: 'assistant' | 'user'
+      text: string
+      toolCalls?: string[]
+    }
+
+/** Calls and messages in the order they happened, with in-flight calls at the end. */
+function buildTimeline(record: SubagentView): TimelineEntry[] {
+  const entries: TimelineEntry[] = []
+  record.messages.forEach((message, index) => {
+    if (!message.text && !message.toolCalls?.length) return
+    entries.push({
+      kind: 'message',
+      key: `m${index}`,
+      ts: message.ts,
+      role: message.role,
+      text: message.text,
+      toolCalls: message.toolCalls
+    })
+  })
+  record.calls.forEach((call, index) => {
+    entries.push({
+      kind: 'call',
+      key: `c${index}`,
+      ts: call.ts,
+      tool: call.tool,
+      target: call.summary,
+      ok: call.ok,
+      durationMs: call.durationMs,
+      running: false
+    })
+  })
+  for (const call of record.activeCalls ?? []) {
+    entries.push({
+      kind: 'call',
+      key: `a${call.id}`,
+      ts: call.startedAt,
+      tool: call.tool,
+      target: call.target,
+      ok: true,
+      running: true
+    })
+  }
+  return entries.sort((a, b) => a.ts - b.ts)
+}
+
+/** One line describing what the subagent is doing right now. */
+function liveActivity(record: SubagentView): string {
+  const active = record.activeCalls ?? []
+  if (active.length > 0) {
+    const [first] = active
+    const more = active.length > 1 ? ` 等 ${active.length} 个` : ''
+    return `正在执行 ${first.tool}${first.target ? ' · ' + first.target : ''}${more}`
+  }
+  if (record.draft?.text) return '正在生成回复'
+  if (record.draft?.thinking) return '正在思考'
+  return record.status === 'starting' ? '正在启动' : '正在处理'
+}
+
 /**
  * Right-hand drawer for subagent runs: the list is one click away from the chat, and a run opens
  * in place instead of covering the conversation with a modal.
@@ -45,7 +118,10 @@ export function SubagentsDrawer({
   const [draft, setDraft] = useState('')
   const [mode, setMode] = useState<'steer' | 'follow-up' | 'interrupt'>('steer')
   const [busy, setBusy] = useState(false)
-  const [showMessages, setShowMessages] = useState(false)
+  const [showProgress, setShowProgress] = useState(true)
+  const timelineRef = useRef<HTMLDivElement>(null)
+  /** Keep the newest line in view unless the user scrolled up to read something. */
+  const stickRef = useRef(true)
 
   const visible = useMemo(() => {
     const needle = query.trim().toLowerCase()
@@ -61,6 +137,8 @@ export function SubagentsDrawer({
     () => records.find((record) => record.id === selectedId) ?? undefined,
     [records, selectedId]
   )
+  const entries = useMemo(() => (selected ? buildTimeline(selected) : []), [selected])
+  const running = selected ? isSubagentRunning(selected) : false
 
   useEffect(() => {
     if (!initialId) return
@@ -70,8 +148,16 @@ export function SubagentsDrawer({
 
   useEffect(() => {
     setDraft('')
-    setShowMessages(false)
+    setShowProgress(true)
+    stickRef.current = true
   }, [selected?.id])
+
+  // Streaming updates repaint the panel several times a second; follow the tail like a terminal.
+  useEffect(() => {
+    const element = timelineRef.current
+    if (!element || !stickRef.current) return
+    element.scrollTop = element.scrollHeight
+  })
 
   const open = (id: string): void => {
     setSelectedId(id)
@@ -196,18 +282,89 @@ export function SubagentsDrawer({
 
           {selected.error && <div className="message-error">{selected.error}</div>}
 
-          <div className="subagent-section">
-            <div className="subagent-section-head">结论</div>
-            {selected.finalText ? (
+          {selected.finalText ? (
+            <div className="subagent-section">
+              <div className="subagent-section-head">结论</div>
               <div className="subagent-final">
                 <Markdown>{selected.finalText}</Markdown>
               </div>
-            ) : (
-              <div className="subagent-empty">
-                {isSubagentRunning(selected) ? '还在运行，暂无结论。' : '（没有结论）'}
+            </div>
+          ) : (
+            !running && <div className="subagent-empty">（没有结论）</div>
+          )}
+
+          {(running || entries.length > 0) && (
+            <div className="subagent-section">
+              <div className="subagent-section-head">
+                <span>进度{entries.length > 0 ? `（${entries.length} 条）` : ''}</span>
+                <button
+                  className="subagent-toggle"
+                  onClick={() => setShowProgress((value) => !value)}
+                >
+                  {showProgress ? '收起' : '展开'}
+                </button>
               </div>
-            )}
-          </div>
+              {showProgress && (
+                <div
+                  className="subagent-timeline"
+                  ref={timelineRef}
+                  onScroll={(event) => {
+                    const element = event.currentTarget
+                    stickRef.current =
+                      element.scrollHeight - element.scrollTop - element.clientHeight < 24
+                  }}
+                >
+                  {entries.map((entry) =>
+                    entry.kind === 'call' ? (
+                      <div
+                        key={entry.key}
+                        className={`subagent-event call ${
+                          entry.running ? 'running' : entry.ok ? 'ok' : 'error'
+                        }`}
+                      >
+                        <span className="subagent-event-icon">
+                          <ToolIcon size={11} />
+                        </span>
+                        <span className="subagent-event-tool">{entry.tool}</span>
+                        {entry.target && (
+                          <span className="subagent-event-target" title={entry.target}>
+                            {entry.target}
+                          </span>
+                        )}
+                        <span className="subagent-event-state">
+                          {entry.running ? '运行中' : entry.ok ? '完成' : '失败'}
+                          {entry.durationMs !== undefined ? ` · ${span(entry.durationMs)}` : ''}
+                        </span>
+                      </div>
+                    ) : (
+                      <div key={entry.key} className={`subagent-event message ${entry.role}`}>
+                        <span className="subagent-event-role">
+                          {entry.role === 'assistant' ? '子代理' : '提示'}
+                        </span>
+                        <span className="subagent-event-text">
+                          {entry.text || `（调用 ${entry.toolCalls?.join(', ')}）`}
+                        </span>
+                      </div>
+                    )
+                  )}
+                  {running && (
+                    <div className="subagent-event live">
+                      <div className="subagent-live-head">
+                        <span className="pulse-dot" />
+                        <span>{liveActivity(selected)}</span>
+                      </div>
+                      {selected.draft?.thinking && (
+                        <div className="subagent-thinking">{selected.draft.thinking}</div>
+                      )}
+                      {selected.draft?.text && (
+                        <div className="subagent-live-text">{selected.draft.text}</div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
 
           {changedFiles(selected).length > 0 && (
             <div className="subagent-section">
@@ -221,31 +378,6 @@ export function SubagentsDrawer({
                   </span>
                 ))}
               </div>
-            </div>
-          )}
-
-          {selected.messages.length > 0 && (
-            <div className="subagent-section">
-              <button
-                className="subagent-toggle"
-                onClick={() => setShowMessages((value) => !value)}
-              >
-                {showMessages ? '收起过程' : `过程（${selected.messages.length} 条）`}
-              </button>
-              {showMessages && (
-                <div className="subagent-messages">
-                  {selected.messages.slice(-20).map((message, index) => (
-                    <div key={index} className={`subagent-message ${message.role}`}>
-                      <span className="subagent-message-role">
-                        {message.role === 'assistant' ? '子代理' : '提示'}
-                      </span>
-                      <span className="subagent-message-text">
-                        {message.text || `（调用 ${message.toolCalls?.join(', ')}）`}
-                      </span>
-                    </div>
-                  ))}
-                </div>
-              )}
             </div>
           )}
 

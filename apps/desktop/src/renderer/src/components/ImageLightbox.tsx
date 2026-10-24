@@ -17,6 +17,7 @@ export function ImageLightbox({
   const copyingRef = useRef(false)
   const [copyState, setCopyState] = useState<'idle' | 'copying' | 'copied' | 'error'>('idle')
   const [error, setError] = useState('')
+  const [menu, setMenu] = useState<{ x: number; y: number } | undefined>(undefined)
   const copy = useCallback(async (): Promise<void> => {
     if (copyingRef.current || !imageRef.current) return
     copyingRef.current = true
@@ -46,14 +47,30 @@ export function ImageLightbox({
   }, [copyState])
 
   useEffect(() => {
+    if (!menu) return
+    // Any click outside dismisses the menu. The menu stops propagation so its own clicks survive.
+    const dismiss = (): void => setMenu(undefined)
+    window.addEventListener('mousedown', dismiss)
+    window.addEventListener('resize', dismiss)
+    window.addEventListener('blur', dismiss)
+    return () => {
+      window.removeEventListener('mousedown', dismiss)
+      window.removeEventListener('resize', dismiss)
+      window.removeEventListener('blur', dismiss)
+    }
+  }, [menu])
+
+  useEffect(() => {
     const handler = (event: KeyboardEvent): void => {
       if (event.key === 'Escape') {
         event.preventDefault()
         event.stopPropagation()
-        onClose()
+        if (menu) setMenu(undefined)
+        else onClose()
       } else if ((event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey && event.key.toLowerCase() === 'c') {
         event.preventDefault()
         event.stopPropagation()
+        setMenu(undefined)
         void copy()
       }
     }
@@ -68,7 +85,7 @@ export function ImageLightbox({
       window.removeEventListener('keydown', handler, true)
       window.removeEventListener('copy', copyHandler, true)
     }
-  }, [onClose, copy])
+  }, [onClose, copy, menu])
 
   return (
     <div
@@ -80,6 +97,11 @@ export function ImageLightbox({
       tabIndex={-1}
       onMouseDown={(event) => {
         if (event.target === event.currentTarget) onClose()
+      }}
+      onContextMenu={(event) => {
+        event.preventDefault()
+        event.stopPropagation()
+        setMenu({ x: event.clientX, y: event.clientY })
       }}
     >
       <div className="image-lightbox-actions">
@@ -95,6 +117,33 @@ export function ImageLightbox({
         {error || (copyState === 'copied' ? '图片已复制到剪贴板' : '')}
       </div>
       <img ref={imageRef} src={src} alt={alt ?? '图片'} />
+      {menu && (
+        <div
+          className="image-context-menu"
+          role="menu"
+          style={{
+            left: Math.max(8, Math.min(menu.x, window.innerWidth - 188)),
+            top: Math.max(8, Math.min(menu.y, window.innerHeight - 96))
+          }}
+          onMouseDown={(event) => event.stopPropagation()}
+          onContextMenu={(event) => event.preventDefault()}
+        >
+          <button
+            role="menuitem"
+            onClick={() => {
+              setMenu(undefined)
+              void copy()
+            }}
+          >
+            <span>复制图片</span>
+            <kbd>{navigator.platform.toLowerCase().includes('mac') ? '⌘C' : 'Ctrl+C'}</kbd>
+          </button>
+          <button role="menuitem" onClick={onClose}>
+            <span>关闭预览</span>
+            <kbd>Esc</kbd>
+          </button>
+        </div>
+      )}
     </div>
   )
 }

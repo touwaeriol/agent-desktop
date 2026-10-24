@@ -103,6 +103,8 @@ function SubagentCard({
   const label = record?.label ?? hint.label ?? record?.agent ?? hint.agent ?? '子代理'
   const lastMessage = record?.messages?.[record.messages.length - 1]?.text
   const running = isSubagentRunning({ status })
+  const activeCall = record?.activeCalls?.[record.activeCalls.length - 1]
+  const liveText = record?.draft?.text || lastMessage
 
   return (
     <div className={`subagent-card ${status}`}>
@@ -129,7 +131,13 @@ function SubagentCard({
             <div className="subagent-card-live">
               <span className="pulse-dot" />
               <span>
-                {lastMessage ? lastMessage.replace(/\s+/g, ' ').slice(0, 240) : '正在处理…'}
+                {activeCall
+                  ? `正在执行 ${activeCall.tool}${activeCall.target ? ' · ' + activeCall.target : ''}`
+                  : liveText
+                    ? liveText.replace(/\s+/g, ' ').slice(0, 240)
+                    : record?.draft?.thinking
+                      ? '正在思考…'
+                      : '正在处理…'}
               </span>
             </div>
           )}

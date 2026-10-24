@@ -253,25 +253,56 @@ function codexLaunch(): { command: string; script?: string } {
   return existsSync(script) ? { command: process.execPath, script } : { command: 'codex' }
 }
 
-let engineGeneration = 0
 let conversationStarted = false
+
+/**
+ * An engine plus the status it reported last.
+ *
+ * The global `status` only mirrors the engine on screen; a parked engine keeps its own mirror so
+ * its sidebar dot and session record stay correct while the window shows another conversation.
+ */
+interface EngineSlot {
+  engine: AgentEngine
+  status: PiStatus
+  /** Set while the session is off screen and its turn is still running. */
+  parked?: { key: string; cwd: string; additional: string[]; projectId?: string }
+}
+
+const engineSlots = new WeakMap<AgentEngine, EngineSlot>()
+/** Engines still running for sessions the window is not showing, keyed by session key. */
+const parkedEngines = new Map<string, EngineSlot>()
 
 /** Engine factory: Prophey is the default; `pi` stays available as the other engine. */
 function createEngine(): AgentEngine {
-  const generation = ++engineGeneration
   conversationStarted = false
+  const slot: EngineSlot = {
+    engine: undefined as unknown as AgentEngine,
+    status: { phase: 'stopped', cwd: status.cwd }
+  }
+  const isActive = (): boolean => slot.engine === currentEngine
   const shared = {
     ask: bridge.askEngine,
     onStatus: (next: PiStatus) => {
-      if (generation !== engineGeneration) return
-      const previous = status
+      const previous = slot.status
+      slot.status = next
+      if (!isActive()) {
+        // Off screen: only the sidebar dot and the saved session record still matter.
+        if (slot.parked) {
+          if (next.sessionFile && next.sessionFile !== previous.sessionFile) void rememberParkedSession(slot)
+          else if (next.sessionName && next.sessionName !== previous.sessionName) void rememberParkedSession(slot)
+          if (!next.isStreaming && !next.compacting) setTimeout(() => reapParked(slot), 300)
+          broadcastStatus()
+        }
+        return
+      }
       status = next
       if (currentEngine) broadcastStatus()
       if (next.sessionFile && next.sessionFile !== previous.sessionFile) void rememberSession()
       else if (next.sessionName && next.sessionName !== previous.sessionName) void rememberSession()
     },
     onEvent: (record: Record<string, unknown>) => {
-      if (generation !== engineGeneration) return
+      // A parked run keeps working; its transcript is on disk and comes back when the session does.
+      if (!isActive()) return
       if (!conversationStarted && !btwActive && record.message && conversationHasStarted([record.message])) {
         conversationStarted = true
         broadcastStatus()
@@ -281,29 +312,41 @@ function createEngine(): AgentEngine {
       mainWindow?.webContents.send('pi:event', record)
     },
     onSettled: () => {
-      if (generation !== engineGeneration) return
+      if (!isActive()) {
+        if (!slot.parked) return
+        void rememberParkedSession(slot)
+        // Idle off screen: the next open restarts from the transcript, so stop paying for a
+        // process (and pick up config changes on the way in).
+        setTimeout(() => reapParked(slot), 300)
+        return
+      }
       void rememberSession()
       if (!configPending || switchingEngine) return
       configPending = false
       void startPi(status.cwd, sessionArgs())
     },
     onAssistantError: (message: string) => {
-      if (generation === engineGeneration && !switchingEngine) noteSpeedRejection(message)
+      if (isActive() && !switchingEngine) noteSpeedRejection(message)
     },
     onExit: () => {
-      if (generation === engineGeneration) handleExit()
+      if (isActive()) handleExit()
+      else if (slot.parked) {
+        parkedEngines.delete(slot.parked.key)
+        slot.parked = undefined
+        broadcastStatus()
+      }
     }
   }
+  let engine: AgentEngine
   if (desktopConfig.engine === 'claude') {
-    return new ClaudeCodeEngine({
+    engine = new ClaudeCodeEngine({
       ...shared,
       binary: claudeBinary(),
       historyStore: new ImportedHistoryStore(path.join(app.getPath('userData'), 'imports', 'claude'))
     })
-  }
-  if (desktopConfig.engine === 'codex') {
+  } else if (desktopConfig.engine === 'codex') {
     const { command, script } = codexLaunch()
-    return new CodexEngine({
+    engine = new CodexEngine({
       ...shared,
       binary: command,
       historyStore: new ImportedHistoryStore(path.join(app.getPath('userData'), 'imports', 'codex')),
@@ -311,9 +354,8 @@ function createEngine(): AgentEngine {
       sandbox: () => desktopConfig.codexSandbox,
       questions: () => desktopConfig.codexRequestUserInput !== false
     })
-  }
-  if (desktopConfig.engine !== 'pi') {
-    return new PropheyEngine({
+  } else if (desktopConfig.engine !== 'pi') {
+    engine = new PropheyEngine({
       ...shared,
       toolModulePath: coreToolsModule(),
       shellPath: realBashPath(),
@@ -342,46 +384,174 @@ function createEngine(): AgentEngine {
       mcpEndpoints: (workspace) => mcpEndpointsFor(workspace),
       speedMode: () => currentSpeedMode()
     })
+  } else {
+    engine = new PiEngine({
+      ...shared,
+      prepare: async (workspace) => {
+        await applySystemProxy()
+        cancelPendingAsks('pi 已重启')
+        const launch = await mcpLaunch(workspace)
+        // Keep the child process and SDK on the same configuration directory.
+        const env = withRealBash({ ...launch.env })
+        // Read by the extension's request hooks; it re-checks the model before touching the payload.
+        env.AGENT_DESKTOP_SPEED = speed.resolveSpeedMode(status.model, currentSpeedMode())
+        // The root-aware bash tool runs in the core server, which has no idea where Git Bash lives.
+        const bash = realBashPath()
+        if (bash) env.AGENT_DESKTOP_SHELL = bash
+        // Root-aware file tools need the same list the model is told about, so both come from here.
+        if (workspace.additional.length > 0) {
+          env.AGENT_DESKTOP_ROOTS = JSON.stringify([
+            { name: path.basename(workspace.primary), path: workspace.primary, primary: true },
+            ...workspace.additional.map((root) => ({ name: path.basename(root), path: root }))
+          ])
+        }
+        // Several directories need to be explained to the model; one directory is just a normal session
+        // and gets no section.
+        const project = activeProject()
+        if (project && workspace.additional.length > 0) {
+          env.AGENT_DESKTOP_PROJECT = JSON.stringify({
+            id: project.id,
+            name: project.name,
+            roots: [
+              { path: workspace.primary, name: path.basename(workspace.primary), primary: true },
+              ...workspace.additional.map((root) => ({ path: root, name: path.basename(root) }))
+            ]
+          })
+        }
+        env.PI_CODING_AGENT_DIR = profile.agentDir()
+        return { args: launch.args, env }
+      },
+      sessionArgs: () => sessionArgs(),
+      sessionDirArgs: () => sessionDirArgs()
+    })
   }
-  return new PiEngine({
-    ...shared,
-    prepare: async (workspace) => {
-      await applySystemProxy()
-      cancelPendingAsks('pi 已重启')
-      const launch = await mcpLaunch(workspace)
-      // Keep the child process and SDK on the same configuration directory.
-      const env = withRealBash({ ...launch.env })
-      // Read by the extension's request hooks; it re-checks the model before touching the payload.
-      env.AGENT_DESKTOP_SPEED = speed.resolveSpeedMode(status.model, currentSpeedMode())
-      // The root-aware bash tool runs in the core server, which has no idea where Git Bash lives.
-      const bash = realBashPath()
-      if (bash) env.AGENT_DESKTOP_SHELL = bash
-      // Root-aware file tools need the same list the model is told about, so both come from here.
-      if (workspace.additional.length > 0) {
-        env.AGENT_DESKTOP_ROOTS = JSON.stringify([
-          { name: path.basename(workspace.primary), path: workspace.primary, primary: true },
-          ...workspace.additional.map((root) => ({ name: path.basename(root), path: root }))
-        ])
-      }
-      // Several directories need to be explained to the model; one directory is just a normal session
-      // and gets no section.
-      const project = activeProject()
-      if (project && workspace.additional.length > 0) {
-        env.AGENT_DESKTOP_PROJECT = JSON.stringify({
-          id: project.id,
-          name: project.name,
-          roots: [
-            { path: workspace.primary, name: path.basename(workspace.primary), primary: true },
-            ...workspace.additional.map((root) => ({ path: root, name: path.basename(root) }))
-          ]
-        })
-      }
-      env.PI_CODING_AGENT_DIR = profile.agentDir()
-      return { args: launch.args, env }
-    },
-    sessionArgs: () => sessionArgs(),
-    sessionDirArgs: () => sessionDirArgs()
+  slot.engine = engine
+  engineSlots.set(engine, slot)
+  return engine
+}
+
+/** Stop paying for an off-screen engine once its turn is over; false when it must stay alive. */
+function reapParked(slot: EngineSlot): boolean {
+  if (!slot.parked) return true
+  if (slot.engine.busy() || slot.engine.compacting() || slot.engine.starting()) return false
+  // Background commands belong to the session: keep the engine until they finish.
+  if ((slot.engine.state().backgroundTasks?.length ?? 0) > 0) return false
+  // A running subagent still has to wake its parent; without the engine the notice would wait.
+  const key = slot.parked.key
+  const waiting = (subagents?.list() ?? []).some((record) =>
+    record.parentSession && toSummaryKey(record.parentSession) === key &&
+    (record.status === 'starting' || record.status === 'streaming'))
+  if (waiting) return false
+  parkedEngines.delete(key)
+  slot.parked = undefined
+  slot.engine.dispose()
+  broadcastStatus()
+  return true
+}
+
+/** Keep a running engine alive under its session key instead of disposing it. */
+function parkEngine(engine: AgentEngine, file: string): void {
+  const slot = engineSlots.get(engine)
+  if (!slot) return
+  const key = toSummaryKey(file)
+  const existing = parkedEngines.get(key)
+  if (existing && existing !== slot) {
+    // Defensive: never leave two engines writing the same transcript.
+    existing.parked = undefined
+    existing.engine.dispose()
+  }
+  slot.parked = {
+    key,
+    cwd: status.cwd,
+    additional: currentWorkspace().additional,
+    projectId: desktopConfig.activeProject
+  }
+  parkedEngines.set(key, slot)
+  broadcastStatus()
+}
+
+/**
+ * Take the active engine off screen: a running turn is parked, an idle one is simply disposed.
+ * A run that has no durable session yet cannot be reopened later, so it is stopped instead.
+ */
+async function retireEngine(engine: AgentEngine): Promise<EngineSlot | undefined> {
+  const file = engine.state().sessionFile
+  const busy = engine.busy() || engine.compacting()
+  if (busy && file) {
+    parkEngine(engine, file)
+    return engineSlots.get(engine)
+  }
+  if (busy) {
+    const restore = switchingEngine
+    switchingEngine = currentEngineId()
+    broadcastStatus()
+    try {
+      cancelPendingAsks('会话已切换')
+      await idleBeforeSwitch(engine, true)
+    } finally {
+      switchingEngine = restore
+    }
+  }
+  engine.dispose()
+  return undefined
+}
+
+/** Bring a parked engine back on screen without restarting it. */
+function activateParked(slot: EngineSlot): void {
+  const parked = slot.parked
+  if (!parked) return
+  parkedEngines.delete(parked.key)
+  slot.parked = undefined
+  currentEngine = slot.engine
+  status = slot.status
+  conversationStarted = true
+  void refreshRepo(status.cwd)
+  broadcastStatus()
+  void slot.engine
+    .messages()
+    .then((messages) => {
+      if (currentEngine !== slot.engine) return
+      conversationStarted = conversationHasStarted(messages)
+      broadcastStatus()
+    })
+    .catch(() => undefined)
+}
+
+/** Save an off-screen run without touching the active session's config pointers. */
+async function rememberParkedSession(slot: EngineSlot): Promise<void> {
+  const parked = slot.parked
+  if (!parked || !sessionStore) return
+  const file = slot.status.sessionFile
+  if (!file) return
+  if (!isNativeSessionReference(file) && !existsSync(file)) return
+  if (isNativeSessionReference(file) && (await slot.engine.messages().catch(() => [])).length === 0) return
+  const known = sessionStore.byPath(file)
+  const job = titleJobs.get(file)
+  const protectedTitle = known?.titleSource === 'manual' || known?.titleSource === 'generated'
+  let title = protectedTitle ? known?.title : job?.title || slot.status.sessionName
+  if (!title && (!known?.title || known.title === path.basename(file, '.jsonl'))) {
+    title = isNativeSessionReference(file)
+      ? undefined
+      : (await readSummary(file).catch(() => null))?.title
+  }
+  const saved = await sessionStore.upsert({
+    engine: slot.engine.id as EngineId,
+    path: file,
+    cwd: parked.cwd,
+    ...(title ? { title } : {}),
+    ...(job && !protectedTitle ? { titleSource: job.source } : {}),
+    additional: parked.additional,
+    ...(parked.projectId ? { projectId: parked.projectId } : {}),
+    updatedAt: Date.now()
   })
+  if (!known || known.title !== saved.title) {
+    mainWindow?.webContents.send('pi:event', {
+      type: 'session_title_updated',
+      sessionKey: toSummary(saved).path,
+      title: saved.title
+    })
+  }
+  mainWindow?.webContents.send('pi:event', { type: 'session_updated', sessionKey: toSummary(saved).path })
 }
 
 /** Created in `whenReady`, once `config.engine` is known; replaced when the engine changes. */
@@ -744,21 +914,31 @@ function subagentManager(): SubagentManager {
   return subagents
 }
 
+/** The live engine that owns a session, on screen or parked. */
+function engineForSession(file: string): AgentEngine | undefined {
+  const key = toSummaryKey(file)
+  if (status.sessionFile && toSummaryKey(status.sessionFile) === key) return currentEngine
+  return parkedEngines.get(key)?.engine
+}
+
 function flushSubagentNotices(): void {
   if (flushingSubagentNotices) return
-  if (!currentEngine || switchingEngine || btwActive || !currentEngine.running() || !status.sessionFile) return
-  if (currentEngine.id !== 'prophey' && currentEngine.id !== 'pi') return
+  if (!currentEngine || switchingEngine || btwActive) return
   flushingSubagentNotices = true
   try {
-    const current = toSummaryKey(status.sessionFile)
     for (let i = pendingSubagentNotices.length - 1; i >= 0; i--) {
       const record = pendingSubagentNotices[i]
-      if (!record.parentSession || toSummaryKey(record.parentSession) !== current) continue
+      if (!record.parentSession) continue
+      const owner = engineForSession(record.parentSession)
+      if (!owner || !owner.running()) continue
+      if (owner.id !== 'prophey' && owner.id !== 'pi') continue
       pendingSubagentNotices.splice(i, 1)
       const text = subagentNotice(record)
-      const wake = record.notify === 'wake' && Date.now() - lastAbortAt > 30_000
-      if (currentEngine.notify) currentEngine.notify(text, wake)
-      else bridge.publishEvent({ type: 'subagent_settled', text, wake })
+      // A parked parent is never the session the user just stopped, so it may wake freely.
+      const wake = record.notify === 'wake' &&
+        (owner !== currentEngine || Date.now() - lastAbortAt > 30_000)
+      if (owner.notify) owner.notify(text, wake)
+      else bridge.publishEvent({ type: 'subagent_settled', text, wake, session: record.parentSession })
     }
   } finally { flushingSubagentNotices = false }
 }
@@ -818,6 +998,8 @@ function serializeSubagent(record: SubagentRecord): Record<string, unknown> {
     tools: record.tools,
     messages: record.messages,
     calls: record.calls,
+    draft: record.draft,
+    activeCalls: record.activeCalls,
     finalText: record.finalText,
     tokens: record.tokens,
     runtimeMs: record.runtimeMs,
@@ -1202,6 +1384,13 @@ function statusSnapshot(): PiStatus {
     .filter(item => !item.restored && (item.status === 'starting' || item.status === 'streaming') && item.parentSession)
     .map(item => toSummaryKey(item.parentSession!)))
   if (status.sessionFile && (status.isStreaming || status.compacting || status.backgroundTasks?.length)) running.add(toSummaryKey(status.sessionFile))
+  // Runs that kept going off screen still light up their session row.
+  for (const slot of parkedEngines.values()) {
+    const file = slot.status.sessionFile
+    if (file && (slot.engine.busy() || slot.engine.compacting() || slot.status.backgroundTasks?.length)) {
+      running.add(toSummaryKey(file))
+    }
+  }
   return {
     ...status,
     sessionLocked: conversationStarted,
@@ -1494,26 +1683,44 @@ async function activateConversation(options: {
   cwd: string
   sessionPath?: string
   projectId?: string
-  /** The window already asked: stop the running turn instead of refusing the switch. */
+  /** Kept for older callers; a running turn is parked rather than stopped. */
   stop?: boolean
 }): Promise<PiStatus> {
   if (switchingEngine || currentEngine.starting()) throw new Error('正在切换会话，请稍候')
   if (btwActive) await closeSideChat()
-  if (currentEngine.busy()) {
-    // The switch disposes this engine, so the running turn dies with it. Mark the switch first:
-    // `agent_settled` would otherwise fire a queued config restart against the engine we are about
-    // to replace. The window asks for consent; a caller without it gets a readable error.
-    switchingEngine = currentEngineId()
-    broadcastStatus()
-    try {
-      cancelPendingAsks('会话已切换')
-      await idleBeforeSwitch(currentEngine, options.stop === true)
-    } finally {
-      switchingEngine = undefined
-    }
-  }
   const record = options.sessionPath ? sessionStore?.byPath(options.sessionPath) : undefined
   const file = record?.path || options.sessionPath
+  const targetKey = file ? toSummaryKey(file) : undefined
+
+  // The session's engine is still running off screen: bring it back instead of replacing it, so
+  // the turn continues exactly where it was (and no work is lost).
+  const parked = targetKey ? parkedEngines.get(targetKey) : undefined
+  if (parked && parked.engine.running()) {
+    if (reapParked(parked)) {
+      // It finished while off screen: fall through and reopen from the transcript, which also
+      // picks up any config change made in the meantime.
+    } else {
+      await rememberSession({}, true)
+      // The session being left behind is either parked too (if it is running) or disposed.
+      if (currentEngine !== parked.engine) await retireEngine(currentEngine)
+      activateParked(parked)
+      await saveConfig({
+        engine: parked.engine.id as EngineId,
+        cwd: record?.cwd || options.cwd,
+        activeProject: record?.projectId ?? options.projectId,
+        activeSession: record ? toSummary(record).path : undefined
+      })
+      await rememberSession({}, true)
+      return statusSnapshot()
+    }
+  }
+  if (parked && !parked.engine.running()) {
+    // The process is gone but the entry was not reaped yet.
+    parkedEngines.delete(parked.parked?.key ?? '')
+    parked.parked = undefined
+    parked.engine.dispose()
+  }
+
   const target: EngineId = file ? record?.engine ??
     (file.startsWith('claude:') ? 'claude' : file.startsWith('codex:') ? 'codex' :
       path.dirname(file) === path.join(app.getPath('userData'), 'transcripts') ? 'prophey' : 'pi')
@@ -1521,10 +1728,12 @@ async function activateConversation(options: {
   const source = currentEngine
   const sourceFile = source.state().sessionFile
   let sourceRef: string | undefined
+  let parkedSource: EngineSlot | undefined
   switchingEngine = target
   broadcastStatus()
   let original = { ...desktopConfig }
   let replaced = false
+  let created = false
   try {
     sourceRef = sourceFile && (isNativeSessionReference(sourceFile)
       ? (await source.messages()).length > 0 : existsSync(sourceFile)) ? sourceFile : undefined
@@ -1535,8 +1744,9 @@ async function activateConversation(options: {
       propheySessionId: original.propheySessionId, activeProject: original.activeProject,
       record: sourceRef ? sessionStore?.byPath(sourceRef) : undefined
     } })
-    source.dispose()
-    replaced = true
+    // A running turn keeps its engine, process and tools; only the window stops watching it.
+    parkedSource = await retireEngine(source)
+    replaced = !parkedSource
     await saveConfig({
       engine: target, cwd: record?.cwd || options.cwd,
       activeProject: record?.projectId ?? options.projectId,
@@ -1546,6 +1756,7 @@ async function activateConversation(options: {
     })
     currentEngine = createEngine()
     currentEngine.poll()
+    created = true
     const next = await startPi(record?.cwd || options.cwd, file ? ['--session', file] : [])
     if (next.phase === 'error' || currentEngine.state().phase !== 'ready') {
       throw new Error(currentEngine.state().error ?? '会话启动失败')
@@ -1553,11 +1764,14 @@ async function activateConversation(options: {
     await rememberSession({}, true)
     await saveConfig({ pendingEngineSwitch: undefined })
   } catch (error) {
-    if (replaced) currentEngine.dispose()
+    if (replaced || created) currentEngine.dispose()
     await saveConfig({ ...original, activeSession: original.activeSession,
       engineSessions: original.engineSessions, propheySessionId: original.propheySessionId,
       activeProject: original.activeProject, pendingEngineSwitch: undefined })
-    if (replaced) {
+    if (parkedSource?.parked) {
+      // The switch failed, so put the background run back on screen.
+      activateParked(parkedSource)
+    } else if (replaced) {
       currentEngine = createEngine()
       currentEngine.poll()
       await currentEngine.start(source.workspace(), { session: sourceRef })
@@ -2805,6 +3019,8 @@ app.on('window-all-closed', () => {
   shuttingDown = true
   cancelPendingAsks('桌面窗口已关闭')
   currentEngine.dispose()
+  for (const slot of parkedEngines.values()) slot.engine.dispose()
+  parkedEngines.clear()
   subagents?.stopAll(true)
   gateway.stopAll(true)
   status = { ...status, phase: 'stopped' }
@@ -2814,6 +3030,8 @@ app.on('window-all-closed', () => {
 app.on('before-quit', () => {
   shuttingDown = true
   bridge.cancelAllAsks('桌面端已退出')
+  for (const slot of parkedEngines.values()) slot.engine.dispose()
+  parkedEngines.clear()
   subagents?.stopAll(true)
   gateway.stopAll(true)
   bridge.stopBridge()

@@ -82,6 +82,35 @@ module.exports = async function imageCopySmoke(evaluate, until, window, setSessi
     await closePreview()
     await openPreview()
     clipboard.clear()
+    // Right-click opens an in-app menu with the same copy action.
+    await evaluate(`(() => {
+      const image = document.querySelector('.image-lightbox img')
+      const rect = image.getBoundingClientRect()
+      image.dispatchEvent(new MouseEvent('contextmenu', {
+        bubbles: true, cancelable: true,
+        clientX: Math.round(rect.left + rect.width / 2),
+        clientY: Math.round(rect.top + rect.height / 2)
+      }))
+    })()`)
+    await until(() => evaluate('!!document.querySelector(".image-context-menu")'), 'context menu')
+    assert.equal(
+      await evaluate('document.querySelector(".image-context-menu button").textContent.includes("复制图片")'),
+      true
+    )
+    await evaluate('document.querySelector(".image-context-menu button").click()')
+    await copied()
+    await assertClipboard('context menu')
+    assert.equal(await evaluate('document.querySelectorAll(".image-context-menu").length'), 0)
+    // Escape closes the menu first and leaves the preview open.
+    await evaluate(`document.querySelector('.image-lightbox img').dispatchEvent(
+      new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 40, clientY: 40 }))`)
+    await until(() => evaluate('!!document.querySelector(".image-context-menu")'), 'context menu again')
+    await evaluate(`window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`)
+    await until(() => evaluate('!document.querySelector(".image-context-menu")'), 'escape closes the menu')
+    assert.equal(await evaluate('!!document.querySelector(".image-lightbox")'), true)
+    await closePreview()
+    await openPreview()
+    clipboard.clear()
     // keydown preventDefault may suppress copy: do not require a copy event here.
     await shortcut('C')
     await copied()
@@ -142,7 +171,7 @@ module.exports = async function imageCopySmoke(evaluate, until, window, setSessi
       assert.ok(result.error)
       await assertClipboard('invalid IPC preserves clipboard')
     }
-    console.log('Image copy passed: draft paste, button, shortcut, native copy, session JPEG, broken source, invalid IPC')
+    console.log('Image copy passed: draft paste, button, context menu, shortcut, native copy, session JPEG, broken source, invalid IPC')
   } finally {
     try {
       await closePreview()

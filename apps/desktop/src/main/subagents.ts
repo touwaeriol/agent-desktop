@@ -40,6 +40,23 @@ export interface SubagentCall {
   ts: number
   ok: boolean
   summary?: string
+  /** Wall time of the call; both engines report it on `tool_execution_end`. */
+  durationMs?: number
+}
+
+/** The assistant turn in flight: the panel shows this while the run streams. */
+export interface SubagentDraft {
+  text: string
+  thinking: string
+  ts: number
+}
+
+/** A tool call that started but has not returned yet. */
+export interface SubagentActiveCall {
+  id: string
+  tool: string
+  target?: string
+  startedAt: number
 }
 
 export interface SubagentRecord {
@@ -58,6 +75,10 @@ export interface SubagentRecord {
   tools?: string[]
   messages: SubagentMessage[]
   calls: SubagentCall[]
+  /** Assistant text still streaming; cleared when the turn settles. */
+  draft?: SubagentDraft
+  /** Tool calls in flight, shown as running rows until `tool_execution_end`. */
+  activeCalls: SubagentActiveCall[]
   finalText?: string
   tokens?: number
   runtimeMs?: number
@@ -108,6 +129,8 @@ const IDLE_TIMEOUT_MS = 30 * 60 * 1000
 const READY_TIMEOUT_MS = 30_000
 const MAX_KEPT = 120
 const STORE_VERSION = 1
+/** Streaming deltas are coalesced to about eight updates a second before they reach the window. */
+const PROGRESS_EMIT_MS = 120
 
 interface PendingCall {
   tool: string
@@ -125,6 +148,9 @@ interface Internal {
   waiters: Array<(record: SubagentRecord) => void>
   totalTimer?: NodeJS.Timeout
   idleTimer?: NodeJS.Timeout
+  /** Coalesces `message_update` deltas; see `emitProgress`. */
+  progressTimer?: NodeJS.Timeout
+  lastProgressAt: number
   settled: boolean
   /** Incremented per turn, so one settle is reported once even though two events fire. */
   runId: number
@@ -178,6 +204,9 @@ export class SubagentManager {
         ...record,
         messages: Array.isArray(record.messages) ? record.messages : [],
         calls: Array.isArray(record.calls) ? record.calls : [],
+        // A restored record has no process: nothing is streaming and no call is in flight.
+        draft: undefined,
+        activeCalls: [],
         notify: record.notify ?? 'none',
         timeoutMs: record.timeoutMs ?? DEFAULT_TIMEOUT_MS,
         restored: true
@@ -191,6 +220,7 @@ export class SubagentManager {
         pendingCalls: new Map(),
         waiters: [],
         settled: true,
+        lastProgressAt: 0,
         runId: 0,
         notifiedRun: 0
       })
@@ -226,6 +256,32 @@ export class SubagentManager {
   private emit(record: SubagentRecord): void {
     this.options.onUpdate?.(record)
     this.scheduleSave()
+  }
+
+  /**
+   * Streaming text arrives per token; the window only needs a few frames a second. Leading edge
+   * fires immediately, the rest is coalesced into one trailing emit.
+   */
+  private emitProgress(internal: Internal): void {
+    if (internal.progressTimer) return
+    const wait = PROGRESS_EMIT_MS - (Date.now() - internal.lastProgressAt)
+    if (wait <= 0) {
+      internal.lastProgressAt = Date.now()
+      this.emit(internal.record)
+      return
+    }
+    internal.progressTimer = setTimeout(() => {
+      internal.progressTimer = undefined
+      internal.lastProgressAt = Date.now()
+      this.emit(internal.record)
+    }, wait)
+  }
+
+  /** Any non-progress update supersedes a queued delta emit. */
+  private clearProgress(internal: Internal): void {
+    if (!internal.progressTimer) return
+    clearTimeout(internal.progressTimer)
+    internal.progressTimer = undefined
   }
 
   private runningCount(): number {
@@ -289,6 +345,7 @@ export class SubagentManager {
       tools,
       messages: [],
       calls: [],
+      activeCalls: [],
       timeoutMs: options.timeoutMs ?? preset?.timeoutMs ?? DEFAULT_TIMEOUT_MS,
       // Sync mode already returns the answer. A background run has nobody waiting on it, so the
       // default wakes the parent: otherwise the notice sits in the transcript until the user
@@ -303,6 +360,7 @@ export class SubagentManager {
       pendingCalls: new Map(),
       waiters: [],
       settled: false,
+      lastProgressAt: 0,
       runId: 0,
       notifiedRun: 0
     }
@@ -443,12 +501,43 @@ export class SubagentManager {
         internal.runId += 1
         internal.settled = false
         record.status = 'streaming'
+        record.draft = undefined
+        record.activeCalls = []
+        this.clearProgress(internal)
         this.emit(record)
         return
+      case 'message_start': {
+        const message = event.message as Record<string, unknown> | undefined
+        if (message?.role !== 'assistant') return
+        record.draft = { text: '', thinking: '', ts: Date.now() }
+        this.clearProgress(internal)
+        this.emit(record)
+        return
+      }
+      case 'message_update': {
+        const update = event.assistantMessageEvent as { type?: string; delta?: string } | undefined
+        const delta = typeof update?.delta === 'string' ? update.delta : ''
+        if (!delta) return
+        if (update?.type !== 'text_delta' && update?.type !== 'thinking_delta') return
+        const draft = record.draft ?? (record.draft = { text: '', thinking: '', ts: Date.now() })
+        if (update.type === 'text_delta') draft.text += delta
+        else draft.thinking += delta
+        this.emitProgress(internal)
+        return
+      }
       case 'tool_execution_start': {
         const callId = typeof event.toolCallId === 'string' ? event.toolCallId : ''
         const tool = typeof event.toolName === 'string' ? event.toolName : 'tool'
-        if (callId) internal.pendingCalls.set(callId, { tool, target: callTarget(tool, event.args) })
+        const target = callTarget(tool, event.args)
+        if (callId) internal.pendingCalls.set(callId, { tool, target })
+        record.activeCalls.push({
+          id: callId || `call-${record.activeCalls.length}-${Date.now()}`,
+          tool,
+          ...(target ? { target } : {}),
+          startedAt: Date.now()
+        })
+        this.clearProgress(internal)
+        this.emit(record)
         return
       }
       case 'tool_execution_end': {
@@ -456,12 +545,22 @@ export class SubagentManager {
         const tool = typeof event.toolName === 'string' ? event.toolName : 'tool'
         const pending = callId ? internal.pendingCalls.get(callId) : undefined
         if (callId) internal.pendingCalls.delete(callId)
+        const index = callId
+          ? record.activeCalls.findIndex((call) => call.id === callId)
+          : record.activeCalls.findIndex((call) => call.tool === tool)
+        const active = index >= 0 ? record.activeCalls.splice(index, 1)[0] : undefined
+        const reported = typeof event.durationMs === 'number' ? event.durationMs : undefined
+        const durationMs = reported ?? (active ? Date.now() - active.startedAt : undefined)
+        const summary = pending?.target ?? active?.target
         record.calls.push({
           tool,
           ts: Date.now(),
           ok: event.isError !== true && (event.result as { isError?: boolean } | undefined)?.isError !== true,
-          ...(pending?.target ? { summary: pending.target } : {})
+          ...(summary ? { summary } : {}),
+          ...(durationMs !== undefined ? { durationMs } : {})
         })
+        this.clearProgress(internal)
+        this.emit(record)
         return
       }
       case 'agent_settled':
@@ -478,12 +577,15 @@ export class SubagentManager {
           record.status = 'error'
           record.error = text
         }
-        if (!text.trim()) return
-        record.messages.push({
-          role: 'assistant',
-          text,
-          ts: typeof message.timestamp === 'number' ? message.timestamp : Date.now()
-        })
+        record.draft = undefined
+        if (text.trim()) {
+          record.messages.push({
+            role: 'assistant',
+            text,
+            ts: typeof message.timestamp === 'number' ? message.timestamp : Date.now()
+          })
+        }
+        this.clearProgress(internal)
         this.emit(record)
         return
       }
@@ -542,9 +644,12 @@ export class SubagentManager {
       // stats are optional
     }
     if (run !== internal.runId) return
+    record.draft = undefined
+    record.activeCalls = []
     if (record.status !== 'stopped' && record.status !== 'error') record.status = 'idle'
     record.settledAt = Date.now()
     record.runtimeMs = record.startedAt ? Date.now() - record.startedAt : undefined
+    this.clearProgress(internal)
     this.emit(record)
     this.notifySettle(internal)
     this.resetIdle(internal)
@@ -581,6 +686,9 @@ export class SubagentManager {
     internal.settled = true
     if (internal.totalTimer) clearTimeout(internal.totalTimer)
     if (internal.idleTimer) clearTimeout(internal.idleTimer)
+    this.clearProgress(internal)
+    internal.record.draft = undefined
+    internal.record.activeCalls = []
     this.emit(internal.record)
     if (internal.record.status === 'error') this.notifySettle(internal)
     this.releaseWaiters(internal)
@@ -651,6 +759,9 @@ export class SubagentManager {
       30_000
     )
     if (internal.record.status !== 'streaming') internal.record.status = 'streaming'
+    internal.record.draft = undefined
+    internal.record.activeCalls = []
+    this.clearProgress(internal)
     this.emit(internal.record)
     return internal.record
   }
@@ -676,6 +787,8 @@ export class SubagentManager {
     }
     internal.record.status = 'stopped'
     internal.record.runtimeMs = internal.record.startedAt ? Date.now() - internal.record.startedAt : undefined
+    internal.record.draft = undefined
+    internal.record.activeCalls = []
     if (reason) {
       internal.record.error = reason
       if (timedOutWhileRunning) internal.record.status = 'error'
@@ -698,6 +811,8 @@ export class SubagentManager {
       }
       internal.own?.dispose()
       internal.record.status = 'stopped'
+      internal.record.draft = undefined
+      internal.record.activeCalls = []
       this.finish(internal)
     }
   }

@@ -434,7 +434,7 @@ test('Claude: AskUserQuestion is answered through the desktop queue', async () =
   }
 })
 
-test('session switches stop a running turn only with consent', async () => {
+test('the no-session-file fallback stops a running turn before switching', async () => {
   const { idleBeforeSwitch } = require(path.join(temp, 'switch-guard.cjs'))
   const calls = []
   const engine = (busy, abortFails = false) => ({
@@ -449,13 +449,13 @@ test('session switches stop a running turn only with consent', async () => {
       return true
     }
   })
-  // Idle: a switch needs no permission and no engine call.
+  // Idle: a switch needs no engine call.
   await idleBeforeSwitch(engine(false), false)
   assert.deepEqual(calls, [])
-  // Busy without consent: refuse, and do not touch the run.
+  // A caller that did not ask to stop is refused, and the run is untouched.
   await assert.rejects(idleBeforeSwitch(engine(true), false), /停止它才能切换会话/)
   assert.deepEqual(calls, [])
-  // With consent: abort, then wait for the turn to settle.
+  // Stopping: abort, then wait for the turn to settle.
   await idleBeforeSwitch(engine(true), true)
   assert.deepEqual(calls, ['abort', 'settle:3000'])
   // An engine that refuses to abort is stopped so the switch cannot hang.

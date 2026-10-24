@@ -444,7 +444,22 @@ export interface SubagentView {
     ts: number;
     toolCalls?: string[];
   }>;
-  calls: Array<{ tool: string; ts: number; ok: boolean; summary?: string }>;
+  calls: Array<{
+    tool: string;
+    ts: number;
+    ok: boolean;
+    summary?: string;
+    durationMs?: number;
+  }>;
+  /** Assistant turn still streaming; cleared once the turn settles. */
+  draft?: { text: string; thinking: string; ts: number };
+  /** Tool calls in flight right now, rendered as running rows in the panel. */
+  activeCalls?: Array<{
+    id: string;
+    tool: string;
+    target?: string;
+    startedAt: number;
+  }>;
   finalText?: string;
   tokens?: number;
   runtimeMs?: number;

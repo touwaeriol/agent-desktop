@@ -71,7 +71,7 @@ export default function App(): React.JSX.Element {
   const [sidebarOpen, setSidebarOpen] = useState(true)
   const [workspacePickerOpen, setWorkspacePickerOpen] = useState(false)
   const [toast, setToast] = useState<string | null>(null)
-  /** Pending window-level question (e.g. “stop the run to switch sessions?”). */
+  /** Pending window-level question (e.g. “delete this project?”). */
   const [confirmRequest, setConfirmRequest] = useState<ConfirmRequest | undefined>(undefined)
   const confirmResolveRef = useRef<((confirmed: boolean) => void) | undefined>(undefined)
 
@@ -82,6 +82,10 @@ export default function App(): React.JSX.Element {
     resolve?.(confirmed)
   }, [])
 
+  /**
+   * Window-level confirmation for actions that destroy something (a project). Switching sessions
+   * is not one of them: a running turn keeps going in the background.
+   */
   const askConfirm = useCallback(
     (request: ConfirmRequest) =>
       new Promise<boolean>((resolve) => {
@@ -89,25 +93,6 @@ export default function App(): React.JSX.Element {
         setConfirmRequest(request)
       }),
     []
-  )
-
-  /**
-   * Switching sessions replaces the engine, so a running turn dies with it. Ask for consent here
-   * instead of letting the main process answer with an error the user cannot act on.
-   */
-  const confirmSwitch = useCallback(
-    async (action: string): Promise<boolean> => {
-      if (!(status.isStreaming || status.compacting)) return true
-      return askConfirm({
-        title: '当前回合仍在运行',
-        message:
-          `切换会话会结束这一轮：已经写出的内容保存在会话记录里，正在生成的部分会丢失。\n` +
-          `要停止当前回合并${action}吗？`,
-        confirmLabel: '停止并' + action,
-        danger: true
-      })
-    },
-    [askConfirm, status.compacting, status.isStreaming]
   )
   const [stick, setStick] = useState(true)
   const [activeUserIndex, setActiveUserIndex] = useState(0)
@@ -314,7 +299,6 @@ export default function App(): React.JSX.Element {
   const selectProject = useCallback(
     async (id: string) => {
       try {
-      if (!(await confirmSwitch('切换到该项目'))) return
       const current = projects.find((project) => project.id === id)
       const result = await window.pi.activateProject(id, { stop: true })
       if (!('phase' in result)) { setToast(result.error); return }
@@ -328,7 +312,7 @@ export default function App(): React.JSX.Element {
       await loadSessions()
       } catch (error) { setToast(error instanceof Error ? error.message : String(error)) }
     },
-    [confirmSwitch, projects, loadSessions]
+    [projects, loadSessions]
   )
 
   const createProject = useCallback(async () => {
@@ -340,7 +324,6 @@ export default function App(): React.JSX.Element {
     }
     await loadProjects()
     if (result.cwd) {
-      if (!(await confirmSwitch('新建会话'))) return
       const started = await window.pi.newProjectSession(result.cwd, { stop: true })
       setStatus(started)
       setActiveProjectId(undefined)
@@ -352,7 +335,6 @@ export default function App(): React.JSX.Element {
       await loadSessions()
     }
     if (result.project) {
-      if (!(await confirmSwitch('切换到该项目'))) return
       const started = await window.pi.activateProject(result.project.id, { stop: true })
       if (!('phase' in started)) { setToast(started.error); return }
       setActiveProjectId(result.project.id)
@@ -365,7 +347,7 @@ export default function App(): React.JSX.Element {
       await loadSessions()
     }
     } catch (error) { setToast(error instanceof Error ? error.message : String(error)) }
-  }, [confirmSwitch, loadProjects, loadSessions])
+  }, [loadProjects, loadSessions])
 
   const editProject = useCallback(
     (id: string) => {
@@ -378,7 +360,13 @@ export default function App(): React.JSX.Element {
   const deleteProject = useCallback(
     async (id: string) => {
       const name = projects.find((project) => project.id === id)?.name ?? '项目'
-      if (!(await confirmSwitch('删除该项目'))) return
+      const confirmed = await askConfirm({
+        title: `删除项目「${name}」`,
+        message: '只删除项目分组，目录和会话都不会被删除。',
+        confirmLabel: '删除项目',
+        danger: true
+      })
+      if (!confirmed) return
       await window.pi.removeProject(id)
       if (activeProjectId === id) {
         setActiveProjectId(undefined)
@@ -388,7 +376,7 @@ export default function App(): React.JSX.Element {
       await loadProjects()
       setToast(`已删除「${name}」`)
     },
-    [activeProjectId, confirmSwitch, projects, loadProjects]
+    [activeProjectId, askConfirm, projects, loadProjects]
   )
   const messagesRequest = useRef(0)
   const loadMessages = useCallback(async () => {
@@ -404,7 +392,15 @@ export default function App(): React.JSX.Element {
       setStick(true)
       const stats = await window.pi.getSessionStats().catch(() => undefined)
       if (!isCurrent()) return
-      setRun({ runningTools: 0, tokens: stats?.tokens?.total })
+      // Reopening a session that kept running in the background: the run already started, so the
+      // status bar has to keep counting instead of disappearing until the next `agent_start`.
+      setRun({
+        ...(statusRef.current.isStreaming
+          ? { startedAt: statusRef.current.activity?.since ?? Date.now() }
+          : {}),
+        runningTools: 0,
+        tokens: stats?.tokens?.total
+      })
       setContextUsage(stats?.contextUsage)
     } catch {
       // ignore
@@ -418,6 +414,7 @@ export default function App(): React.JSX.Element {
       setItems((prev) => applyConversationEvent(prev, record, now))
       switch (type) {
         case 'session_title_updated':
+        case 'session_updated':
           void loadSessions()
           break
         case 'agent_start':
@@ -641,7 +638,6 @@ export default function App(): React.JSX.Element {
    */
 
   const newSession = useCallback(async () => {
-    if (!(await confirmSwitch('新建会话'))) return
     const result = await window.pi.newSession({ stop: true })
     if (!result.ok) {
       setToast(result.error ?? '无法新建会话')
@@ -653,7 +649,7 @@ export default function App(): React.JSX.Element {
     setDraft('')
     setDraftImages([])
     void loadSessions()
-  }, [confirmSwitch, loadSessions])
+  }, [loadSessions])
 
   const closeBtw = useCallback(async () => {
     if (!btwChatRef.current) return
@@ -924,7 +920,6 @@ export default function App(): React.JSX.Element {
   const selectSession = useCallback(
     async (session: SessionSummary, options: { remember?: boolean } = {}) => {
       if (session.path === activePath) return
-      if (!(await confirmSwitch('切换到该会话'))) return
       try {
         const next = await window.pi.openSession(session.path, session.cwd, { stop: true })
         if (next.phase === 'error') throw new Error(next.error ?? '切换会话失败')
@@ -938,7 +933,7 @@ export default function App(): React.JSX.Element {
       await loadMessages()
       void loadSessions()
     },
-    [activePath, confirmSwitch, loadMessages, loadSessions, rememberSession]
+    [activePath, loadMessages, loadSessions, rememberSession]
   )
 
   const goHistory = useCallback(
@@ -963,7 +958,6 @@ export default function App(): React.JSX.Element {
   }, [])
 
   const browseWorkspace = useCallback(async (): Promise<boolean> => {
-    if (!(await confirmSwitch('新建会话'))) return false
     const next = await window.pi.chooseWorkspace({ stop: true })
     if (!next) return false
     if (next.phase === 'error') throw new Error(next.error ?? '无法打开目录')
@@ -978,10 +972,9 @@ export default function App(): React.JSX.Element {
     await loadProjects()
     void loadSessions()
     return true
-  }, [confirmSwitch, loadProjects, loadSessions])
+  }, [loadProjects, loadSessions])
 
   const openRecentWorkspace = useCallback(async (cwd: string): Promise<void> => {
-    if (!(await confirmSwitch('新建会话'))) return
     const next = await window.pi.newProjectSession(cwd, { stop: true })
     if (next.phase === 'error') throw new Error(next.error ?? '无法打开目录')
     setStatus(next)
@@ -994,7 +987,7 @@ export default function App(): React.JSX.Element {
     setToast(`已在 ${cwd} 新建会话`)
     await loadProjects()
     void loadSessions()
-  }, [confirmSwitch, loadProjects, loadSessions])
+  }, [loadProjects, loadSessions])
 
   const newSessionInProject = useCallback(
     async (cwd: string) => {

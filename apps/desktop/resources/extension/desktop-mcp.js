@@ -222,6 +222,16 @@ export default function desktopMcp(pi) {  const url = process.env.AGENT_DESKTOP_
   const subagentsEnabled = process.env.AGENT_DESKTOP_SUBAGENTS === '1'
   const agentsSection = process.env.AGENT_DESKTOP_AGENTS_SECTION ?? ''
   const projectText = projectSection(process.env.AGENT_DESKTOP_PROJECT, engines)
+  // Several engines can be alive at once (a run parked in the background). Subagent notices are
+  // addressed to one session, so this process has to know which one it is.
+  let sessionFile
+  pi.on('session_start', (_event, ctx) => {
+    try {
+      sessionFile = ctx?.sessionManager?.getSessionFile?.()
+    } catch {
+      sessionFile = undefined
+    }
+  })
   // Prompt- and request-level, so neither may depend on the bridge: the built-in servers can be off.
   registerSpeed(pi)
   if (projectText) {
@@ -328,7 +338,7 @@ export default function desktopMcp(pi) {  const url = process.env.AGENT_DESKTOP_
   setTimeout(reportTools, 2500)
   setTimeout(reportTools, 8000)
 
-  if (subagentsEnabled) void pumpEvents(pi, url, token)
+  if (subagentsEnabled) void pumpEvents(pi, url, token, () => sessionFile)
 
   pi.on('before_agent_start', (event) => {
     // Only while the desktop MCP server is connected and its tool is declared to the model, so a
@@ -370,7 +380,7 @@ export default function desktopMcp(pi) {  const url = process.env.AGENT_DESKTOP_
  * custom message: it stays a `custom` entry in the session (not something the user said), and
  * `triggerTurn` decides whether the parent starts a turn now or reads it on its next one.
  */
-async function pumpEvents(pi, url, token) {
+async function pumpEvents(pi, url, token, sessionFile) {
   let backoff = 2000
   while (true) {
     try {
@@ -380,7 +390,7 @@ async function pumpEvents(pi, url, token) {
       if (!response.ok) throw new Error(`events ${response.status}`)
       const payload = await response.json()
       backoff = 2000
-      for (const event of payload.events ?? []) deliverNotice(pi, event)
+      for (const event of payload.events ?? []) deliverNotice(pi, event, sessionFile())
     } catch {
       await new Promise((resolve) => setTimeout(resolve, backoff))
       backoff = Math.min(backoff * 2, 30000)
@@ -388,8 +398,15 @@ async function pumpEvents(pi, url, token) {
   }
 }
 
-function deliverNotice(pi, event) {
+/** Windows paths differ only by slash/case, and native ids are opaque. */
+function sameSession(left, right) {
+  return String(left).replace(/\\/g, '/').toLowerCase() === String(right).replace(/\\/g, '/').toLowerCase()
+}
+
+function deliverNotice(pi, event, currentSession) {
   if (!event || event.type !== 'subagent_settled' || typeof event.text !== 'string') return
+  // The notice belongs to one parent session; other live engines must not deliver it too.
+  if (event.session && currentSession && !sameSession(event.session, currentSession)) return
   const text = [
     '<system-reminder source="agent-desktop">',
     'A subagent you started has finished a turn. This is not a message from the user.',

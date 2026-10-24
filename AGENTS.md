@@ -41,7 +41,7 @@ npm run typecheck    # node + web 两个 tsconfig 分别检查
 
 - 新建会话优先打开 `WorkspacePicker` 的最近目录列表；侧栏、工具栏加号、Ctrl+N 和目录入口共用，只在点击“选择其他目录…”时调用系统选择器。最近 24 个目录保存到 config.recentRepos，按最近使用顺序去重（Windows 大小写/斜杠归一），并补充历史会话目录；同名不同路径同时显示。取消系统选择保留最近列表，失效目录明确提示，不清空当前会话。
 
-- 当前会话以 `status.sessionKey` 为准标记选中，比较 Windows 路径时归一斜杠和大小写。选中行使用底色与实心点；`runningSessionKeys` 汇总主回合、压缩、后台命令及子代理所属会话，执行中显示动态状态点；普通列表和置顶一致。
+- 当前会话以 `status.sessionKey` 为准标记选中，比较 Windows 路径时归一斜杠和大小写。选中行使用底色与实心点；`runningSessionKeys` 汇总主回合、压缩、后台命令、子代理所属会话以及**停在后台继续跑的会话**（`parkedEngines`），执行中显示动态状态点；普通列表和置顶一致。
 - 首条请求额外启动一次独立标题请求（`session-title.ts`），只传用户首条提示词，禁用工具，不写 transcript，不阻塞主回合。优先用当前已配置模型，CLI 模型不在桌面目录时用已配置的默认/可用模型。无凭据或生成失败保留首句标题。结果按原 session file 写入，不能跟随当前激活会话漂移；`titleSource` 区分 prompt/generated/manual，生成结果不得覆盖手工标题。
 - `readSummary` 同时读取 pi 和内建 JSONL 格式；已有 `s_...` 文件名标题按首条真实用户消息修复。后台通知不能作为标题来源。
 
@@ -88,7 +88,7 @@ npm run typecheck    # node + web 两个 tsconfig 分别检查
 - 渲染层 `lib/images.ts` 负责 File → base64（`blobToDraftImage`，上限 8MB）和 `clipboardImages`（读 `clipboardData.items`）。**图片是纯附件**：不写文件名、不插入 `[图片N]` 标记，统一在输入框上方以 42×42 圆角方块展示（`object-fit: cover`，不同长宽比也对齐），悬停才出现删除按钮；发送时按数组顺序传给 pi。
 - **粘贴入口在 `Composer.tsx` 的 window 级 `paste` 监听**（不是 textarea 的 `onPaste`）：焦点在 chip / 滚动区时 Cmd+V 也要能附图，而落到其他控件（设置、@ 搜索框、队列编辑）的粘贴要放过去不拦。命中图片时 `preventDefault()`，纯文本粘贴仍走浏览器默认。`addImages` 和 `removeImage` 都用 `imagesRef` 而不是 props 里的 `images`：连贴两张时两次解码并发、连删两个时两次点击同批，用 props 会让后一次覆盖前一次。输入框 `disabled`（pi 未就绪或 `/btw` 开着）时给提示而不是静默丢弃——剪贴板里那张图已经没了。
 - 验证方式（不用手点）：PowerShell `[Windows.Forms.Clipboard]::SetImage()` 放一张图到系统剪贴板，再用 CDP `Input.dispatchKeyEvent`（`modifiers: 2` + `KeyV`）发真正的 Ctrl+V，然后数 `.draft-image` 的数量；合成 `ClipboardEvent` + `DataTransfer` 只能测到监听器，测不到系统剪贴板这一层。
-- 点任意缩略图打开 `ImageLightbox`（Esc / 点背景关闭）；会话里用户消息用 `MessageImages` 渲染，图片在气泡**上方**右对齐（`.message.user` 是 column + align-items flex-end）。
+- 点任意缩略图打开 `ImageLightbox`（Esc / 点背景关闭）；会话里用户消息用 `MessageImages` 渲染，图片在气泡**上方**右对齐（`.message.user` 是 column + align-items flex-end）。放大预览支持右键 `.image-context-menu`（复制图片 / 关闭预览），点外面或再按 Esc 只关菜单；菜单打开时 Esc 不会直接关掉预览。
 - 放大预览共用「复制图片」按钮、Ctrl/Cmd+C 和原生 copy 事件；`lib/images.ts` 将已加载图片按原始尺寸绘制为 PNG，经 `window.pi.copyImage` / `app:copy-image` 写入系统图片剪贴板，不复制 URL/文本。Electron 45 使用异步 `clipboard.write([new ClipboardItem(...)])`（不再有 `writeImage`）；必须 await 写入完成再显示成功。主进程 `image-clipboard.ts` 只接受有大小限制的 PNG 数据，解码前检查 IHDR 像素数，不读取任意文件/网络 URL。测试 `image-copy-smoke.cjs` 使用真实系统剪贴板并在 finally 恢复原内容。
 - 允许只发图片不发文字：`prompt` 的 `message` 传空串，pi 接受（实测模型能收到图）。
 - **上下文用量**：输入框右下角的小圆环 + `2% 20K / 1M`，数据来自 `get_session_stats().contextUsage`（`{tokens, contextWindow, percent}`）。`App.tsx` 在 `loadMessages`、`agent_settled`、`status.autoCompactPercent` 以及 **`status.model.id` / `contextWindow` 变化时**刷新（换模型是新的窗口、新的阈值，用量和配色必须跟着变）；`percent` 在刚压缩完时是 `null`，此时按 `tokens/ceiling` 兜底、拿不到就显示 0。**不要**显示 prompt cache 到期时间——pi 不提供，也不该猜。
@@ -231,9 +231,12 @@ npm run typecheck    # node + web 两个 tsconfig 分别检查
 - 运行中改 MCP/子代理设置走 `reloadPiConfig()`：忙碌时只记 `configPending`，`agent_settled` 时用 `sessionArgs()` 重启 pi 把新配置装上（否则开关改了永远不生效）。
 - pi 非预期退出（扩展抛错、OOM）时 `rpc.on('exit')` 会在 1 秒后用同一会话重启，2 分钟内最多 3 次；`shuttingDown` 为真（`window-all-closed` / `before-quit`）时不再重启。
 - 扩展里的定时器**必须能容忍失效的 ctx**：`new_session` / `clone` / `switch_session` / `reload` 之后捕获的 `pi` 会变 stale，`pi.getAllTools()` 抛出的异常会直接杀掉整个 pi 进程（实测 `Timeout.reportTools` 崩溃导致「pi 未运行」）。`reportTools` 已包 try/catch。
-- **运行中切换会话要先问**：一次会话切换就是换引擎（新会话 = 新进程/transcript，打开别的会话会 dispose 当前引擎），所以运行中切换会把在跑的回合一起杀掉。现在由**窗口**征求同意：`App.tsx` 的 `confirmSwitch()` 在 `status.isStreaming || status.compacting` 时弹 `ConfirmDialog`（窗口自己的确认框，**不是** `AskQuestionPanel`——那是模型的），确认后才把 `{ stop: true }` 传给 IPC。四个入口都要走它：新建会话（侧栏 `+` / 仓库 `+` / Ctrl+N 选目录）、打开会话、切换项目、删除项目。**不要再让按钮直接撞上主进程的 busy 错误**——那正是用户看到的「新建会话为什么要停止当前会话？」。
-- 主进程侧：`activateConversation({ stop })` 调 `agent/switch-guard.ts` 的 `idleBeforeSwitch()`——`busy` 且没 `stop` 就报「当前回合仍在运行：停止它才能切换会话」；有 `stop` 则 `abort()` → `waitForSettle(3s)` → 仍不结束就 `stop()`。stop 分支必须**先**把 `switchingEngine` 置上再 abort，否则 `agent_settled` 触发 `configPending` 的重启会打到马上要被替换的引擎上；同时 `cancelPendingAsks('会话已切换')` 关掉可能开着的提问面板。
-- 验证：`tests/engine-contract.test.cjs` 的 `idleBeforeSwitch` 单测（空闲不调用引擎、无同意拒绝、同意 abort+settle、abort 失败退 stop）；`tests/session-switch-smoke.cjs`（`npm run test:smoke`）发一条 `isStreaming: true` 的状态后点仓库 `+`，断言弹出确认框、取消后会话不变、确认后进入新会话。
+- **切换会话不打断在跑的回合**：`activateConversation()` 不再 dispose 忙碌的引擎，而是用 `retireEngine()` 把它「停到后台」——`parkEngine()` 把引擎和它的会话 key 放进 `parkedEngines`，引擎继续跑、继续写自己的 transcript，只是 `onEvent` 因为 `isActive()` 为假而不再往窗口发事件。重新打开那个会话时（`parkedEngines` 命中且引擎还活着）走 `activateParked()`：直接把 `currentEngine` / `status` 切回去，不重启、不丢上下文，`loadMessages()` 从 transcript 补齐已落盘的消息。空闲的引擎在切换时照旧 dispose；后台引擎一旦 settle 就 `reapParked()` 回收（300ms 后，等 transcript 写完），但**有后台命令在跑时不回收**，下次打开从 transcript 重启并拿到新配置。
+- 每个引擎有独立的 `EngineSlot`（`engineSlots` WeakMap）保存它的 status 镜像：全局 `status` 只属于当前屏幕上的引擎。后台引擎的 `onStatus` 只更新镜像 + 侧栏运行点（`statusSnapshot().runningSessionKeys` 遍历 `parkedEngines`）并调用 `rememberParkedSession()` 落 SessionStore；**不要**让它写 `activeSession` / `engineSessions`（那是当前会话的指针）。
+- `flushSubagentNotices()` 用 `engineForSession(parentSession)` 找会话对应的引擎，后台父会话也能收到子代理完成通知并自行继续；后台引擎的 `wake` 不受「用户刚点过停止」的限制。pi 没有 `notify()`，走桥事件时必须带 `session`，`desktop-mcp.js` 在 `session_start` 记住自己的 session file 后按 `sameSession()` 过滤——否则同时活着的两个 pi 进程会各自投递一遍。
+- 唯一的例外：忙碌但**还没有 session file** 的引擎（回合最开始的一瞬间）没法重新打开，仍走 `agent/switch-guard.ts` 的 `idleBeforeSwitch()` 停掉。`{ stop: true }` 参数保留兼容，但正常情况下不再使用。
+- **已知限制**：桌面 codegraph / warpgrep 网关（`gateway.configure`）按 key 全局唯一，新会话在**另一个仓库**启动时会把 `codegraph` / `warpgrep` 指到新仓库，后台引擎的代码搜索因此可能查到新仓库。同仓库会话不受影响（target 相同，网关复用）。要彻底解决需要按 workspace 给端点 key 加命名空间。
+- 验证：`tests/session-switch-smoke.cjs`（`npm run test:smoke`）在 `isStreaming: true` 状态下点仓库 `+`，断言不再出现 `ConfirmDialog` 且直接进入新会话；`tests/engine-contract.test.cjs` 仍覆盖 `idleBeforeSwitch` 的无 session file 兜底。
 
 ## Updates & packaging
 
@@ -324,11 +327,11 @@ npm run typecheck    # node + web 两个 tsconfig 分别检查
 - 父会话重启（换模型）时扩展重新加载、长轮询重连，队列里没投递的事件会补发；所以事件队列在**主进程**里，不要在扩展里缓存。
 - 控制语义映射到 pi：`interrupt` = `abort` + `prompt`，`steer` = `prompt(..., streamingBehavior: 'steer')`，`follow-up` = `'followUp'`。
 - 限制：并发 4（超出报 `SUBAGENT_LIMIT`，不排队）、单次总运行 15 分钟、空闲 30 分钟回收、sync 最长等 300s 后转后台、应用退出 `stopAll(true)`。**主会话重启（换模型等）不杀子代理**，它们本来就是独立进程。
-- **子代理界面**：顶栏 `.subagent-btn`（运行中显示数字并高亮，否则显示已完成数）打开右侧抽屉 `SubagentsDrawer.tsx`：列表 ↔ 详情两态（详情有返回按钮），详情含结论 Markdown、改动文件、过程消息、引导/追加/打断 + 停止。数据来自 IPC `subagents:list|get|stop|prompt|reveal` 与事件 `subagents:update`（`serializeSubagent`）。每行带 `.subagent-avatar` 图标徽标（按状态着色），抽屉支持 `initialId` 直接选中某次运行。
+- **子代理界面**：顶栏 `.subagent-btn`（运行中显示数字并高亮，否则显示已完成数）打开右侧抽屉 `SubagentsDrawer.tsx`：列表 ↔ 详情两态（详情有返回按钮），详情含结论 Markdown、改动文件、进度时间线、引导/追加/打断 + 停止。数据来自 IPC `subagents:list|get|stop|prompt|reveal` 与事件 `subagents:update`（`serializeSubagent`）。每行带 `.subagent-avatar` 图标徽标（按状态着色），抽屉支持 `initialId` 直接选中某次运行。
 - 抽屉是布局的一部分，不是覆盖层：`App.tsx` 的 `.main-body` 是横向 flex（`.chat-column` + `.subagent-drawer`），打开时会话区与输入框一起变窄（实测 chat 1108→708、composer 860→644），不会盖住正文。新增右侧面板时照这个结构放，别用 absolute 遮罩。
 - **运行状态条在输入框上方**（`RunStatusBar.tsx`，通过 `Composer` 的 `statusBar` 插槽放进 `.composer-wrap`）：父会话在跑时显示耗时 / tokens / 工具数，空闲时显示「子代理运行中 N」；每个运行中的子代理是一枚 `.run-task` chip（图标 + 名称 + 耗时），点击打开面板并选中该运行。
 - **对话里的子代理卡片**：`start_subagent` 的工具调用不再混进「调用 N 个工具」，而是渲染成 `.subagent-card`（图标、label、预设、状态、id、耗时），展开可看实时输出 / 最终结论，并有「查看详细进程」跳到面板。匹配记录靠工具结果里的 `sa_xxxxxxxx`，结果还没回来时按 `label` 匹配。
-- 子代理的**实时进度**：`SubagentsManager.onEvent` 里 `message_end`（assistant 文本）直接追加进 `record.messages` 并 `emit`，所以运行中也能在卡片和面板看到它刚说的话；settle 时 `collect()` 用 `get_messages` 整体重写，不会重复。
+- 子代理的**实时进度**：`SubagentManager.onEvent` 把 `message_update` 的 `text_delta`/`thinking_delta` 累加进 `record.draft`，`tool_execution_start/end` 维护 `record.activeCalls` 并写入带 `durationMs` 的 `record.calls`，`message_end` 把 assistant 文本追加进 `record.messages` 并清空 draft——所以运行中（还没 settle）就能在卡片和面板看到「正在执行哪个工具 / 正在思考 / 正在生成什么」。delta 走 `emitProgress()` 合并到约 8 次/秒（`PROGRESS_EMIT_MS`），其它事件会 `clearProgress()` 后再 `emit`，避免每个 token 都发一次 IPC 和 `broadcastStatus`。settle 时 `collect()` 用 `get_messages` 整体重写 messages 并清掉 draft/activeCalls，不会重复。抽屉里运行中不再显示「还在运行，暂无结论」，而是 `.subagent-timeline`：调用与消息按时间排序、未结束的调用显示「运行中」、末尾是带脉冲点的 live 块（思考 + 流式文本），只有用户上滚时才停止自动跟随。
 - **记录落盘**：`SubagentManager` 把记录写到 `%APPDATA%/agent-desktop/subagents.json`（上限 120 条、800ms 防抖）。启动时 `restore()` 读回，`starting/streaming` 的标记成 `stopped` 并带 `restored: true`。历史记录**没有进程**（`Internal.rpc` 可选），`prompt` 报 `SUBAGENT_GONE`、`stop/wait` 直接返回；`runningCount()` 排除历史记录，否则并发上限会被旧数据占满。记录里保存 `sessionFile`（子代理自己的会话，可用 `pi --session` 复现）和 `parentSession`（发起它的主会话），面板上「定位」用 `shell.showItemInFolder`。
 - 模型侧查询：`list_subagents`（`GET /subagents?q=&status=&agent=&limit=`，匹配 id / label / 预设 / cwd / 结论）→ 返回紧凑 Markdown 列表；`get_subagent` 对历史记录同样有效，并在输出里标「历史」。**历史记录只能读，不能继续对话**。
 - **退出必须杀进程树**：`apps/desktop/src/main/proc.ts` 的 `killTree(child, sync)` 在 Windows 上走 `taskkill /pid <pid> /T /F`（`child.kill()` 只杀直接子进程，会留下 pi 拉起的 `mcp-core/server.mjs` 和 CodeGraph worker）。`window-all-closed` / `before-quit` 用 `rpc.killNow()` + `gateway.stopAll(true)` + `subagents.stopAll(true)`，因为退出时 `stop()` 里那个 1.5s 的兜底定时器根本来不及跑。MCP 设置变更仍走 `reloadPiConfig()` → `startPi()` → `mcpLaunch()`（重建引擎目标、`gateway.configure()` 差分启停），所以"改设置后 MCP 跟着重启"本来就是这条路，别另起一套。

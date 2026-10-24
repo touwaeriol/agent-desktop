@@ -5,7 +5,7 @@ export interface ConfirmRequest {
   message?: string
   confirmLabel?: string
   cancelLabel?: string
-  /** Destructive choices read better in red; a session switch that kills a turn is one. */
+  /** Destructive choices read better in red. */
   danger?: boolean
 }
 
@@ -13,7 +13,7 @@ export interface ConfirmRequest {
  * A small modal for decisions that must be answered before an action runs.
  *
  * It is not a replacement for the question panel (that one belongs to the agent): this is the
- * window asking the user about its own next step, e.g. switching sessions would stop the run.
+ * window asking the user about its own next step, e.g. deleting a project.
  */
 export function ConfirmDialog({
   request,

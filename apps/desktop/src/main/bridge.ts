@@ -55,6 +55,8 @@ export interface BridgeEvent {
   ts: number
   /** Let the parent start a turn immediately instead of waiting for its next message. */
   wake?: boolean
+  /** Only the engine on this session may deliver it; several engines can be alive at once. */
+  session?: string
 }
 
 const EVENT_LIMIT = 20
