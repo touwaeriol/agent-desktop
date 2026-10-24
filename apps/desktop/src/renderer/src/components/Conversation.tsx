@@ -30,75 +30,19 @@ function formatDuration(ms?: number): string {
   return `${(ms / 1000).toFixed(1)}s`
 }
 
-type ToolKind = 'read' | 'write' | 'bash' | 'search' | 'other'
-
-function kindOf(name: string): ToolKind {
-  const tool = name.replace(/^mcp__/, '').toLowerCase()
-  if (tool === 'read' || tool === 'read_file' || tool === 'view') return 'read'
-  if (
-    tool === 'write' ||
-    tool === 'edit' ||
-    tool === 'patch' ||
-    tool === 'multiedit' ||
-    tool === 'filechange'
-  )
-    return 'write'
-  if (
-    tool === 'bash' ||
-    tool === 'shell' ||
-    tool === 'exec' ||
-    tool === 'commandexecution' ||
-    tool === 'powershell'
-  )
-    return 'bash'
-  if (tool === 'grep' || tool === 'glob' || tool === 'ls' || tool === 'search') return 'search'
-  return 'other'
-}
-
-const KIND_LABELS: Record<ToolKind, (count: number) => string> = {
-  read: (count) => `读取 ${count} 个文件`,
-  write: (count) => `编辑 ${count} 个文件`,
-  bash: (count) => `运行 ${count} 条命令`,
-  search: (count) => `搜索 ${count} 次`,
-  other: (count) => `调用 ${count} 个工具`
-}
-
-function describeCalls(calls: ToolCallView[]): string {
-  const order: ToolKind[] = []
-  const counts = new Map<ToolKind, number>()
-  for (const call of calls) {
-    const kind = kindOf(call.name)
-    if (!counts.has(kind)) order.push(kind)
-    counts.set(kind, (counts.get(kind) ?? 0) + 1)
-  }
-  return order.map((kind) => KIND_LABELS[kind](counts.get(kind)!)).join(' · ')
-}
-
-function Activity({ calls }: { calls: ToolCallView[] }) {
-  const [open, setOpen] = useState(true)
-  const running = calls.some((call) => call.status === 'running')
-  const failed = calls.some((call) => call.status === 'error')
+/**
+ * Tool calls render as plain cards, one per call.
+ *
+ * There used to be an aggregate header above them (“调用 N 个工具” / “读取 N 个文件 ›”）: it cost a
+ * row plus margins per assistant message, and its text repeated what the cards already show. The
+ * running indicator lives in the run-status bar, so nothing is lost by dropping it.
+ */
+function ToolList({ calls }: { calls: ToolCallView[] }) {
   return (
-    <div className="activity">
-      <button
-        className={`activity-row ${running ? 'running' : ''}`}
-        onClick={() => setOpen((value) => !value)}
-        title={open ? '收起工具标题' : '展开工具标题'}
-        aria-expanded={open}
-      >
-        {(running || failed) && (
-          <span className={`activity-dot ${running ? 'running' : 'error'}`} />
-        )}
-        <span className="activity-text">{describeCalls(calls)}</span>
-        <ChevronIcon size={11} className={`activity-chevron ${open ? 'open' : ''}`} />
-      </button>
-      {open && (
-        <div className="activity-body">
-          {calls.map((call) => (
-            <ToolCard key={call.id} call={call} />
-          ))}
-        </div>
-      )}
+    <div className="tool-list">
+      {calls.map((call) => (
+        <ToolCard key={call.id} call={call} />
+      ))}
     </div>
   )
 }
@@ -176,7 +120,7 @@ function SubagentCard({
         {record?.runtimeMs !== undefined && (
           <span className="subagent-card-meta">{formatDuration(record.runtimeMs)}</span>
         )}
-        <ChevronIcon size={11} className={`activity-chevron ${open ? 'open' : ''}`} />
+        <ChevronIcon size={11} className={`card-chevron ${open ? 'open' : ''}`} />
       </button>
       {open && (
         <div className="subagent-card-body">
@@ -270,7 +214,7 @@ function Message({
               })()
           return <SubagentCard key={call.id} call={call} record={record} onOpen={onOpenSubagent} />
         })}
-        {others.length > 0 && <Activity calls={others} />}
+        {others.length > 0 && <ToolList calls={others} />}
         {item.error && <div className="message-error">{item.error}</div>}
         {item.streaming && !item.text && item.toolCalls.length === 0 && (
           <div className="typing">

@@ -62,8 +62,8 @@ npm run typecheck    # node + web 两个 tsconfig 分别检查
 ## Conversation layout
 
 - assistant 消息不再有头像，正文直接铺开（文档式）；用户消息是右对齐气泡，图片在气泡上方（`.message.user` 为 column + align-items flex-end）。
-- 工具调用按“活动行”聚合：`Activity` 把同一轮的工具按 read/write/bash/search/other 汇总成 `读取 2 个文件 · 运行 1 条命令 ›`，默认展开并显示每条工具的 `.tool-card` 标题、参数摘要和状态；完整参数与输出默认折叠，运行中也不自动展开；运行中/失败才显示圆点。**一轮 = 一条 assistant 消息**：不要为了“看起来少一点”去跨消息合并思考块或工具，模型真的一次发多个调用时，聚合行自然会变长。
-- **竖向节奏要紧凑（同屏信息量优先）**：`.conversation` 项间距 10px、上下 padding 14px；`.assistant-body` gap 6px；`.activity` 上边距 2px、`.activity-row` 内边距 2px（行高约 20px）；`.tool-head` 内边距 5px 9px（行高约 26px）、`.activity-body` gap 4px；`.markdown p` 下边距 8px。同一段 transcript 的 `scrollHeight` 从 623 降到 487（≈少 22%，同屏多两成内容），实测方式见下一条。改小之前先量：不要靠肉眼拍脑袋。
+- **工具卡片直接铺开，不再有聚合行**：一轮里的工具调用按顺序渲染成 `.tool-card`（`.tool-list` 里 gap 4px），每条显示名称、参数摘要、状态与耗时；参数与输出默认折叠，运行中也不自动展开。原来上面那行「调用 N 个工具 / 读取 2 个文件 ›」已经删掉——它每条 assistant 消息吃掉一整行加边距，而且文字重复卡片已有的信息；运行中提示由输入框上方的 `RunStatusBar` 负责，所以没有信息损失。**一轮 = 一条 assistant 消息**：不要为了“看起来少一点”去跨消息合并思考块或工具。
+- **竖向节奏要紧凑（同屏信息量优先）**：`.conversation` 项间距 10px、上下 padding 14px；`.assistant-body` gap 6px；`.tool-list` gap 4px；`.tool-head` 内边距 5px 9px（行高约 26px）；`.markdown p` 下边距 8px。同一段 transcript 的 `scrollHeight` 623 → 487（去掉聚合行后再降到约 460）。改小之前先量：不要靠肉眼拍脑脑袋。
 - 量间距不要靠肉眼拍脑袋：写一个一次性脚本（种一份带工具调用的 transcript → 用真实构建打开 → 打印 `itemGaps` / `contentHeight` / `toolHeadHeight` 并截图到 `artifacts/`），对比改前改后的数字，量完删掉、不要提交。
 - 每轮结束的统计行（`.run-status`）来自 `App.tsx` 的 `run` 状态：`agent_start` 记开始时间、`tool_execution_start/end` 加减运行中数量、`agent_settled` 记结束时间并通过 `pi:session-stats`（RPC `get_session_stats`）取 `tokens.total`。1 秒定时器只为刷新计时，不要用它做别的。
 

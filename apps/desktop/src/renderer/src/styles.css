@@ -5312,69 +5312,23 @@ button:disabled {
   color: var(--accent);
 }
 
-/* ---------- conversation activity + run status ---------- */
+/* ---------- conversation tool cards + run status ---------- */
 
-.activity {
-  margin: 2px 0 0;
-}
-
-.activity-row {
+/* Tool cards sit directly in the assistant body; the old aggregate row above them is gone. */
+.tool-list {
   display: flex;
-  align-items: center;
-  gap: 7px;
-  padding: 2px;
-  color: var(--text-dim);
-  font-size: 12.4px;
-  text-align: left;
+  flex-direction: column;
+  gap: 4px;
 }
 
-.activity-row:hover {
-  color: var(--text);
-}
-
-.activity-dot {
-  width: 6px;
-  height: 6px;
-  flex: none;
-  border-radius: 50%;
-  background: var(--text-faint);
-}
-
-.activity-dot.running {
-  background: var(--accent);
-  animation: pulse 1.4s ease-in-out infinite;
-}
-
-.activity-dot.error {
-  background: var(--danger);
-}
-
-.activity-dot.done {
-  background: rgba(111, 191, 139, 0.8);
-}
-
-.activity-text {
-  flex: 0 1 auto;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.activity-chevron {
+.card-chevron {
   flex: none;
   color: var(--faint);
   transition: transform 0.15s ease;
 }
 
-.activity-chevron.open {
+.card-chevron.open {
   transform: rotate(90deg);
-}
-
-.activity-body {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  margin: 2px 0 2px;
 }
 
 .run-status {
