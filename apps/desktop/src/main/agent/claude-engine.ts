@@ -34,7 +34,6 @@ class InputQueue implements AsyncIterable<SDKUserMessage> {
 interface ClaudeOptions extends NativeOptions {
   historyStore?: ImportedHistoryStore
   binary: string
-  disabledTools?: () => string[]
 }
 export class ClaudeCodeEngine extends NativeEngine {
   readonly id = 'claude' as const
@@ -106,12 +105,11 @@ export class ClaudeCodeEngine extends NativeEngine {
           cwd: this.roots.primary,
           additionalDirectories: this.roots.additional,
           settingSources: ['user', 'project', 'local'],
+          // Keep Claude Code's native tools and user-configured MCPs. Prophey does not
+          // supply a tools/disallowedTools policy or inject its desktop MCP servers.
           resume: this.sessionId,
           sessionStore: storage.sessionStore,
           model: this.sessionId ? undefined : this.snapshot.model?.id || undefined,
-          disallowedTools: (this.options.disabledTools?.() ?? []).filter(
-            (t) => t !== 'WebFetch' && t !== 'WebSearch'
-          ),
           includePartialMessages: true,
           stderr: (text) => {
             this.stderr = (this.stderr + text).slice(-4000)

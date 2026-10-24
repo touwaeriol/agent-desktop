@@ -86,7 +86,7 @@ export default function App(): React.JSX.Element {
     error: null
   })
   const [settingsOpen, setSettingsOpen] = useState(false)
-  const [settingsTab, setSettingsTab] = useState<'providers' | 'custom' | 'mcp' | 'general'>(
+  const [settingsTab, setSettingsTab] = useState<'providers' | 'mcp' | 'general'>(
     'providers'
   )
   const [askQueue, setAskQueue] = useState<AskRequest[]>([])
@@ -451,9 +451,10 @@ export default function App(): React.JSX.Element {
 
   useEffect(() => {
     if (status.phase !== 'ready') return
-    if (status.sessionFile) setActivePath(status.sessionFile)
+    setActivePath(status.sessionKey ?? status.sessionFile)
     void loadMessages()
-  }, [status.phase, status.sessionFile, loadMessages])
+    void loadSessions()
+  }, [status.phase, status.sessionFile, status.sessionKey, status.engine, loadMessages, loadSessions])
 
   /**
    * Auto-compaction decides what counts as "full", so re-read the usage whenever the trigger moves
@@ -574,7 +575,8 @@ export default function App(): React.JSX.Element {
       return
     }
     setItems([])
-    setActivePath(undefined)
+    const next = await window.pi.getStatus()
+    setActivePath(next.sessionKey ?? next.sessionFile)
     setDraft('')
     setDraftImages([])
     void loadSessions()
@@ -849,18 +851,12 @@ export default function App(): React.JSX.Element {
   const selectSession = useCallback(
     async (session: SessionSummary, options: { remember?: boolean } = {}) => {
       if (session.path === activePath) return
-      if (session.cwd && session.cwd !== statusRef.current.cwd) {
+      try {
         const next = await window.pi.openSession(session.path, session.cwd)
-        if (next.phase === 'error') {
-          setToast(next.error ?? '切换会话失败')
-          return
-        }
-      } else {
-        const result = await window.pi.switchSession(session.path)
-        if (!result.ok) {
-          setToast(result.error ?? '切换会话失败')
-          return
-        }
+        if (next.phase === 'error') throw new Error(next.error ?? '切换会话失败')
+      } catch (error) {
+        setToast(error instanceof Error ? error.message : String(error))
+        return
       }
       setActivePath(session.path)
       if (options.remember !== false) rememberSession(session.path)
@@ -902,7 +898,7 @@ export default function App(): React.JSX.Element {
         return
       }
       setItems([])
-      setActivePath(undefined)
+      setActivePath(next.sessionKey ?? next.sessionFile)
       setDraft('')
       setDraftImages([])
       setStick(true)

@@ -19,6 +19,8 @@ export interface SessionRecord {
   engine?: EngineId
   /** App-level id, stable across engine swaps. */
   id: string
+  /** Stable sidebar identity, preserving existing pins when the engine-private path changes. */
+  key?: string
   /** Engine-private location; empty until the engine reports where it wrote. */
   path: string
   /** Working directory of the session (a project's primary root when it was started in one). */
@@ -48,6 +50,7 @@ function readRecord(value: unknown): SessionRecord | undefined {
     : []
   return {
     id,
+    key: typeof raw.key === 'string' ? raw.key : filePath || id,
     engine: ['pi', 'prophey', 'claude', 'codex'].includes(String(raw.engine))
       ? (raw.engine as EngineId)
       : undefined,
@@ -64,7 +67,8 @@ function readRecord(value: unknown): SessionRecord | undefined {
 /** What the window needs, so the renderer does not learn about the engine's storage. */
 export function toSummary(record: SessionRecord): SessionSummary {
   return {
-    path: record.path || record.id,
+    path: record.key || record.path || record.id,
+    engine: record.engine ?? 'pi',
     title: record.title || path.basename(record.path || record.id, '.jsonl'),
     cwd: record.cwd,
     createdAt: record.createdAt,
@@ -112,7 +116,9 @@ export class SessionStore {
     if (!filePath) return undefined
     const key = path.resolve(filePath).toLowerCase()
     return (this.records ?? []).find(
-      (record) => record.path && path.resolve(record.path).toLowerCase() === key
+      (record) => record.id === filePath ||
+        (record.key && path.resolve(record.key).toLowerCase() === key) ||
+        (record.path && path.resolve(record.path).toLowerCase() === key)
     )
   }
 
@@ -123,7 +129,8 @@ export class SessionStore {
    * exists), so an update never wipes a title or timestamps that are already recorded.
    */
   async upsert(
-    patch: Partial<SessionRecord> & { path?: string; cwd?: string }
+    patch: Partial<SessionRecord> & { path?: string; cwd?: string },
+    strict = false
   ): Promise<SessionRecord> {
     await this.load()
     const existing =
@@ -133,6 +140,7 @@ export class SessionStore {
     const record: SessionRecord = {
       engine: patch.engine ?? existing?.engine,
       id: existing?.id ?? patch.id ?? `s_${Math.random().toString(16).slice(2, 14)}`,
+      key: patch.key ?? existing?.key ?? existing?.path ?? patch.path ?? patch.id,
       path: patch.path ?? existing?.path ?? '',
       cwd: patch.cwd ?? existing?.cwd ?? '',
       additional: patch.additional ?? existing?.additional ?? [],
@@ -144,8 +152,14 @@ export class SessionStore {
       updatedAt: patch.updatedAt ?? now
     }
     const rest = (this.records ?? []).filter((entry) => entry.id !== record.id)
+    const previous = this.records
     this.records = [...rest, record]
-    await this.commit()
+    try {
+      await this.commit(strict)
+    } catch (error) {
+      this.records = previous
+      throw error
+    }
     return record
   }
 
@@ -168,11 +182,12 @@ export class SessionStore {
     return removed
   }
 
-  private async commit(): Promise<void> {
+  private async commit(strict = false): Promise<void> {
     const payload: SessionFile = { sessions: this.records ?? [] }
     try {
       await writeJsonAtomic(this.filePath, payload)
-    } catch {
+    } catch (error) {
+      if (strict) throw error
       // Keeping the list in memory is still better than failing the window over a write.
     }
   }

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useState, type ReactNode } from 'react'
 import type {
   McpEngineId,
   McpEngineState,
@@ -43,69 +43,70 @@ const ENGINE_LABELS: Record<string, string> = {
   web: '网络搜索'
 }
 
-function ToolSection({
-  server,
-  tools,
-  busy,
-  open,
-  onOpenChange,
-  onToggle
+function ServiceRow({
+  server, title, description, status, warning, enabled, disabled, busy,
+  tools, details, onToggle, onToggleTool
 }: {
   server: string
-  tools: McpToolInfo[]
+  title: string
+  description: string
+  status?: string
+  warning?: string
+  enabled: boolean
+  disabled: boolean
   busy: boolean
-  open: boolean
-  onOpenChange: (open: boolean) => void
-  onToggle: (server: string, tool: string, enabled: boolean) => void
+  tools: McpToolInfo[]
+  details: ReactNode
+  onToggle: (enabled: boolean) => void
+  onToggleTool: (server: string, tool: string, enabled: boolean) => void
 }): React.JSX.Element {
-  const direct = tools.filter((tool) => tool.enabled && (tool.direct || tool.exposure === 'direct')).length
-  const off = tools.filter((tool) => !tool.enabled).length
+  const [view, setView] = useState<'config' | 'tools'>()
+  const toggleView = (next: 'config' | 'tools'): void => setView(view === next ? undefined : next)
   return (
-    <div className="mcp-tools-block">
-      <button
-        className={`mcp-tools-head ${open ? 'open' : ''}`}
-        onClick={() => onOpenChange(!open)}
-        aria-expanded={open}
-      >
-        <ChevronIcon size={11} />
-        <span>工具</span>
-        {tools.length > 0 ? (
-          <span className="mcp-tools-count">
-            {tools.length} 个 · {direct} 直接声明
-            {off > 0 ? ` · ${off} 已关闭` : ''}
-          </span>
-        ) : (
-          <span className="mcp-tools-count">连接后自动发现</span>
-        )}
-      </button>
-      {open &&
-        (tools.length === 0 ? (
-          <div className="mcp-tools-empty">
-            工具列表会在服务器首次连接后自动发现；也可以先发一条消息再回来查看。
+    <div className={'mcp-service ' + (enabled ? '' : 'disabled')}>
+      <div className="mcp-service-row">
+        <span className="mcp-service-icon"><PlugIcon size={15} /></span>
+        <div className="mcp-row-main">
+          <div className="mcp-row-title">
+            <strong>{title}</strong>
+            {status && <span className="mcp-service-status" title={status}>{status}</span>}
           </div>
-        ) : (
-          <div className="mcp-tools">
-            {tools.map((tool) => {
-              const isDirect = tool.direct === true || tool.exposure === 'direct'
-              return (
-                <label
-                  key={`${server}-${tool.name}`}
-                  className={`mcp-tool ${tool.enabled ? '' : 'off'}`}
-                >
-                  <Toggle
-                    checked={tool.enabled}
-                    disabled={busy}
-                    onChange={(value) => onToggle(server, tool.name, value)}
-                  />
-                  <code>{tool.name}</code>
-                  <span className={`badge ${tool.enabled && isDirect ? 'ok' : ''}`}>
-                    {tool.enabled ? (isDirect ? '直接声明' : '按需加载') : '已关闭'}
+          <span className="mcp-row-sub" title={description}>{description}</span>
+        </div>
+        <div className="mcp-service-actions">
+          <button className={'ghost ' + (view === 'tools' ? 'active' : '')}
+            aria-label={title + '工具'} aria-expanded={view === 'tools'}
+            onClick={() => toggleView('tools')}>
+            {tools.length} 个工具
+          </button>
+          <button className={'ghost ' + (view === 'config' ? 'active' : '')}
+            aria-label={title + '配置'} aria-expanded={view === 'config'}
+            onClick={() => toggleView('config')}>
+            配置 <ChevronIcon size={10} />
+          </button>
+          <Toggle checked={enabled} disabled={disabled} onChange={onToggle} />
+        </div>
+      </div>
+      {warning && <div className="mcp-service-warning" title={warning}>{warning}</div>}
+      {view === 'config' && <div className="mcp-service-detail">{details}</div>}
+      {view === 'tools' && (
+        <div className="mcp-service-detail">
+          {tools.length === 0 ? <p className="field-hint">连接后会显示可用工具。</p> : (
+            <div className="mcp-tools">
+              {tools.map((tool) => (
+                <label key={tool.name} className={'mcp-tool ' + (tool.enabled ? '' : 'off')}>
+                  <Toggle checked={tool.enabled} disabled={busy}
+                    onChange={(value) => onToggleTool(server, tool.name, value)} />
+                  <code title={tool.name}>{tool.name}</code>
+                  <span className="badge">
+                    {tool.enabled ? (tool.direct || tool.exposure === 'direct' ? '直接声明' : '按需加载') : '已关闭'}
                   </span>
                 </label>
-              )
-            })}
-          </div>
-        ))}
+              ))}
+            </div>
+          )}
+        </div>
+      )}
     </div>
   )
 }
@@ -115,8 +116,6 @@ function EngineCard({
   busy,
   morphKeyHint,
   web,
-  toolsOpen,
-  onToolsOpenChange,
   onToggle,
   onPickEntry,
   onClearEntry,
@@ -130,8 +129,6 @@ function EngineCard({
   busy: boolean
   morphKeyHint?: string
   web?: McpWebState
-  toolsOpen: boolean
-  onToolsOpenChange: (open: boolean) => void
   onToggle: (id: McpEngineId, enabled: boolean) => void
   onPickEntry: (id: McpEngineId) => void
   onClearEntry: (id: McpEngineId) => void
@@ -154,187 +151,152 @@ function EngineCard({
   const isWarpGrep = engine.id === 'warpgrep'
   const isWeb = engine.id === 'web'
   const webHint = web?.braveKeyHint
+  const description = isWeb ? '搜索网页与读取网页内容' : isWarpGrep
+    ? '用自然语言搜索项目代码' : '代码索引、符号搜索与调用关系'
+  const status = !engine.available ? (isWarpGrep || isWeb ? '待配置' : '未安装')
+    : !engine.enabled ? '已关闭' : isWeb ? web?.route
+    : isWarpGrep ? '已配置' : indexLabel[engine.index ?? 'unknown']
   return (
-    <div className={`mcp-engine ${engine.enabled ? '' : 'disabled'}`}>
-      <div className="mcp-row">
-        <div className="mcp-row-main">
-          <span className="mcp-row-title">
-            {engine.name}
-            {engine.version && <span className="mcp-version">v{engine.version.replace(/^v/i, '')}</span>}
-            {engine.enabled && <span className="badge">网关</span>}
-          </span>
-          <span className="mcp-row-sub">
-            {isWeb
-              ? 'web_search（服务商原生搜索或 Brave）+ web_fetch（本地抓取并转 Markdown）。不需要二进制，只认 Key。'
-              : isWarpGrep
-                ? 'Morph WarpGrep：自然语言代码搜索，多轮 grep / 读取后在项目内定位代码。默认只返回文件与行号。'
-                : '代码索引：符号搜索、调用关系、影响面分析。默认只返回符号与位置，不返回源码。'}
-          </span>
-          {engine.error && <span className="mcp-row-warn">{engine.error}</span>}
-          {isWeb && web && (
-            <span className="mcp-row-meta">
-              当前路由：{web.route}
-              {web.nativeProviders.length > 0 ? ` · 已开启原生：${web.nativeProviders.join(' / ')}` : ''}
-              {` · 每次 ${web.count} 条 / 抓取 ${web.maxChars} 字符`}
-            </span>
-          )}
-          {engine.enabled && !engine.error && !isWarpGrep && !isWeb && (
-            <span className="mcp-row-meta">
-              {indexLabel[engine.index ?? 'unknown']}
-              {engine.indexMessage ? ` · ${engine.indexMessage}` : ''}
-            </span>
-          )}
-          {!isWeb && (
-            <span className="mcp-row-meta mcp-entry" title={engine.entry}>
-              {isWarpGrep
-                ? `api.morphllm.com/v1${morphKeyHint ? ` · Key ${morphKeyHint}` : ' · 未配置 Key'}`
-                : engine.entry ?? '未找到入口'}
-            </span>
-          )}
-        </div>
-        <Toggle
-          checked={engine.enabled}
-          disabled={busy || !engine.available}
-          onChange={(value) => onToggle(engine.id, value)}
-        />
-      </div>
-      {!engine.available && (
-        <div className="mcp-install">
-          <span>
-            {isWeb
-              ? 'web_search 还没有后端：填一个 Brave Search API Key，或到 设置 → 服务商 给某个服务商打开「联网」。'
-              : isWarpGrep
-                ? '未配置 Morph API Key。'
-                : '未找到 CodeGraph。安装：'}
-          </span>
+    <ServiceRow
+      server={engine.id} title={engine.name} description={description} status={status}
+      warning={engine.error} enabled={engine.enabled} disabled={busy || !engine.available}
+      busy={busy} tools={engine.tools} onToggle={(value) => onToggle(engine.id, value)}
+      onToggleTool={onToggleTool}
+      details={(
+        <>
           {!isWarpGrep && !isWeb && (
+            <p className="field-hint mcp-config-path">
+              {engine.version && <span>版本 {engine.version.replace(/^v/i, '')} · </span>}
+              <code>{engine.entry ?? '未找到入口'}</code>
+              {engine.indexMessage && <span> · {engine.indexMessage}</span>}
+            </p>
+          )}
+          {isWarpGrep && <p className="field-hint">搜索过程中读取的代码片段会发送到 Morph API。</p>}
+          {isWeb && web && <p className="field-hint">每次搜索 {web.count} 条结果 · 网页最多读取 {web.maxChars} 字符</p>}
+          {!engine.available && (
+            <div className="mcp-install">
+              <span>
+                {isWeb
+                  ? 'web_search 还没有后端：填一个 Brave Search API Key，或到 设置 → 服务商 给某个服务商打开「联网」。'
+                  : isWarpGrep
+                    ? '未配置 Morph API Key。'
+                    : '未找到 CodeGraph。安装：'}
+              </span>
+              {!isWarpGrep && !isWeb && (
+                <>
+                  <code>{INSTALL_HINTS.codegraph}</code>
+                  <button
+                    className="ghost"
+                    onClick={() => void navigator.clipboard?.writeText(INSTALL_HINTS.codegraph)}
+                  >
+                    复制
+                  </button>
+                  <span className="mcp-install-alt">
+                    已装在别处？用「选择入口」指定可执行文件（CodeGraph 的 <code>npm-shim.js</code>）。
+                  </span>
+                </>
+              )}
+              {isWeb && (
+                <span className="mcp-install-alt">
+                  web_fetch 不需要 Key，只用 Brave 时需要；服务商原生搜索沿用该服务商已登录的凭据。
+                </span>
+              )}
+            </div>
+          )}
+          {isWeb ? (
             <>
-              <code>{INSTALL_HINTS.codegraph}</code>
+              <div className="mcp-web-mode">
+                <span className="mcp-web-label">搜索来源</span>
+                <div className="mcp-seg">
+                  {(
+                    [
+                      ['auto', '自动'],
+                      ['brave', '仅 Brave'],
+                      ['native', '仅服务商']
+                    ] as Array<[WebSearchMode, string]>
+                  ).map(([mode, label]) => (
+                    <button
+                      key={mode}
+                      className={(web?.mode ?? 'auto') === mode ? 'active' : ''}
+                      disabled={busy || !engine.enabled}
+                      onClick={() => onSetWebMode(mode)}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+                <span className="mcp-web-note">
+                  自动：当前服务商开了「联网」就用它的原生搜索，否则用 Brave。
+                </span>
+              </div>
+              <div className="mcp-key-row">
+                <input
+                  type="password"
+                  value={braveDraft}
+                  placeholder={webHint ? `已保存 ${webHint}，输入新 Key 覆盖` : 'Brave Search API Key'}
+                  onChange={(event) => setBraveDraft(event.target.value)}
+                  spellCheck={false}
+                />
+                <button
+                  className="ghost"
+                  disabled={busy || !braveDraft.trim()}
+                  onClick={() => {
+                    onSaveBraveKey(braveDraft.trim())
+                    setBraveDraft('')
+                  }}
+                >
+                  保存 Key
+                </button>
+                {webHint && (
+                  <button className="ghost" disabled={busy} onClick={() => onSaveBraveKey(null)}>
+                    清除
+                  </button>
+                )}
+              </div>
+            </>
+          ) : isWarpGrep ? (
+            <div className="mcp-key-row">
+              <input
+                type="password"
+                value={keyDraft}
+                placeholder={morphKeyHint ? `已保存 ${morphKeyHint}，输入新 Key 覆盖` : 'sk-...'}
+                onChange={(event) => setKeyDraft(event.target.value)}
+                spellCheck={false}
+              />
               <button
                 className="ghost"
-                onClick={() => void navigator.clipboard?.writeText(INSTALL_HINTS.codegraph)}
+                disabled={busy || !keyDraft.trim()}
+                onClick={() => {
+                  onSaveKey(keyDraft.trim())
+                  setKeyDraft('')
+                }}
               >
-                复制
+                保存 Key
               </button>
-              <span className="mcp-install-alt">
-                已装在别处？用「选择入口」指定可执行文件（CodeGraph 的 <code>npm-shim.js</code>）。
-              </span>
-            </>
-          )}
-          {isWarpGrep && (
-            <span className="mcp-install-alt">
-              Key 只在本地保存，搜索时随请求发给 Morph；搜索过程中读取的文件片段也会发送到 Morph API。
-            </span>
-          )}
-          {isWeb && (
-            <span className="mcp-install-alt">
-              web_fetch 不需要 Key，只用 Brave 时需要；服务商原生搜索沿用该服务商已登录的凭据。
-            </span>
-          )}
-        </div>
-      )}
-      {isWeb ? (
-        <>
-          <div className="mcp-web-mode">
-            <span className="mcp-web-label">搜索来源</span>
-            <div className="mcp-seg">
-              {(
-                [
-                  ['auto', '自动'],
-                  ['brave', '仅 Brave'],
-                  ['native', '仅服务商']
-                ] as Array<[WebSearchMode, string]>
-              ).map(([mode, label]) => (
-                <button
-                  key={mode}
-                  className={(web?.mode ?? 'auto') === mode ? 'active' : ''}
-                  disabled={busy || !engine.enabled}
-                  onClick={() => onSetWebMode(mode)}
-                >
-                  {label}
+              {morphKeyHint && (
+                <button className="ghost" disabled={busy} onClick={() => onSaveKey(null)}>
+                  清除
                 </button>
-              ))}
+              )}
             </div>
-            <span className="mcp-web-note">
-              自动：当前服务商开了「联网」就用它的原生搜索，否则用 Brave。
-            </span>
-          </div>
-          <div className="mcp-key-row">
-            <input
-              type="password"
-              value={braveDraft}
-              placeholder={webHint ? `已保存 ${webHint}，输入新 Key 覆盖` : 'Brave Search API Key'}
-              onChange={(event) => setBraveDraft(event.target.value)}
-              spellCheck={false}
-            />
-            <button
-              className="ghost"
-              disabled={busy || !braveDraft.trim()}
-              onClick={() => {
-                onSaveBraveKey(braveDraft.trim())
-                setBraveDraft('')
-              }}
-            >
-              保存 Key
-            </button>
-            {webHint && (
-              <button className="ghost" disabled={busy} onClick={() => onSaveBraveKey(null)}>
-                清除
+          ) : (
+            <div className="mcp-engine-actions">
+              <button className="ghost" disabled={busy} onClick={() => onPickEntry(engine.id)}>
+                选择入口
               </button>
-            )}
-          </div>
+              {engine.entry && (
+                <button className="ghost" disabled={busy} onClick={() => onClearEntry(engine.id)}>
+                  恢复自动检测
+                </button>
+              )}
+              <button className="ghost" disabled={busy || !engine.available} onClick={onBuildIndex}>
+                立即索引
+              </button>
+            </div>
+          )}
         </>
-      ) : isWarpGrep ? (
-        <div className="mcp-key-row">
-          <input
-            type="password"
-            value={keyDraft}
-            placeholder={morphKeyHint ? `已保存 ${morphKeyHint}，输入新 Key 覆盖` : 'sk-...'}
-            onChange={(event) => setKeyDraft(event.target.value)}
-            spellCheck={false}
-          />
-          <button
-            className="ghost"
-            disabled={busy || !keyDraft.trim()}
-            onClick={() => {
-              onSaveKey(keyDraft.trim())
-              setKeyDraft('')
-            }}
-          >
-            保存 Key
-          </button>
-          {morphKeyHint && (
-            <button className="ghost" disabled={busy} onClick={() => onSaveKey(null)}>
-              清除
-            </button>
-          )}
-        </div>
-      ) : (
-        <div className="mcp-engine-actions">
-          <button className="ghost" disabled={busy} onClick={() => onPickEntry(engine.id)}>
-            选择入口
-          </button>
-          {engine.entry && (
-            <button className="ghost" disabled={busy} onClick={() => onClearEntry(engine.id)}>
-              恢复自动检测
-            </button>
-          )}
-          <button className="ghost" disabled={busy || !engine.available} onClick={onBuildIndex}>
-            立即索引
-          </button>
-        </div>
       )}
-      {engine.enabled && (
-        <ToolSection
-          server={engine.id}
-          tools={engine.tools}
-          busy={busy}
-          open={toolsOpen}
-          onOpenChange={onToolsOpenChange}
-          onToggle={onToggleTool}
-        />
-      )}
-    </div>
+    />
   )
 }
 
@@ -352,11 +314,6 @@ export function McpPanel({
   const [name, setName] = useState('')
   const [json, setJson] = useState(TEMPLATE_STDIO)
   const [confirmRemove, setConfirmRemove] = useState<string>()
-  const [openTools, setOpenTools] = useState<Record<string, boolean>>({})
-
-  const setToolsOpen = useCallback((server: string, open: boolean) => {
-    setOpenTools((current) => ({ ...current, [server]: open }))
-  }, [])
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -464,121 +421,75 @@ export function McpPanel({
     [run]
   )
 
+  const servers = state?.servers.filter((server) => !server.builtin) ?? []
   return (
     <div className="settings-content mcp">
-      <div className="field">
-        <label>MCP 支持</label>
-        <div className="mcp-row">
-          <div className="mcp-row-main">
-            <span className="mcp-row-title">启用 MCP</span>
-            <span className="mcp-row-sub">
-              关闭后 pi 以 <code>--no-mcp</code> 启动，不连接任何 MCP 服务器。
-            </span>
-          </div>
-          <Toggle
-            checked={state?.enabled ?? true}
-            disabled={busy || loading}
-            onChange={(value) =>
-              void run(
-                () => window.pi.setMcpEnabled(value),
-                value ? 'MCP 已启用' : 'MCP 已关闭'
-              )
-            }
+      <div className="mcp-toolbar">
+        <div className="mcp-master">
+          <Toggle checked={state?.enabled ?? true} disabled={busy || loading}
+            onChange={(value) => void run(() => window.pi.setMcpEnabled(value), value ? 'MCP 已启用' : 'MCP 已关闭')} />
+          <strong>MCP {state?.enabled === false ? '已关闭' : '已启用'}</strong>
+          <span className="mcp-toolbar-hint">管理当前引擎使用的工具服务</span>
+        </div>
+        <button className="icon-btn" title="刷新服务状态" disabled={busy || loading}
+          onClick={() => void run(() => window.pi.refreshMcpEngines())}>
+          <RefreshIcon size={13} />
+        </button>
+      </div>
+      {state?.enabled === false && <p className="field-hint">MCP 已暂停，配置会保留，重新启用后生效。</p>}
+      <div className="mcp-group">
+        <div className="mcp-head"><label>内置服务</label></div>
+        <div className="mcp-service-list">
+          <ServiceRow
+            server="desktop" title="桌面交互" description="提问确认、选项选择与桌面协作"
+            status={!state?.desktopToolAvailable ? '不可用' : state?.desktopTool ? '已启用' : '已关闭'}
+            warning={state && !state.desktopToolAvailable ? '缺少服务组件，请重新安装应用。' : undefined}
+            enabled={state?.desktopTool ?? true} disabled={busy || loading || !state?.desktopToolAvailable}
+            busy={busy} tools={state?.desktopTools ?? []} onToggleTool={toggleTool}
+            onToggle={(value) => void run(() => window.pi.setDesktopToolEnabled(value), value ? '桌面交互已启用' : '桌面交互已关闭')}
+            details={(
+              <p className="field-hint">
+                支持单选、多选和文字回答。
+                {state?.bridge.running ? '本地连接已就绪（127.0.0.1:' + state.bridge.port + '）。' : '本地连接尚未就绪。'}
+                {state?.bridge.pending ? '等待回答 ' + state.bridge.pending + ' 个问题。' : ''}
+              </p>
+            )}
           />
+          {state?.engines.map((engine) => (
+            <EngineCard
+              key={engine.id}
+              engine={engine}
+              busy={busy}
+              morphKeyHint={state.morphKeyHint}
+              web={state.web}
+              onToggle={(id, enabled) =>
+                void run(
+                  () => window.pi.setMcpEngineEnabled(id, enabled),
+                  `${ENGINE_LABELS[id] ?? id}${enabled ? ' 已启用' : ' 已关闭'}`
+                )
+              }
+              onPickEntry={pickEntry}
+              onClearEntry={(id) => void run(() => window.pi.setMcpEngineEntry(id, null))}
+              onBuildIndex={() =>
+                void run(async () => {
+                  const result = await window.pi.buildMcpIndex()
+                  if (!result.ok) throw new Error(result.message)
+                  onNotice(result.message)
+                })
+              }
+              onSaveKey={saveKey}
+              onSaveBraveKey={saveBraveKey}
+              onSetWebMode={setWebMode}
+              onToggleTool={toggleTool}
+            />
+          ))}
+          {!state && loading && <div className="provider-empty">正在读取服务…</div>}
         </div>
       </div>
 
-      <div className="field">
+      <div className="mcp-group">
         <div className="mcp-head">
-          <label>内置工具</label>
-          <div className="mcp-head-actions">
-            <button
-              className="icon-btn"
-              title="重新检测引擎"
-              onClick={() => void run(() => window.pi.refreshMcpEngines())}
-            >
-              <RefreshIcon size={13} />
-            </button>
-          </div>
-        </div>
-
-        <div className="mcp-row">
-          <div className="mcp-row-main">
-            <span className="mcp-row-title">
-              桌面交互 <code>desktop</code>
-            </span>
-            <span className="mcp-row-sub">
-              核心交互 MCP 服务器，当前提供 <code>ask_user_question</code>：单选、多选、手动输入，
-              多问题按顺序回答。通过 <code>--extension</code> 注入，不写入 mcp.json。
-            </span>
-            {state && !state.desktopToolAvailable && (
-              <span className="mcp-row-warn">当前安装缺少扩展或服务器脚本，无法启用。</span>
-            )}
-            {state?.bridge.running && (
-              <span className="mcp-row-meta">
-                桥接已就绪 · 127.0.0.1:{state.bridge.port}
-                {state.bridge.pending > 0 ? ` · 等待回答 ${state.bridge.pending}` : ''}
-              </span>
-            )}
-          </div>
-          <Toggle
-            checked={state?.desktopTool ?? true}
-            disabled={busy || loading || !state?.desktopToolAvailable}
-            onChange={(value) =>
-              void run(
-                () => window.pi.setDesktopToolEnabled(value),
-                value ? '桌面交互工具已启用' : '桌面交互工具已关闭'
-              )
-            }
-          />
-        </div>
-        {state?.desktopTool && (
-          <ToolSection
-            server="desktop"
-            tools={state.desktopTools}
-            busy={busy}
-            open={openTools.desktop === true}
-            onOpenChange={(open) => setToolsOpen('desktop', open)}
-            onToggle={toggleTool}
-          />
-        )}
-
-        {state?.engines.map((engine) => (
-          <EngineCard
-            key={engine.id}
-            engine={engine}
-            busy={busy}
-            morphKeyHint={state.morphKeyHint}
-            web={state.web}
-            toolsOpen={openTools[engine.id] === true}
-            onToolsOpenChange={(open) => setToolsOpen(engine.id, open)}
-            onToggle={(id, enabled) =>
-              void run(
-                () => window.pi.setMcpEngineEnabled(id, enabled),
-                `${ENGINE_LABELS[id] ?? id}${enabled ? ' 已启用' : ' 已关闭'}`
-              )
-            }
-            onPickEntry={pickEntry}
-            onClearEntry={(id) => void run(() => window.pi.setMcpEngineEntry(id, null))}
-            onBuildIndex={() =>
-              void run(async () => {
-                const result = await window.pi.buildMcpIndex()
-                if (!result.ok) throw new Error(result.message)
-                onNotice(result.message)
-              })
-            }
-            onSaveKey={saveKey}
-            onSaveBraveKey={saveBraveKey}
-            onSetWebMode={setWebMode}
-            onToggleTool={toggleTool}
-          />
-        ))}
-        {!state && loading && <div className="provider-empty">正在检测内置引擎…</div>}
-      </div>
-
-      <div className="field">
-        <div className="mcp-head">
-          <label>MCP 服务器</label>
+          <label>已添加的服务 <span className="mcp-group-count">{servers.length}</span></label>
           <div className="mcp-head-actions">
             <button className="ghost" onClick={() => setAddOpen((value) => !value)}>
               <PlusIcon size={12} /> 添加
@@ -588,7 +499,7 @@ export function McpPanel({
               onClick={() => void window.pi.openMcpConfig('user')}
               title={state?.userConfigPath}
             >
-              <FolderIcon size={12} /> 打开 mcp.json
+              <FolderIcon size={12} /> 配置文件
             </button>
             <button className="icon-btn" onClick={() => void load()} title="刷新">
               <RefreshIcon size={13} />
@@ -628,7 +539,7 @@ export function McpPanel({
                 取消
               </button>
               <button className="primary" onClick={submit} disabled={busy}>
-                保存并重启 pi
+                保存并应用
               </button>
             </div>
           </div>
@@ -636,12 +547,12 @@ export function McpPanel({
 
         <div className="mcp-list">
           {loading && <div className="provider-empty">正在读取 MCP 配置…</div>}
-          {!loading && state?.servers.length === 0 && (
+          {!loading && servers.length === 0 && (
             <div className="provider-empty">
-              还没有 MCP 服务器。点击「添加」或直接编辑 mcp.json。
+              添加 MCP 服务，接入更多工具。
             </div>
           )}
-          {state?.servers.map((server) => (
+          {servers.map((server) => (
             <div
               key={`${server.source}-${server.name}`}
               className={`mcp-server ${server.enabled ? '' : 'disabled'}`}
@@ -652,55 +563,43 @@ export function McpPanel({
               <div className="mcp-server-main">
                 <div className="mcp-server-name">
                   {server.name}
-                  {server.builtin && <span className="badge ok">内置</span>}
                   {server.source === 'project' && <span className="badge">项目</span>}
-                  {server.exposure && <span className="badge">{server.exposure}</span>}
                 </div>
                 <div className="mcp-server-sub">
                   <span className="mcp-transport">{server.transport}</span>
-                  <code>{server.summary}</code>
+                  <code title={server.summary}>{server.description || server.summary}</code>
                 </div>
-                {server.description && (
-                  <div className="mcp-server-desc">{server.description}</div>
-                )}
               </div>
               <div className="mcp-server-actions">
-                {server.builtin ? (
-                  <span className="mcp-server-note">见上方开关</span>
-                ) : (
-                  <>
-                    <Toggle
-                      checked={server.enabled}
-                      disabled={busy}
-                      onChange={(value) =>
-                        void run(() => window.pi.setMcpServerEnabled(server.name, value))
-                      }
-                    />
-                    <button
-                      className={`icon-btn ${confirmRemove === server.name ? 'danger' : ''}`}
-                      title={confirmRemove === server.name ? '再次点击确认删除' : '删除'}
-                      onClick={() => remove(server.name)}
-                    >
-                      {confirmRemove === server.name ? (
-                        <CloseIcon size={13} />
-                      ) : (
-                        <TrashIcon size={13} />
-                      )}
-                    </button>
-                  </>
-                )}
+                <Toggle
+                  checked={server.enabled}
+                  disabled={busy}
+                  onChange={(value) =>
+                    void run(() => window.pi.setMcpServerEnabled(server.name, value))
+                  }
+                />
+                <button
+                  className={`icon-btn ${confirmRemove === server.name ? 'danger' : ''}`}
+                  title={confirmRemove === server.name ? '再次点击确认删除' : '删除'}
+                  onClick={() => remove(server.name)}
+                >
+                  {confirmRemove === server.name ? (
+                    <CloseIcon size={13} />
+                  ) : (
+                    <TrashIcon size={13} />
+                  )}
+                </button>
               </div>
             </div>
           ))}
         </div>
 
-        <p className="field-hint">
-          用户级配置：<code>{state?.userConfigPath ?? '~/.pi/agent/mcp.json'}</code>
-        </p>
-        <p className="field-hint">
-          项目级配置：<code>{state?.projectConfigPath ?? '<会话目录>/.pi/mcp.json'}</code>
-          ，仅在信任该项目时生效。修改后会自动重启 pi。
-        </p>
+        <details className="mcp-config-files">
+          <summary>配置文件位置</summary>
+          <p className="field-hint">用户配置：<code>{state?.userConfigPath ?? '加载中…'}</code></p>
+          <p className="field-hint">项目配置：<code>{state?.projectConfigPath ?? '加载中…'}</code></p>
+          <p className="field-hint">修改后自动应用；引擎忙碌时可能延后生效。</p>
+        </details>
       </div>
     </div>
   )

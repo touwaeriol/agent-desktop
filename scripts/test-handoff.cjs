@@ -13,6 +13,12 @@ const native = process.argv.includes('--native')
 for (const dir of [workspace, data, path.join(data, 'transcripts'), path.join(temporary, 'codex'), path.join(temporary, 'claude')]) fs.mkdirSync(dir, { recursive: true })
 const source = path.join(data, 'transcripts', 's_source.jsonl')
 fs.writeFileSync(source, [JSON.stringify({ type: 'header', sessionId: 's_source', workspace: { primary: workspace, additional: [] } }), ...messages.map(message => JSON.stringify({ message }))].join('\n') + '\n')
+const second = path.join(data, 'transcripts', 's_second.jsonl')
+fs.writeFileSync(second, [JSON.stringify({ type: 'header', sessionId: 's_second', workspace: { primary: workspace, additional: [] } }), JSON.stringify({ message: { role: 'user', content: 'SECOND_SESSION_SENTINEL' } })].join('\n') + '\n')
+fs.writeFileSync(path.join(data, 'sessions.json'), JSON.stringify({ sessions: [
+  { id: 'primary', path: source, engine: 'prophey', cwd: workspace, additional: [], title: 'PRIMARY SESSION', createdAt: 1, updatedAt: 2 },
+  { id: 'second', path: second, engine: 'prophey', cwd: workspace, additional: [], title: 'SECOND SESSION', createdAt: 1, updatedAt: 1 }
+] }))
 fs.writeFileSync(path.join(data, 'config.json'), JSON.stringify({ engine: 'prophey', propheySessionId: 's_source', engineSessions: { prophey: source }, profile: 'desktop', cwd: workspace, mcp: { enabled: false, subagents: { enabled: false } } }))
 fs.writeFileSync(path.join(data, 'updates.json'), '{"autoCheck":false}')
 fs.writeFileSync(path.join(temporary, 'requests.json'), '[]')

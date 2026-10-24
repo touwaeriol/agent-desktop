@@ -109,10 +109,17 @@ export class PropheyEngine implements AgentEngine {
     this.options.onStatus(this.snapshot)
     // Pick a model up front: the window reads it from the status, and an unset model shows as
     // "未登录 / 无可用模型" even though the engine is perfectly able to run.
+    const selected = options.model ?? this.model
+    // A settings reload replaces the runtime; refresh the model's endpoint and metadata too.
+    this.model = undefined
+    if (selected) await this.setModel(selected.provider, selected.id).catch(() => undefined)
     if (!this.model) await this.pickModel().catch(() => undefined)
     const compaction = this.options.autoCompact?.()
     if (compaction) this.autoCompact = compaction
-    if (options.session) await this.switchSession(options.session)
+    // A fresh, empty conversation has an identity before its first transcript is saved.
+    const currentEmptySession = this.loaded && this.transcript.length === 0 &&
+      options.session === this.transcriptPath()
+    if (options.session && !currentEmptySession) await this.switchSession(options.session)
     else await this.resume()
     this.setStatus({ sessionFile: this.transcriptPath() })
     return this.snapshot

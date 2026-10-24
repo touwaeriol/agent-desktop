@@ -1,6 +1,5 @@
-import { EnginePicker } from './EnginePicker'
-import { engineLabel } from '@shared/engine'
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { engineLabel, type EngineId } from '@shared/engine'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type {
   AppSettings,
   AppUpdateSnapshot,
@@ -24,12 +23,14 @@ import {
   LogoutIcon,
   MoonIcon,
   PlugIcon,
+  PencilIcon,
+  PlusIcon,
   RefreshIcon,
   SearchIcon,
   SunIcon,
   UserIcon
 } from './Icons'
-import { CustomProvidersPanel } from './CustomProvidersPanel'
+import { ProviderEditor } from './ProviderEditor'
 import { McpPanel } from './McpPanel'
 import { AgentsPanel } from './AgentsPanel'
 import { ProviderMark } from './ProviderMark'
@@ -37,7 +38,7 @@ import { Toggle } from './Toggle'
 import { LoginDialog, type LoginState } from './LoginDialog'
 import { updateBusy, updateProgress, updateStatusText } from '../lib/updates'
 
-type Tab = 'providers' | 'custom' | 'mcp' | 'agents' | 'general'
+type Tab = 'providers' | 'mcp' | 'agents' | 'general'
 
 const THINKING_LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
 
@@ -90,14 +91,6 @@ const PROVIDER_NOTES: Record<string, string> = {
   'zai-coding-cn': 'Z.AI 国内 Coding 套餐：open.bigmodel.cn',
   'google-vertex': 'Vertex AI：需要项目与区域，走 GCP 凭据',
   google: 'AI Studio（Gemini API）：generativelanguage.googleapis.com'
-}
-
-/** Default endpoint shown as the placeholder when a provider's URL can be overridden. */
-const BASE_URL_PLACEHOLDER: Record<string, string> = {
-  anthropic: 'https://api.anthropic.com',
-  openai: 'https://api.openai.com/v1',
-  google: 'https://generativelanguage.googleapis.com/v1beta',
-  deepseek: 'https://api.deepseek.com'
 }
 
 export function SettingsModal({
@@ -176,14 +169,17 @@ export function SettingsModal({
   const [loadError, setLoadError] = useState<string>()
   const [login, setLogin] = useState<LoginState>()
   const [modelsJson, setModelsJson] = useState<{ path: string; content: string }>()
-  const [modelsContent, setModelsContent] = useState('')
-  const [modelsDirty, setModelsDirty] = useState(false)
+  const [providerEditor, setProviderEditor] = useState<{
+    file: { path: string; content: string }
+    provider?: ProviderInfo
+    mode: 'form' | 'json'
+  }>()
   const [settings, setSettings] = useState<AppSettings>()
   const [desktopConfig, setDesktopConfig] = useState<DesktopConfig>()
   const activeTab =
     desktopConfig?.capabilities &&
     !desktopConfig.capabilities.providerSettings &&
-    ['providers', 'custom', 'mcp', 'agents'].includes(tab)
+    ['providers', 'mcp', 'agents'].includes(tab)
       ? 'general'
       : tab
   useEffect(() => {
@@ -192,7 +188,6 @@ export function SettingsModal({
       status.capabilities &&
       !status.capabilities.providerSettings &&
       (activeTab === 'providers' ||
-        activeTab === 'custom' ||
         activeTab === 'mcp' ||
         activeTab === 'agents')
     )
@@ -212,18 +207,18 @@ export function SettingsModal({
   /** Auto-compaction trigger as a percentage of the window; kept in sync with `status`. */
   const [compactPercent, setCompactPercent] = useState('')
   const [compactBusy, setCompactBusy] = useState(false)
-  /** Provider whose endpoint editor is open, plus the draft value. */
-  const [baseUrlEdit, setBaseUrlEdit] = useState<string>()
-  const [baseUrlDraft, setBaseUrlDraft] = useState('')
-  const [baseUrlBusy, setBaseUrlBusy] = useState(false)
-
   const loginRef = useRef<LoginState | undefined>(undefined)
   loginRef.current = login
 
   const loadProviders = useCallback(async () => {
     setProvidersLoading(true)
     try {
-      setProviders(await window.pi.listProviders())
+      const [nextProviders, file] = await Promise.all([
+        window.pi.listProviders(),
+        window.pi.getModelsJson()
+      ])
+      setProviders(nextProviders)
+      setModelsJson(file)
       setLoadError(undefined)
     } catch (cause) {
       setLoadError(cause instanceof Error ? cause.message : String(cause))
@@ -231,35 +226,6 @@ export function SettingsModal({
       setProvidersLoading(false)
     }
   }, [])
-
-  /**
-   * Save (or clear) a provider's custom endpoint. pi reads `models.json` at startup, so the main
-   * side restarts the session; the provider list is reloaded to show the new value.
-   */
-  const saveBaseUrl = useCallback(
-    async (provider: ProviderInfo, value: string | null) => {
-      setBaseUrlBusy(true)
-      try {
-        const result = await window.pi.setProviderBaseUrl(provider.id, value)
-        if (!result.ok) {
-          setError(result.error ?? '保存失败')
-          return
-        }
-        setBaseUrlEdit(undefined)
-        setNotice(
-          value
-            ? `${provider.name} 的接口地址已改为 ${value}`
-            : `${provider.name} 已恢复默认接口地址`
-        )
-        await loadProviders()
-      } catch (cause) {
-        setError(cause instanceof Error ? cause.message : String(cause))
-      } finally {
-        setBaseUrlBusy(false)
-      }
-    },
-    [loadProviders]
-  )
 
   const loadSettings = useCallback(async () => {
     try {
@@ -339,14 +305,15 @@ export function SettingsModal({
           setError(result.error ?? '设置失败')
           return
         }
+        const percent = result.percent ?? status.autoCompactPercent
         setNotice(
           !enabled
             ? '自动压缩已关闭'
             : result.warning
               ? result.warning
-              : `自动压缩已开启：到 ${result.percent ?? status.autoCompactPercent ?? 90}% 时压缩（保留 ${formatTokens(
-                  result.reserveTokens ?? 0
-                )} tokens）`
+              : percent === undefined
+                ? '自动压缩已开启'
+                : `自动压缩已开启：到 ${percent}% 时压缩`
         )
         await loadSettings()
       } catch (cause) {
@@ -355,13 +322,6 @@ export function SettingsModal({
     },
     [loadSettings, status.autoCompactPercent]
   )
-
-  const loadModelsJson = useCallback(async () => {
-    const file = await window.pi.getModelsJson()
-    setModelsJson(file)
-    setModelsContent(file.content)
-    setModelsDirty(false)
-  }, [])
 
   /**
    * Set the auto-compaction trigger (percentage of the model's window).
@@ -406,6 +366,7 @@ export function SettingsModal({
   useEffect(() => {
     if (!open) return
     setTab(initialTab ?? 'providers')
+    setProviderEditor(undefined)
     setNotice(undefined)
     setError(undefined)
     void loadProviders()
@@ -438,10 +399,6 @@ export function SettingsModal({
       setWebBusy(false)
     }
   }, [])
-
-  useEffect(() => {
-    if (open && activeTab === 'custom') void loadModelsJson()
-  }, [open, tab, loadModelsJson])
 
   useEffect(
     () =>
@@ -495,14 +452,43 @@ export function SettingsModal({
     return () => clearTimeout(timer)
   }, [notice, error])
 
+  // Include saved definitions even if the runtime cannot yet offer a login method.
+  const allProviders = useMemo(() => {
+    const merged = new Map(providers.map((provider) => [provider.id, provider]))
+    try {
+      const saved = JSON.parse(modelsJson?.content ?? '{}').providers ?? {}
+      for (const [id, value] of Object.entries(saved)) {
+        if (!value || typeof value !== 'object' || Array.isArray(value)) continue
+        const config = value as Record<string, unknown>
+        const current = merged.get(id)
+        merged.set(id, {
+          id,
+          name: id,
+          configured: false,
+          builtin: false,
+          options: [],
+          modelCount: Array.isArray(config.models) ? config.models.length : 0,
+          ...current,
+          ...(typeof config.name === 'string' && config.name ? { name: config.name } : {}),
+          ...(typeof config.baseUrl === 'string' ? { baseUrl: config.baseUrl } : {})
+        })
+      }
+    } catch {
+      // The JSON editor remains available to repair malformed configuration.
+    }
+    return [...merged.values()].sort((a, b) =>
+      Number(b.configured) - Number(a.configured) || a.name.localeCompare(b.name)
+    )
+  }, [providers, modelsJson])
+
   const filteredProviders = useMemo(() => {
     const needle = query.trim().toLowerCase()
-    if (!needle) return providers
-    return providers.filter(
+    if (!needle) return allProviders
+    return allProviders.filter(
       (provider) =>
         provider.name.toLowerCase().includes(needle) || provider.id.toLowerCase().includes(needle)
     )
-  }, [providers, query])
+  }, [allProviders, query])
 
   const configuredCount = providers.filter((provider) => provider.configured).length
 
@@ -669,24 +655,6 @@ export function SettingsModal({
     void loadSettings()
   }, [modelConfig, loadProviders, loadSettings])
 
-  /** Tools a CLI engine should not have; the flags are applied to the next turn. */
-  const toggleEngineTool = useCallback(
-    async (engine: 'claude' | 'codex', tool: string) => {
-      const current = desktopConfig?.engineTools?.[engine] ?? []
-      const next = current.includes(tool)
-        ? current.filter((name) => name !== tool)
-        : [...current, tool]
-      const result = await window.pi.setEngineTools(engine, next)
-      setDesktopConfig(await window.pi.getDesktopConfig())
-      setNotice(
-        result.ok
-          ? `${engine === 'claude' ? 'Claude Code' : 'Codex'}：${tool} ${next.includes(tool) ? '已禁用' : '已启用'}`
-          : '保存失败'
-      )
-    },
-    [desktopConfig]
-  )
-
   const changeSessionMode = useCallback(async (mode: 'shared' | 'isolated') => {
     const next = await window.pi.setSessionMode(mode)
     if (next.phase === 'error') {
@@ -701,20 +669,25 @@ export function SettingsModal({
     )
   }, [])
 
+  const openProviderEditor = async (mode: 'form' | 'json', provider?: ProviderInfo): Promise<void> => {
+    try {
+      const file = await window.pi.getModelsJson()
+      setModelsJson(file)
+      setProviderEditor({ file, provider, mode })
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause))
+    }
+  }
+
   const saveModels = useCallback(
-    async (content: string = modelsContent) => {
+    async (content: string) => {
       const result = await window.pi.saveModelsJson(content)
-      if (result.ok) {
-        setNotice('models.json 已保存，pi 正在重启')
-        setModelsContent(content)
-        setModelsDirty(false)
-        void loadProviders()
-        void loadSettings()
-      } else {
-        setError(result.error ?? '保存失败')
-      }
+      if (!result.ok) throw new Error(result.error ?? '保存失败')
+      setNotice('服务商配置已保存')
+      await loadProviders()
+      await loadSettings()
     },
-    [modelsContent, loadProviders, loadSettings]
+    [loadProviders, loadSettings]
   )
 
   const saveGeneral = useCallback(async () => {
@@ -749,21 +722,13 @@ export function SettingsModal({
             <span>设置</span>
           </div>
           {desktopConfig?.capabilities?.providerSettings && (
-            <>
-              <button
-                className={activeTab === 'providers' ? 'active' : ''}
-                onClick={() => setTab('providers')}
-              >
-                <UserIcon size={15} /> 服务商
-                <span className="nav-count">{configuredCount}</span>
-              </button>
-              <button
-                className={activeTab === 'custom' ? 'active' : ''}
-                onClick={() => setTab('custom')}
-              >
-                <KeyIcon size={15} /> 自定义服务商
-              </button>
-            </>
+            <button
+              className={activeTab === 'providers' ? 'active' : ''}
+              onClick={() => setTab('providers')}
+            >
+              <UserIcon size={15} /> 服务商
+              <span className="nav-count">{configuredCount}</span>
+            </button>
           )}
           {desktopConfig?.capabilities?.mcp === 'managed' && (
             <>
@@ -803,24 +768,20 @@ export function SettingsModal({
               <h2>
                 {activeTab === 'providers'
                   ? '服务商'
-                  : activeTab === 'custom'
-                    ? '自定义服务商'
-                    : activeTab === 'mcp'
-                      ? 'MCP'
-                      : activeTab === 'agents'
-                        ? '代理'
-                        : '通用'}
+                  : activeTab === 'mcp'
+                    ? 'MCP'
+                    : activeTab === 'agents'
+                      ? '代理'
+                      : '通用'}
               </h2>
               <p>
                 {activeTab === 'providers'
-                  ? '使用 pi 内置的 OAuth 或 API Key 登录，凭据保存到 ~/.pi/agent/auth.json'
-                  : activeTab === 'custom'
-                    ? '通过 models.json 配置 OpenAI 兼容端点、baseUrl 与模型列表'
-                    : activeTab === 'mcp'
-                      ? 'MCP 总开关、桌面提问工具与 ~/.pi/agent/mcp.json 里的服务器'
-                      : activeTab === 'agents'
-                        ? '子代理预设：注入哪些工具、追加什么提示词，以及如何暴露给模型'
-                        : '当前会话目录、会话存储、默认模型与思考等级'}
+                  ? '统一管理服务商的登录、接口地址与模型'
+                  : activeTab === 'mcp'
+                    ? '连接工具服务，扩展当前引擎的能力'
+                    : activeTab === 'agents'
+                      ? '子代理预设：注入哪些工具、追加什么提示词，以及如何暴露给模型'
+                      : '当前会话目录、会话存储、默认模型与思考等级'}
               </p>
             </div>
             <button className="icon-btn" onClick={onClose} title="关闭 (Esc)">
@@ -844,11 +805,17 @@ export function SettingsModal({
                     spellCheck={false}
                   />
                 </div>
+                <button className="primary" onClick={() => void openProviderEditor('form')}>
+                  <PlusIcon size={12} /> 添加服务商
+                </button>
+                <button className="ghost" onClick={() => void openProviderEditor('json')}>
+                  高级 JSON
+                </button>
                 <button className="icon-btn" title="刷新" onClick={() => void loadProviders()}>
                   <RefreshIcon size={14} />
                 </button>
                 <span className="providers-count">
-                  {providersLoading ? '加载中…' : `${configuredCount} / ${providers.length} 已配置`}
+                  {providersLoading ? '加载中…' : `${configuredCount} / ${allProviders.length} 已配置`}
                 </span>
               </div>
 
@@ -856,75 +823,74 @@ export function SettingsModal({
 
               <div className="provider-list">
                 {filteredProviders.map((provider) => (
-                  <Fragment key={provider.id}>
-                    <div className={`provider-row ${provider.configured ? 'configured' : ''}`}>
-                      <ProviderMark id={provider.id} name={provider.name} />
-                      <div className="provider-main">
-                        <div className="provider-name">
-                          {provider.name}
-                          {provider.configured && (
-                            <span className="badge ok">
-                              {provider.storedType
-                                ? provider.storedType === 'oauth'
-                                  ? 'OAuth'
-                                  : 'API Key'
-                                : (SOURCE_LABELS[provider.source ?? ''] ?? '已配置')}
-                            </span>
-                          )}
-                        </div>
-                        <div className="provider-sub">
-                          <code>{provider.id}</code>
-                          <span>{provider.modelCount} 个模型</span>
-                          {provider.sourceLabel && <span>{provider.sourceLabel}</span>}
-                          {provider.baseUrl && (
-                            <span className="provider-base-url-tag" title={provider.baseUrl}>
-                              <PlugIcon size={10} />
-                              {provider.baseUrl}
-                            </span>
-                          )}
-                        </div>
-                        {PROVIDER_NOTES[provider.id] && (
-                          <div className="provider-note">{PROVIDER_NOTES[provider.id]}</div>
+                  <div key={provider.id} className={`provider-row ${provider.configured ? 'configured' : ''}`}>
+                    <ProviderMark id={provider.id} name={provider.name} />
+                    <div className="provider-main">
+                      <div className="provider-name">
+                        {provider.name}
+                        {provider.configured && (
+                          <span className="badge ok">
+                            {provider.storedType
+                              ? provider.storedType === 'oauth'
+                                ? 'OAuth'
+                                : 'API Key'
+                              : (SOURCE_LABELS[provider.source ?? ''] ?? '已配置')}
+                          </span>
                         )}
                       </div>
-                      <div className="provider-actions">
-                        {webSearch !== undefined &&
-                          webSearch.nativeSupported.includes(provider.id) && (
-                            <button
-                              className={`prov-btn ghost web ${
-                                webSearch.nativeProviders.includes(provider.id) ? 'on' : ''
-                              }`}
-                              disabled={webBusy}
-                              onClick={() =>
-                                void toggleProviderWebSearch(
-                                  provider,
-                                  !webSearch.nativeProviders.includes(provider.id)
-                                )
-                              }
-                              title={
-                                webSearch.nativeProviders.includes(provider.id)
-                                  ? 'web_search 优先用该服务商的原生搜索；点击改为回退 Brave'
-                                  : '让 web_search 用该服务商自己的原生搜索（需要已登录 / 有 Key）'
-                              }
-                            >
-                              <GlobeIcon size={12} />
-                              {webSearch.nativeProviders.includes(provider.id) ? '联网 开' : '联网'}
-                            </button>
-                          )}
-                        {provider.options.map((option) => (
+                      <div className="provider-sub">
+                        <code>{provider.id}</code>
+                        <span>{provider.modelCount} 个模型</span>
+                        {provider.sourceLabel && <span>{provider.sourceLabel}</span>}
+                        {provider.baseUrl && (
+                          <span className="provider-base-url-tag" title={provider.baseUrl}>
+                            <PlugIcon size={10} />
+                            {provider.baseUrl}
+                          </span>
+                        )}
+                      </div>
+                      {PROVIDER_NOTES[provider.id] && (
+                        <div className="provider-note">{PROVIDER_NOTES[provider.id]}</div>
+                      )}
+                    </div>
+                    <div className="provider-actions">
+                      {webSearch !== undefined &&
+                        webSearch.nativeSupported.includes(provider.id) && (
                           <button
-                            key={option.type}
-                            className={`prov-btn ${option.type}`}
-                            onClick={() => void startLogin(provider, option.type)}
+                            className={`prov-btn ghost web ${
+                              webSearch.nativeProviders.includes(provider.id) ? 'on' : ''
+                            }`}
+                            disabled={webBusy}
+                            onClick={() =>
+                              void toggleProviderWebSearch(
+                                provider,
+                                !webSearch.nativeProviders.includes(provider.id)
+                              )
+                            }
+                            title={
+                              webSearch.nativeProviders.includes(provider.id)
+                                ? 'web_search 优先用该服务商的原生搜索；点击改为回退 Brave'
+                                : '让 web_search 用该服务商自己的原生搜索（需要已登录 / 有 Key）'
+                            }
                           >
-                            {option.type === 'oauth' ? (
-                              <UserIcon size={12} />
-                            ) : (
-                              <KeyIcon size={12} />
-                            )}
-                            {option.label}
+                            <GlobeIcon size={12} />
+                            {webSearch.nativeProviders.includes(provider.id) ? '联网 开' : '联网'}
                           </button>
-                        ))}
+                        )}
+                      {provider.options.map((option) => (
+                        <button
+                          key={option.type}
+                          className={`prov-btn ${option.type}`}
+                          onClick={() => void startLogin(provider, option.type)}
+                        >
+                          {option.type === 'oauth' ? (
+                            <UserIcon size={12} />
+                          ) : (
+                            <KeyIcon size={12} />
+                          )}
+                          {option.label}
+                        </button>
+                      ))}
                         <button
                           className="prov-btn ghost"
                           onClick={() => void openModelConfig(provider)}
@@ -932,18 +898,10 @@ export function SettingsModal({
                         >
                           <ListIcon size={12} /> 模型
                         </button>
-                        {provider.baseUrlEditable && (
-                          <button
-                            className={`prov-btn ghost ${provider.baseUrl ? 'on' : ''}`}
-                            onClick={() => {
-                              setBaseUrlEdit(baseUrlEdit === provider.id ? undefined : provider.id)
-                              setBaseUrlDraft(provider.baseUrl ?? '')
-                            }}
-                            title="自定义接口地址（写入 models.json 的 providers.<id>.baseUrl，重启后生效）"
-                          >
-                            <PlugIcon size={12} /> 地址
-                          </button>
-                        )}
+                        <button className="prov-btn ghost" onClick={() => void openProviderEditor('form', provider)}
+                          title="编辑接口地址、凭据与模型定义">
+                          <PencilIcon size={12} /> 编辑
+                        </button>
                         {provider.storedType && (
                           <button
                             className={`prov-btn ghost ${confirmLogout === provider.id ? 'danger' : ''}`}
@@ -956,74 +914,18 @@ export function SettingsModal({
                         )}
                       </div>
                     </div>
-                    {baseUrlEdit === provider.id && (
-                      <div className="provider-base-url">
-                        <input
-                          autoFocus
-                          value={baseUrlDraft}
-                          spellCheck={false}
-                          placeholder={BASE_URL_PLACEHOLDER[provider.id] ?? 'https://'}
-                          onChange={(event) => setBaseUrlDraft(event.target.value)}
-                          onKeyDown={(event) => {
-                            if (event.key === 'Enter') void saveBaseUrl(provider, baseUrlDraft)
-                            if (event.key === 'Escape') setBaseUrlEdit(undefined)
-                          }}
-                        />
-                        <button
-                          className="prov-btn"
-                          disabled={baseUrlBusy || !baseUrlDraft.trim()}
-                          onClick={() => void saveBaseUrl(provider, baseUrlDraft)}
-                        >
-                          保存
-                        </button>
-                        <button
-                          className="prov-btn ghost"
-                          disabled={baseUrlBusy || !provider.baseUrl}
-                          onClick={() => void saveBaseUrl(provider, null)}
-                        >
-                          用默认
-                        </button>
-                        <button
-                          className="prov-btn ghost"
-                          onClick={() => setBaseUrlEdit(undefined)}
-                        >
-                          取消
-                        </button>
-                        <span className="provider-base-url-hint">
-                          默认 {BASE_URL_PLACEHOLDER[provider.id] ?? '—'}
-                          ；填代理或镜像地址，留空即恢复默认
-                        </span>
-                      </div>
-                    )}
-                  </Fragment>
                 ))}
                 {filteredProviders.length === 0 && (
                   <div className="provider-empty">
                     {providersLoading
                       ? '正在加载服务商…'
-                      : providers.length === 0
+                      : allProviders.length === 0
                         ? '没有可用的服务商'
                         : '没有匹配的服务商'}
                   </div>
                 )}
               </div>
             </div>
-          )}
-
-          {activeTab === 'custom' && (
-            <CustomProvidersPanel
-              filePath={modelsJson?.path ?? '~/.pi/agent/models.json'}
-              content={modelsContent}
-              dirty={modelsDirty}
-              builtinIds={builtinIds}
-              onChange={(value) => {
-                setModelsContent(value)
-                setModelsDirty(true)
-              }}
-              onSave={saveModels}
-              onReload={() => void loadModelsJson()}
-              onOpenFile={() => void window.pi.openModelsJson()}
-            />
           )}
 
           {activeTab === 'agents' && <AgentsPanel onNotice={setNotice} onError={setError} />}
@@ -1087,44 +989,27 @@ export function SettingsModal({
                 </>
               )}
               <div className="field">
-                <label>引擎</label>
-                <EnginePicker status={status} onNotice={setNotice}
-                  onChanged={async () => setDesktopConfig(await window.pi.getDesktopConfig())} />
+                <label>新会话默认引擎</label>
+                <select
+                  aria-label="新会话默认引擎"
+                  value={desktopConfig?.defaultEngine ?? 'prophey'}
+                  onChange={(event) => {
+                    const next = event.target.value as EngineId
+                    void window.pi.setDefaultEngine(next).then(async (result) => {
+                      if (!result.ok) throw new Error('保存默认引擎失败')
+                      setDesktopConfig(await window.pi.getDesktopConfig())
+                      setNotice('新会话将默认使用 ' + engineLabel(next) + '，已有会话不变')
+                    }).catch((error) => setError(String(error)))
+                  }}
+                >
+                  {(['prophey', 'pi', 'claude', 'codex'] as EngineId[]).map((id) => (
+                    <option key={id} value={id}>{engineLabel(id)}</option>
+                  ))}
+                </select>
                 <p className="field-hint">
-                  切换会携带当前对话的用户消息、AI 正文和工具记录，去掉思考内容。
-                  运行中会先停止当前回合；原会话保留在历史列表中。
+                  每个会话独立保存自己的引擎。在对话输入框中选择引擎，只影响当前会话。
+                  打开已有会话时会自动恢复它的引擎。
                 </p>
-                <p className="field-hint">
-                  pi：完整的编码 agent（工具、压缩、子代理、扩展、<code>/btw</code>）。
-                </p>
-                <p className="field-hint">
-                  Claude Code / Codex：调用本机的
-                  CLI，用它自己的循环、工具和登录。压缩、会话分叉、模型和命令通过各自的原生接口接入。
-                  它们自带联网搜索，我们不会把自己的 web 工具塞进去。
-                </p>
-                <p className="field-hint">
-                  Prophey（默认）：我们自己的循环——直连服务商、根感知工具、MCP、子代理、
-                  <code>/btw</code>、压缩与重试、自己的 transcript 与系统提示词。
-                </p>
-                {desktopConfig?.capabilities?.toolPolicy === 'toggles' && (
-                  <div className="field-row engine-tools">
-                    <span className="field-inline">禁用的工具</span>
-                    {(desktopConfig?.capabilities?.configurableTools ?? []).map((tool) => {
-                      const off = (desktopConfig?.engineTools?.claude ?? []).includes(tool)
-                      return (
-                        <button
-                          key={tool}
-                          className={`ghost ${off ? 'danger' : ''}`}
-                          onClick={() => void toggleEngineTool('claude', tool)}
-                          title={off ? '已禁用，点击恢复' : '点击禁用'}
-                        >
-                          {tool}
-                          {off ? ' 已禁用' : ''}
-                        </button>
-                      )
-                    })}
-                  </div>
-                )}
               </div>
 
               {desktopConfig?.capabilities?.sessionStorage === 'managed' && (
@@ -1157,68 +1042,46 @@ export function SettingsModal({
                   </div>
                 </>
               )}
-              {desktopConfig?.capabilities?.autoCompaction === 'configurable' ? (
-                <>
-                  <div className="field">
-                    <label>默认自动压缩</label>
-                    <div className="field-row">
+              <div className="field">
+                <label>自动压缩</label>
+                {desktopConfig?.capabilities?.autoCompaction === 'configurable' ? (
+                  <>
+                    <div className="field-row compaction-controls">
                       <Toggle
                         checked={settings?.compaction?.enabled !== false}
+                        disabled={compactBusy || !settings}
                         onChange={(enabled) => void toggleAutoCompact(enabled)}
                       />
-                      <span className="field-inline">
-                        {settings?.compaction?.enabled === false
-                          ? '已关闭：上下文满了会直接报错'
-                          : `到 ${compactPercent || status.autoCompactPercent || 90}% 时自动压缩`}
-                      </span>
+                      <select
+                        aria-label="自动压缩触发阈值"
+                        value={compactPercent}
+                        disabled={compactBusy || !settings || settings.compaction?.enabled === false}
+                        onChange={(event) => {
+                          const next = Number(event.target.value)
+                          setCompactPercent(String(next))
+                          void applyCompactPercent(next)
+                        }}
+                      >
+                        {!compactPercent && <option value="" disabled>等待模型信息</option>}
+                        {compactOptions.map((percent) => (
+                          <option key={percent} value={percent}>上下文达到 {percent}% 时</option>
+                        ))}
+                      </select>
+                      {settings?.compaction?.enabled === false && <span className="field-inline">已关闭</span>}
                     </div>
                     <p className="field-hint">
-                      全局默认，对所有会话生效（包括新会话）。阈值按当前模型的上下文窗口换算成 pi 的{' '}
-                      <code>reserveTokens</code>
-                      ，按比例保存，换模型时会重新计算。没有窗口信息的自定义模型请先补上
-                      <code>contextWindow</code>。
+                      {settings?.compaction?.enabled !== false && status.model?.contextWindow && compactPercent
+                        ? '当前窗口 ' + formatTokens(status.model.contextWindow) + '，约 ' +
+                          formatTokens(Math.round(Number(compactPercent) / 100 * status.model.contextWindow)) +
+                          ' tokens 时压缩。'
+                        : ''}
+                      适用于支持此设置的会话，换模型时按窗口比例计算。
                     </p>
-                  </div>
-
-                  <div className="field">
-                    <label>默认自动压缩阈值</label>
-                    <select
-                      value={compactPercent || String(status.autoCompactPercent ?? 90)}
-                      disabled={compactBusy || settings?.compaction?.enabled === false}
-                      onChange={(event) => {
-                        const next = Number(event.target.value)
-                        setCompactPercent(String(next))
-                        void applyCompactPercent(next)
-                      }}
-                    >
-                      {compactOptions.map((percent) => (
-                        <option key={percent} value={percent}>
-                          窗口的 {percent}%
-                        </option>
-                      ))}
-                    </select>
-                    <p className="field-hint">
-                      {status.model?.contextWindow
-                        ? `当前模型窗口 ${formatTokens(status.model.contextWindow)}，到约 ${formatTokens(
-                            Math.round(
-                              ((Number(compactPercent) || status.autoCompactPercent || 90) / 100) *
-                                status.model.contextWindow
-                            )
-                          )} tokens 时压缩；剩下的余量留给下一轮回复。`
-                        : '当前模型没有上下文窗口信息，切到有窗口的模型后自动换算。'}
-                      正在运行时可改，pi 会在本轮结束后重启生效；也能用{' '}
-                      <code>/autocompact 500000</code> 按 token 数设置。
-                    </p>
-                  </div>
-                </>
-              ) : (
-                <div className="field">
-                  <label>自动压缩</label>
-                  <p className="field-hint">
-                    由当前引擎原生管理；桌面不覆盖其阈值。手动压缩使用 /compact。
-                  </p>
-                </div>
-              )}
+                  </>
+                ) : (
+                  <p className="field-hint">由当前引擎管理；可使用 /compact 手动压缩。</p>
+                )}
+              </div>
               {desktopConfig?.capabilities?.toolPolicy === 'sandbox' && (
                 <div className="field">
                   <label>文件访问范围</label>
@@ -1436,6 +1299,20 @@ export function SettingsModal({
           )}
         </section>
       </div>
+
+      {providerEditor && (
+        <ProviderEditor
+          filePath={providerEditor.file.path}
+          content={providerEditor.file.content}
+          provider={providerEditor.provider}
+          initialMode={providerEditor.mode}
+          builtinIds={builtinIds}
+          knownIds={new Set(allProviders.map((provider) => provider.id))}
+          onSave={saveModels}
+          onClose={() => setProviderEditor(undefined)}
+          onOpenFile={() => void window.pi.openModelsJson()}
+        />
+      )}
 
       {modelConfig && (
         <div className="login-backdrop">

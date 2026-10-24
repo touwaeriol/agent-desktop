@@ -628,6 +628,7 @@ export function Sidebar({
             >
               <span className="pinned-index">{index + 1}</span>
               <span className="pinned-title">{session.title}</span>
+              <span className="session-engine">{engineLabel(session.engine)}</span>
               <button
                 className="pinned-unpin"
                 title="取消置顶"
@@ -799,6 +800,7 @@ export function Sidebar({
                           <span className="session-title">{session.title}</span>
                           <span className="session-meta">
                             <span>{formatTime(session.updatedAt)}</span>
+                            <span className="session-engine">{engineLabel(session.engine)}</span>
                             {isArchived && <span className="session-archived">已归档</span>}
                             {session.path === activePath && (
                               <span className="session-current">当前</span>

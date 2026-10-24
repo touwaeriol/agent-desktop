@@ -13,8 +13,7 @@ export interface EngineCapabilities {
   providerSettings: boolean
   speed: boolean
   sessionStorage: 'managed' | 'native'
-  toolPolicy: 'toggles' | 'sandbox' | 'managed'
-  configurableTools: string[]
+  toolPolicy: 'native' | 'sandbox' | 'managed'
 }
 export interface EngineCommand {
   name: string
@@ -47,8 +46,7 @@ export function engineCapabilities(id: EngineId): EngineCapabilities {
     providerSettings: !cli,
     speed: !cli,
     sessionStorage: cli ? 'native' : 'managed',
-    toolPolicy: id === 'claude' ? 'toggles' : id === 'codex' ? 'sandbox' : 'managed',
-    configurableTools: id === 'claude' ? ['Bash', 'Write', 'Edit', 'Task'] : []
+    toolPolicy: id === 'claude' ? 'native' : id === 'codex' ? 'sandbox' : 'managed'
   }
 }
 export function engineCommands(

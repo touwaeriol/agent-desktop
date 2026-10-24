@@ -14,7 +14,7 @@ import { CodexEngine } from './agent/codex-engine'
 import { PropheyEngine } from './agent/prophey-engine'
 import { PiEngine } from './agent/pi-engine'
 import { listSessions, readSummary } from './sessions'
-import { SessionStore, toSummary } from './session-store'
+import { SessionStore, toSummary, type SessionRecord } from './session-store'
 import { TranscriptStore } from './transcript-store'
 import * as providers from './providers'
 import * as updates from './updates'
@@ -89,6 +89,7 @@ async function importPiSessions(): Promise<void> {
     await sessionStore
       .upsert({
         path: summary.path,
+        engine: 'pi',
         cwd: summary.cwd,
         title: summary.title,
         createdAt: summary.createdAt,
@@ -98,8 +99,20 @@ async function importPiSessions(): Promise<void> {
   }
 }
 
-/** Record (or refresh) the session the engine is currently running. */
-async function rememberSession(extra: { title?: string } = {}, duringSwitch = false): Promise<void> {
+let sessionWrite: Promise<void> = Promise.resolve()
+
+/** Finish earlier observations before committing an engine change to the same session. */
+function rememberSession(
+  extra: { title?: string } = {}, duringSwitch = false, previous?: SessionRecord
+): Promise<void> {
+  const next = sessionWrite.then(() => recordCurrentSession(extra, duringSwitch, previous))
+  sessionWrite = next.catch(() => undefined)
+  return next
+}
+
+async function recordCurrentSession(
+  extra: { title?: string } = {}, duringSwitch = false, previous?: SessionRecord
+): Promise<void> {
   if (switchingEngine && !duringSwitch) return
   if (!sessionStore || btwActive) return
   const owner = currentEngine
@@ -116,8 +129,8 @@ async function rememberSession(extra: { title?: string } = {}, duringSwitch = fa
   const projectId = desktopConfig.activeProject
   if (desktopConfig.engineSessions?.[engineId] !== file)
     await saveConfig({ engineSessions: { ...desktopConfig.engineSessions, [engineId]: file } })
-  let title = snapshot.sessionName ?? extra.title
-  const known = sessionStore.byPath(file)
+  let title = previous?.title || snapshot.sessionName || extra.title
+  const known = previous ?? sessionStore.byPath(file)
   if (!title && (!known || !known.title)) {
     if (isNativeSessionReference(file)) {
       const messages = await owner.messages().catch(() => [])
@@ -133,8 +146,9 @@ async function rememberSession(extra: { title?: string } = {}, duringSwitch = fa
         .slice(0, 80)
     } else title = (await readSummary(file).catch(() => null))?.title
   }
-  await sessionStore
-    .upsert({
+  if (owner !== currentEngine || (switchingEngine && !duringSwitch)) return
+  const saved = await sessionStore.upsert({
+      ...(previous ? { id: previous.id, key: previous.key || previous.path || previous.id } : {}),
       engine: engineId,
       path: file,
       cwd: snapshot.cwd,
@@ -142,8 +156,10 @@ async function rememberSession(extra: { title?: string } = {}, duringSwitch = fa
       additional: workspace.additional,
       ...(projectId ? { projectId } : {}),
       updatedAt: Date.now()
-    })
-    .catch(() => undefined)
+    }, Boolean(previous))
+  const activeSession = toSummary(saved).path
+  if (desktopConfig.activeSession !== activeSession) await saveConfig({ activeSession })
+  broadcastStatus()
 }
 
 /** The project the window is working in, when one is selected. */
@@ -158,6 +174,16 @@ let desktopConfig: DesktopConfig = {}
 function currentEngineId(): 'pi' | 'prophey' | 'claude' | 'codex' {
   const wanted = desktopConfig.engine
   return wanted === 'pi' || wanted === 'claude' || wanted === 'codex' ? wanted : 'prophey'
+}
+
+function defaultEngineId(): EngineId {
+  const id = desktopConfig.defaultEngine
+  return id && ['pi', 'prophey', 'claude', 'codex'].includes(id) ? id : 'prophey'
+}
+
+function toSummaryKey(file: string): string {
+  const record = sessionStore?.byPath(file)
+  return record ? toSummary(record).path : file
 }
 
 /**
@@ -232,12 +258,7 @@ function createEngine(): AgentEngine {
     return new ClaudeCodeEngine({
       ...shared,
       binary: claudeBinary(),
-      historyStore: new ImportedHistoryStore(path.join(app.getPath('userData'), 'imports', 'claude')),
-      // Ignore retired web toggles so old settings cannot silently disable native search.
-      disabledTools: () =>
-        (desktopConfig.engineTools?.claude ?? []).filter(
-          (tool) => tool !== 'WebFetch' && tool !== 'WebSearch'
-        )
+      historyStore: new ImportedHistoryStore(path.join(app.getPath('userData'), 'imports', 'claude'))
     })
   }
   if (desktopConfig.engine === 'codex') {
@@ -394,14 +415,16 @@ interface DesktopConfig {
    * `codex` (Codex CLI).
    */
   engine?: 'pi' | 'prophey' | 'claude' | 'codex'
+  /** Only used when creating a conversation; changing another session never changes it. */
+  defaultEngine?: EngineId
+  /** Stable key of the last open conversation. */
+  activeSession?: string
   /** Current Prophey-engine session id; rotates when a new session starts. */
   propheySessionId?: string
-  /** Tools switched off for a CLI engine (its own tool names). */
-  engineTools?: { claude?: string[]; codex?: string[] }
   engineSessions?: Partial<Record<EngineId, string>>
   /** Recover the source if the process exits before a context transfer commits. */
   pendingEngineSwitch?: { engine: EngineId; cwd: string; session?: string;
-    propheySessionId?: string; activeProject?: string }
+    propheySessionId?: string; activeProject?: string; record?: SessionRecord }
   codexSandbox?: 'read-only' | 'workspace-write'
   /** Repositories the user worked in, most recent first (sidebar "切换仓库" menu). */
   recentRepos?: string[]
@@ -1119,6 +1142,9 @@ function statusSnapshot(): PiStatus {
   return {
     ...status,
     engine: currentEngineId(),
+    sessionKey: status.sessionFile
+      ? toSummaryKey(status.sessionFile)
+      : undefined,
     switchingEngine,
     ...(switchingEngine ? { phase: 'starting' as const, isStreaming: true } : {}),
     capabilities: currentEngine.capabilities(),
@@ -1367,6 +1393,69 @@ function sendLoginMessage(message: LoginMessage): void {
   mainWindow?.webContents.send('providers:login-message', message)
 }
 
+/** Open the selected conversation, or allocate a fresh one using the creation default. */
+async function activateConversation(options: { cwd: string; sessionPath?: string; projectId?: string }): Promise<PiStatus> {
+  if (switchingEngine || currentEngine.starting()) throw new Error('正在切换会话，请稍候')
+  if (btwActive) await closeSideChat()
+  if (currentEngine.busy()) throw new Error('请先停止当前回合')
+  const record = options.sessionPath ? sessionStore?.byPath(options.sessionPath) : undefined
+  const file = record?.path || options.sessionPath
+  const target: EngineId = file ? record?.engine ??
+    (file.startsWith('claude:') ? 'claude' : file.startsWith('codex:') ? 'codex' :
+      path.dirname(file) === path.join(app.getPath('userData'), 'transcripts') ? 'prophey' : 'pi')
+    : defaultEngineId()
+  const source = currentEngine
+  const sourceFile = source.state().sessionFile
+  let sourceRef: string | undefined
+  switchingEngine = target
+  broadcastStatus()
+  let original = { ...desktopConfig }
+  let replaced = false
+  try {
+    sourceRef = sourceFile && (isNativeSessionReference(sourceFile)
+      ? (await source.messages()).length > 0 : existsSync(sourceFile)) ? sourceFile : undefined
+    await rememberSession({}, true)
+    original = { ...desktopConfig }
+    await saveConfig({ pendingEngineSwitch: {
+      engine: source.id as EngineId, cwd: source.workspace().primary, session: sourceRef,
+      propheySessionId: original.propheySessionId, activeProject: original.activeProject,
+      record: sourceRef ? sessionStore?.byPath(sourceRef) : undefined
+    } })
+    source.dispose()
+    replaced = true
+    await saveConfig({
+      engine: target, cwd: record?.cwd || options.cwd,
+      activeProject: record?.projectId ?? options.projectId,
+      activeSession: record ? toSummary(record).path : undefined,
+      ...(!file ? { engineSessions: { ...desktopConfig.engineSessions, [target]: undefined } } : {}),
+      ...(!file && target === 'prophey' ? { propheySessionId: 's_' + randomUUID() } : {})
+    })
+    currentEngine = createEngine()
+    currentEngine.poll()
+    const next = await startPi(record?.cwd || options.cwd, file ? ['--session', file] : [])
+    if (next.phase === 'error' || currentEngine.state().phase !== 'ready') {
+      throw new Error(currentEngine.state().error ?? '会话启动失败')
+    }
+    await rememberSession({}, true)
+    await saveConfig({ pendingEngineSwitch: undefined })
+  } catch (error) {
+    if (replaced) currentEngine.dispose()
+    await saveConfig({ ...original, activeSession: original.activeSession,
+      engineSessions: original.engineSessions, propheySessionId: original.propheySessionId,
+      activeProject: original.activeProject, pendingEngineSwitch: undefined })
+    if (replaced) {
+      currentEngine = createEngine()
+      currentEngine.poll()
+      await currentEngine.start(source.workspace(), { session: sourceRef })
+    }
+    throw error
+  } finally {
+    switchingEngine = undefined
+    broadcastStatus()
+  }
+  return statusSnapshot()
+}
+
 function registerIpc(): void {
   const handle: typeof ipcMain.handle = (channel, listener) => ipcMain.handle(channel, (event, ...args) => {
     const mutatesEngine =
@@ -1388,8 +1477,7 @@ function registerIpc(): void {
     // A session belongs to one repository: a subdirectory lands on the repo root instead, so the
     // sidebar groups by repository and the agent's cwd is the repo it is working on.
     const workspace = await repo.repoRoot(cwd).then((root) => root ?? cwd)
-    await saveConfig({ cwd: workspace })
-    return startPi(workspace)
+    return activateConversation({ cwd: workspace, projectId: desktopConfig.activeProject })
   })
 
   handle('pi:repo-info', async (_event, dir?: string) => {
@@ -1505,10 +1593,8 @@ function registerIpc(): void {
   handle('projects:activate', async (_event, id?: string) => {
     const project = id ? projectStore?.get(id) : undefined
     if (id && !project) return { ok: false, error: '项目不存在' }
-    await saveConfig({ activeProject: project?.id })
-    if (btwActive) await closeSideChat()
     const primary = project?.roots.find((root) => root.primary) ?? project?.roots[0]
-    return startPi(primary?.path ?? status.cwd)
+    return activateConversation({ cwd: primary?.path ?? status.cwd, projectId: project?.id })
   })
 
   handle('repos:recent', () => desktopConfig.recentRepos ?? [])
@@ -1538,33 +1624,14 @@ function registerIpc(): void {
     return { ok: true }
   })
 
-  handle('pi:open-session', async (_event, sessionPath: string, cwd: string) => {
-    if (btwActive) await closeSideChat()
-    if (currentEngine.busy()) throw new Error('请先停止当前回合')
-    const record = sessionStore?.byPath(sessionPath)
-    const id: EngineId =
-      record?.engine ??
-      (sessionPath.startsWith('claude:')
-        ? 'claude'
-        : sessionPath.startsWith('codex:')
-          ? 'codex'
-          : path.dirname(sessionPath) === path.join(app.getPath('userData'), 'transcripts')
-            ? 'prophey'
-            : 'pi')
-    if (id !== currentEngineId()) {
-      currentEngine.dispose()
-      await saveConfig({ engine: id, cwd, activeProject: record?.projectId })
-      currentEngine = createEngine()
-      currentEngine.poll()
-    } else await saveConfig({ cwd, activeProject: record?.projectId })
-    return startPi(cwd, ['--session', sessionPath])
-  })
+  handle('pi:open-session', (_event, sessionPath: string, cwd: string) =>
+    activateConversation({ sessionPath, cwd }))
 
   handle('desktop:config', () => ({
     engine: currentEngineId(),
+    defaultEngine: defaultEngineId(),
     capabilities: currentEngine.capabilities(),
     codexSandbox: desktopConfig.codexSandbox,
-    engineTools: desktopConfig.engineTools ?? {},
     cwd: status.cwd,
     sessionMode: currentSessionMode(),
     sessionDir: currentSessionDir(),
@@ -1609,6 +1676,12 @@ function registerIpc(): void {
   handle('updates:auto', (_event, enabled: boolean) => updates.setAuto(enabled))
   handle('app:proxy', () => getProxyInfo())
 
+  handle('desktop:set-default-engine', async (_event, next: EngineId) => {
+    if (!['pi', 'prophey', 'claude', 'codex'].includes(next)) throw new Error('未知引擎')
+    await saveConfig({ defaultEngine: next })
+    return { ok: true }
+  })
+
   handle('desktop:set-engine', async (_event, next: EngineId) => {
     if (!['pi', 'prophey', 'claude', 'codex'].includes(next)) throw new Error('未知引擎')
     if (switchingEngine) throw new Error('正在切换引擎，请稍候')
@@ -1619,6 +1692,7 @@ function registerIpc(): void {
     let originalConfig = { ...desktopConfig }
     let source = currentEngine
     let sourceRef: string | undefined
+    let sourceRecord: SessionRecord | undefined
     let replaced = false
     try {
       if (btwActive) await closeSideChat()
@@ -1634,10 +1708,11 @@ function registerIpc(): void {
       const ref = source.state().sessionFile
       sourceRef = ref && (isNativeSessionReference(ref) ? history.length > 0 : existsSync(ref)) ? ref : undefined
       await rememberSession({}, true)
+      sourceRecord = sourceRef ? sessionStore?.byPath(sourceRef) : undefined
       originalConfig = { ...desktopConfig }
       await saveConfig({ pendingEngineSwitch: { engine: source.id as EngineId,
         cwd: workspace.primary, session: sourceRef, propheySessionId: desktopConfig.propheySessionId,
-        activeProject: desktopConfig.activeProject } })
+        activeProject: desktopConfig.activeProject, record: sourceRecord } })
       source.dispose()
       replaced = true
       await saveConfig({ engine: next,
@@ -1648,13 +1723,15 @@ function registerIpc(): void {
       if (started.phase !== 'ready') throw new Error(started.error ?? '目标引擎启动失败')
       if (history.length) await currentEngine.importHistory(history)
       await afterStart(workspace.primary, [])
-      await rememberSession({}, true)
+      await rememberSession({}, true, sourceRecord)
       await saveConfig({ pendingEngineSwitch: undefined })
     } catch (error) {
       if (replaced) {
         currentEngine.dispose()
+        if (sourceRecord) await sessionStore?.upsert(sourceRecord, true)
         await saveConfig({ ...originalConfig, propheySessionId: originalConfig.propheySessionId,
-          engineSessions: originalConfig.engineSessions, pendingEngineSwitch: undefined })
+          engineSessions: originalConfig.engineSessions, activeSession: originalConfig.activeSession,
+          pendingEngineSwitch: undefined })
         currentEngine = createEngine()
         currentEngine.poll()
         try {
@@ -1672,19 +1749,6 @@ function registerIpc(): void {
     return statusSnapshot()
   })
 
-  handle(
-    'desktop:set-engine-tools',
-    async (_event, engine: 'claude' | 'codex', disabled: string[]) => {
-      const next = {
-        ...(desktopConfig.engineTools ?? {}),
-        [engine]: Array.isArray(disabled) ? disabled.filter((name) => typeof name === 'string') : []
-      }
-      await saveConfig({ engineTools: next })
-      if (engine === currentEngineId()) await reloadPiConfig()
-      return { ok: true, engineTools: next }
-    }
-  )
-
   handle('desktop:set-session-mode', async (_event, mode: SessionMode) => {
     if (btwActive) await closeSideChat()
     await saveConfig({ sessionMode: mode === 'isolated' ? 'isolated' : 'shared' })
@@ -1701,8 +1765,7 @@ function registerIpc(): void {
     // Picking a subdirectory is normal (people browse to `src/`); the session still belongs to the
     // repository, so start at its root and keep the grouping honest.
     const cwd = (await repo.repoRoot(result.filePaths[0])) ?? result.filePaths[0]
-    await saveConfig({ cwd })
-    return startPi(cwd)
+    return activateConversation({ cwd })
   })
 
   handle(
@@ -1730,21 +1793,17 @@ function registerIpc(): void {
   })
 
   handle('pi:new-session', async () => {
-    if (!currentEngine.running()) return { ok: false, error: 'pi 未运行' }
-    if (btwActive) await closeSideChat()
     try {
-      const response = await currentEngine.newSession()
-      return { ok: true, cancelled: response.cancelled }
+      await activateConversation({ cwd: status.cwd, projectId: desktopConfig.activeProject })
+      return { ok: true }
     } catch (error) {
       return { ok: false, error: error instanceof Error ? error.message : String(error) }
     }
   })
 
   handle('pi:switch-session', async (_event, sessionPath: string) => {
-    if (!currentEngine.running()) return { ok: false, error: 'pi 未运行' }
-    if (btwActive) await closeSideChat()
     try {
-      await currentEngine.switchSession(sessionPath)
+      await activateConversation({ cwd: status.cwd, sessionPath })
       return { ok: true }
     } catch (error) {
       return { ok: false, error: error instanceof Error ? error.message : String(error) }
@@ -2515,12 +2574,12 @@ app.whenReady().then(async () => {
   await migrateLegacyUserData()
   await applySystemProxy()
   desktopConfig = await loadConfig()
+  if (!desktopConfig.defaultEngine) await saveConfig({ defaultEngine: currentEngineId() })
   const interruptedSwitch = desktopConfig.pendingEngineSwitch
   if (interruptedSwitch) {
     await saveConfig({ engine: interruptedSwitch.engine, cwd: interruptedSwitch.cwd,
       activeProject: interruptedSwitch.activeProject, propheySessionId: interruptedSwitch.propheySessionId,
-      engineSessions: { ...desktopConfig.engineSessions, [interruptedSwitch.engine]: interruptedSwitch.session },
-      pendingEngineSwitch: undefined })
+      engineSessions: { ...desktopConfig.engineSessions, [interruptedSwitch.engine]: interruptedSwitch.session } })
   }
   // Projects live beside the config, in userData; the store reads the file on first use.
   projectStore = new projects.ProjectStore(path.join(app.getPath('userData'), 'projects.json'))
@@ -2528,6 +2587,13 @@ app.whenReady().then(async () => {
   // The window's session list: ids, titles and workspaces we own; pi's files are engine storage.
   sessionStore = new SessionStore(path.join(app.getPath('userData'), 'sessions.json'))
   await sessionStore.load().catch(() => undefined)
+  if (interruptedSwitch?.record) {
+    await sessionStore.upsert(interruptedSwitch.record, true)
+    await saveConfig({ activeSession: toSummary(interruptedSwitch.record).path })
+  }
+  if (interruptedSwitch) await saveConfig({ pendingEngineSwitch: undefined })
+  const activeRecord = desktopConfig.activeSession ? sessionStore.byPath(desktopConfig.activeSession) : undefined
+  if (activeRecord?.engine) await saveConfig({ engine: activeRecord.engine, cwd: activeRecord.cwd, activeProject: activeRecord.projectId })
   if (desktopConfig.engine !== 'pi' && !desktopConfig.propheySessionId) {
     await saveConfig({ propheySessionId: `s_${Math.random().toString(16).slice(2, 14)}` })
   }
@@ -2604,7 +2670,7 @@ app.whenReady().then(async () => {
       broadcastStatus()
     })
     .catch(() => undefined)
-  const savedSession = desktopConfig.engineSessions?.[currentEngineId()]
+  const savedSession = activeRecord?.path || desktopConfig.engineSessions?.[currentEngineId()]
   void startPi(cwd, savedSession ? ['--session', savedSession] : [])
     .then(() => syncAutoCompact())
     .catch((error) => {

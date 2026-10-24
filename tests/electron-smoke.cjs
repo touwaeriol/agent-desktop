@@ -18,7 +18,9 @@ async function until(probe, label) {
 }
 app.on('browser-window-created', (_event, window) => {
   window.webContents.once('did-finish-load', async () => {
-    const evaluate = source => window.webContents.executeJavaScript(source)
+    const evaluate = source => window.webContents.executeJavaScript(source).catch(error => {
+      throw Error(`${error.message}\nRenderer script: ${source}`)
+    })
     try {
       await until(() => evaluate('window.pi.getStatus().then(s => s.phase === "ready")'), 'engine ready')
       const config = await evaluate('window.pi.getDesktopConfig()')
@@ -44,6 +46,7 @@ app.on('browser-window-created', (_event, window) => {
       const nav = await evaluate('Array.from(document.querySelectorAll(".settings-nav button"), b => b.textContent).join(" ")')
       assert.match(nav, /服务商/)
       assert.match(nav, /MCP/)
+      await require('./provider-settings-smoke.cjs')(evaluate, until)
       await evaluate('document.querySelector(".modal-backdrop").dispatchEvent(new MouseEvent("mousedown", { bubbles: true }))')
       await until(() => evaluate('!document.querySelector(".settings")'), 'settings dismiss')
       const pi = await evaluate('window.pi.setEngine("pi")')

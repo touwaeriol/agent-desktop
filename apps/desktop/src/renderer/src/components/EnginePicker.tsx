@@ -4,7 +4,7 @@ import type { PiStatus } from '@shared/types'
 
 const engines: EngineId[] = ['prophey', 'pi', 'claude', 'codex']
 
-/** Switching copies the current conversation; it does not open another engine's old session. */
+/** The selected engine belongs to this conversation, independently of creation defaults. */
 export function EnginePicker({ status, compact = false, disabled = false, onNotice, onChanged }: {
   status: PiStatus
   compact?: boolean
@@ -16,7 +16,7 @@ export function EnginePicker({ status, compact = false, disabled = false, onNoti
   const current = status.engine ?? 'prophey'
   const busy = Boolean(status.isStreaming || status.compacting)
   const unavailable = disabled || changing || Boolean(status.switchingEngine) || status.phase === 'starting'
-  const title = busy ? '停止当前回合，携带正文和工具记录切换；思考内容不迁移' : '携带当前对话切换 agent；思考内容不迁移'
+  const title = busy ? '更换当前会话的引擎，先停止本轮；其他会话不变' : '当前会话的引擎；切换时保留正文和工具记录，其他会话不变'
   const change = async (next: EngineId): Promise<void> => {
     if (next === current || unavailable) return
     setChanging(true)
@@ -24,7 +24,7 @@ export function EnginePicker({ status, compact = false, disabled = false, onNoti
       const result = await window.pi.setEngine(next)
       if (result.phase !== 'ready') throw new Error(result.error ?? '切换失败')
       await onChanged?.()
-      onNotice?.('已携带当前对话切换到 ' + engineLabel(next))
+      onNotice?.('当前会话已使用 ' + engineLabel(next))
     } catch (error) {
       onNotice?.(error instanceof Error ? error.message : String(error))
     } finally {
@@ -40,7 +40,8 @@ export function EnginePicker({ status, compact = false, disabled = false, onNoti
     </div>
   )
   return <label className="engine-picker" title={title}>
-    <select aria-label="切换 agent" disabled={unavailable} value={status.switchingEngine ?? current}
+    <span className="engine-picker-label">会话引擎</span>
+    <select aria-label="当前会话引擎" disabled={unavailable} value={status.switchingEngine ?? current}
       onChange={(event) => void change(event.target.value as EngineId)}>
       {engines.map((id) => <option key={id} value={id}>
         {busy && id !== current ? '停止并切换到 ' : ''}{engineLabel(id)}

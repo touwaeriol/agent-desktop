@@ -50,8 +50,7 @@ const bridge: PiBridge = {
   getDesktopConfig: () => ipcRenderer.invoke('desktop:config'),
   setEngine: (engine: 'pi' | 'prophey' | 'claude' | 'codex') =>
     ipcRenderer.invoke('desktop:set-engine', engine),
-  setEngineTools: (engine: 'claude' | 'codex', disabled: string[]) =>
-    ipcRenderer.invoke('desktop:set-engine-tools', engine, disabled),
+  setDefaultEngine: (engine) => ipcRenderer.invoke('desktop:set-default-engine', engine),
   setSessionMode: (mode: 'shared' | 'isolated') =>
     ipcRenderer.invoke('desktop:set-session-mode', mode) as Promise<PiStatus>,
   setProfile: (mode: 'shared' | 'desktop') => ipcRenderer.invoke('desktop:set-profile', mode),

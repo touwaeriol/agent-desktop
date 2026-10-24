@@ -31,8 +31,8 @@ npm run typecheck    # node + web 两个 tsconfig 分别检查
 - 登录：`runtime.login(providerId, 'oauth' | 'api_key', interaction)`。`interaction.prompt` / `notify` 通过 `providers:login-message` 发给渲染层，答案从 `providers:answer-login` 回来；OAuth 的授权 URL / device code 会自动用系统浏览器打开。
 - 凭据写入 `~/.pi/agent/auth.json`；`models.json` 保存后必须 `resetRuntime()` 再重建，否则模型目录是旧的。`settings.json` 只合并 `defaultProvider` / `defaultModel` / `defaultThinkingLevel`。
 - 凭据、models.json、settings 变更后主进程重启 pi，并用 `--session <当前会话文件>` 保留对话；如果正在流式输出则跳过重启，下次启动生效（`configPending`，见「运行状态」）。
-- **自定义接口地址**只对 `BASE_URL_PROVIDERS`（anthropic / openai / google / deepseek）开放，写进 `models.json` 的 `providers.<id>.baseUrl`——pi 文档保证「只给已有服务商设 baseUrl/headers 会保留其内置模型」，所以不需要重写模型列表。`setProviderBaseUrl` 会保留该 provider 的其他字段，清空时连空的 provider 对象一起删掉。改完必须重启 pi（`reloadPiConfig()`），web 引擎则通过 `providers.getRuntime()` 立刻看到新地址。
-- **自定义服务商的每个模型必须填 `contextWindow`**（`CustomProvidersPanel` 保存时校验）。缺了它 pi 只能用默认 16K 余量做自动压缩，用量显示也会失准；官方内置服务商的窗口 pi 目录里已有，不需要用户填。
+- **服务商统一入口**：设置页只保留“服务商”，所有条目都可通过 `ProviderEditor.tsx` 编辑地址、协议和模型，顶部提供添加服务商与高级 JSON。定义仍由 pi SDK 预置目录叠加 `models.json` 得到；`builtin` 仅用于内部默认值校验和恢复预置配置，不再作为界面分类。旧的 `setProviderBaseUrl` IPC 保留兼容，新界面统一保存 `models.json`，随后重建 runtime 并应用到当前引擎。
+- **新增或修改的模型必须填 `contextWindow`**（`ProviderEditor` 保存时校验）。缺了它会影响自动压缩与用量显示；只修改预置服务商地址时不写空模型列表，继续沿用预置模型目录。
 - 区域/订阅版本是 pi 的**独立 provider id**，不要合并：`moonshotai-cn`/`moonshotai`（Kimi 国内/海外）、`kimi-coding`（Kimi 订阅）、`minimax-cn`/`minimax`、`zai`/`zai-coding-cn`（Z.AI 海外/国内订阅）、`google`（AI Studio）/`google-vertex`。设置页用 `PROVIDER_NOTES` 给这些 id 加中文说明，而不是改名字或做映射。
 - 模型切换：输入条模型 chip 打开列表，数据来自 RPC `get_available_models`（只含已配置凭据的服务商），选择后调用 `set_model` 并广播新状态；不要再用 `cycle_model` 盲切。
 - 同一会话内跨服务商切换是 pi 原生能力：`set_model` 只要求新服务商有凭据，会向会话追加 `model_change` 记录，历史保持不变，下一条 assistant 消息记录新的 `provider/model`。恢复会话时 pi 用会话里最后一个 `model_change` / assistant 消息恢复模型（`sdk.js` 的 `getBranchSelection` + `hasConfiguredAuth`）；凭据缺失才回退默认模型并给出 “Could not restore model …”。切换的代价是 prompt cache 归零、换到窗口更小的模型会触发自动压缩；没有 provider 签名的 thinking 块在发给 Anthropic 时会被降级成普通文本（`pi-ai/dist/api/anthropic-messages.js`）。
@@ -65,7 +65,7 @@ npm run typecheck    # node + web 两个 tsconfig 分别检查
 - `isModelEnabled` 用 `getMatchers`：精确模式进 Set、通配模式预编译成 RegExp，按模式串缓存，禁止再在循环里 `new RegExp`。`listModelChoices` 结果也按「模式 + 已配置服务商」缓存，凭据/`models.json`/`settings.json` 变化时调用 `invalidateCache()`（登录、登出、保存设置、保存模型列表都会调用）。
 - `listModelChoices` 默认只返回**已配置凭据**的服务商模型（1560 → 5），否则 contextBridge 跨隔离世界复制上千个对象会让设置页卡 2 秒。需要全部模型时传 `{ includeUnconfigured: true }`。
 - 主进程启动时在后台 `listProviders()` / `listModelChoices()` 预热（`whenReady` 里），让第一次打开设置不用等 `ModelRuntime` 冷启动（约 500ms）。
-- 自定义服务商界面在 `CustomProvidersPanel.tsx`：表单模式维护 `models.json` 的 providers，保留未知字段（headers/compat/cost 等）并支持表单/JSON 切换；新建模型默认补零 cost。内置服务商判断用 `ProviderInfo.builtin`（单独创建 `modelsPath: null` 的 ModelRuntime 取基线 ID），不要用当前 runtime 的 provider 列表，否则自定义服务商会被误标为“覆盖内置”。
+- 服务商列表合并 runtime 与 `models.json` 中的定义，尚无凭据或运行时未提供登录方式的条目也可编辑。`ProviderEditor.tsx` 保留未知字段（headers/compat/cost 等），保存失败时保留草稿；重复 ID 要从列表编辑。删除预置条目的配置称为“恢复预置配置”，不删除 SDK 目录和 OAuth 凭据。预置 ID 仍从 `modelsPath: null` 的独立 ModelRuntime 获取，不能用叠加后的目录判断。
 - OpenAI ChatGPT 订阅登录必须在 `runtime.login` 的 options 里传 `getDeviceId`（稳定的 UUID，保存在 Electron userData 的 `device-id` 文件），否则报 “Sign in with ChatGPT requires a device ID (UUID) for this installation”。
 - 两个 OpenAI 服务商是 pi 内置的：`openai`（ChatGPT 订阅 / API Key，标准模型）和 `openai-codex`（旧版 Codex 渠道，仅 ChatGPT Plus/Pro，模型较少）。设置页对两者有说明文案。
 
@@ -101,7 +101,7 @@ npm run typecheck    # node + web 两个 tsconfig 分别检查
 
 - 设置弹窗可拖右下角缩放（CSS `resize: both`，最小 720×460），尺寸存 `localStorage["pi-settings-size"]`，由 `ResizeObserver` 在 400ms 防抖后写入；`SettingsModal` 常驻挂载，所以关闭再打开尺寸不会丢。
 - 服务商列表左侧的 `.provider-mark` 用**品牌图标**（`ProviderMark.tsx`）：路径来自 `@lobehub/icons-static-svg`（MIT）并**内联进源码**，不要再装那个包。图标是单色、用 `currentColor` 上色，颜色取 `--provider-color`；品牌色在黑/白主题之一会消失时（OpenAI、Kimi、Anthropic 这类近黑，Hugging Face 这类近黄）退回 `currentColor`。图标集里没有的品牌（Radius、小米）显示首字母，不要自己重画 logo。
-- MCP 页的行要压扁：描述一律单行省略（`.mcp-row-sub` 的 `nowrap`），行内边距 6px 10px，内置引擎卡片 7px 10px，工具列表默认折叠。不要再让一段说明换两三行——一个服务器占半屏时下面的服务器列表会被挤出视野。
+- MCP 页使用紧凑服务列表：默认每行只放名称、简短说明、状态、工具数量、配置入口和开关。路径、密钥、索引操作及工具明细默认折叠，配置/工具面板互斥。内置服务不要在下方外部服务列表重复显示；配置路径只在“配置文件位置”展开区显示真实路径。文案面向当前引擎，不再向用户展示 pi 启动参数或扩展注入细节。
 
 ## 消息队列
 
@@ -149,6 +149,8 @@ npm run typecheck    # node + web 两个 tsconfig 分别检查
 - 还没搬完的部分：`/btw` 的 clone/switch、压缩阈值同步、登录消息、MCP 启动参数装配（`prepare` 仍由 `index.ts` 提供，这是刻意的）。
 
 ## CLI 引擎与统一能力
+
+- Claude Code 的 Bash / Read / Write / Edit / Task / 搜索等工具由 CC 原生管理；桌面不传 `tools` / `disallowedTools`，不再读取旧 `engineTools` 配置，也不提供禁用原生工具的设置入口。避免重复应通过不注入 Prophey 的桌面 MCP 工具实现；保留 CC 自己的用户、项目及本地设置和第三方 MCP。
 
 - 共享能力和命令描述在 `src/shared/engine.ts`；引擎契约在 `src/main/agent/engine.ts`。界面与 IPC 使用同一份描述，不按引擎名各写一套判断。
 - `EngineStartOptions` 使用中立的 `session/model` 字段；只有 PiEngine 将其转换为 pi 命令行参数。会话记录保存 engine，原生 `claude:/codex:` 标识不是文件，不能用 existsSync 清理。
@@ -318,8 +320,10 @@ npm run typecheck    # node + web 两个 tsconfig 分别检查
 
 ## 跨引擎切换
 
-- `desktop:set-engine` 现在携带当前对话创建目标新会话；不再跳回目标引擎的旧会话。源会话保留。
+- `desktop:set-engine` 只更换当前会话的引擎：历史导入新的底层会话，但 `SessionRecord.id/key` 保持不变，侧栏不新增重复条目，置顶/归档/标题沿用原值；原始引擎文件保留用于恢复。`SessionSummary.engine` 显示每条会话的引擎。
 - `agent/history.ts` 是唯一清洗/编码层，`AgentEngine.importHistory` 是唯一导入入口。不能搬运 thinking/签名/系统指令，不能重新执行历史工具。
 - CC 使用应用自有 SessionStore；Codex 使用 thread/inject_items，并保存界面前缀（原生 turns 不保证显示注入记录）；pi 使用 SessionManager。
-- `pendingEngineSwitch` 必须在迁移成功并记录目标会话后才清除。切换时 IPC 修改互斥，队列等待 ready；失败及中途退出均恢复源会话。
+- `pendingEngineSwitch` 包含原会话记录，必须在迁移成功并保存目标记录后才清除；失败及中途退出恢复原记录和引擎。会话记录写入串行，跨引擎绑定用严格写入，不能把落盘失败当成功。
+- `config.defaultEngine` 仅决定新建会话；`config.engine` 是当前激活引擎的兼容字段，`config.activeSession` 记录最后打开的会话 key。通用设置只设置“新会话默认引擎”，输入框的“会话引擎”只操作当前会话。
+- 所有会话导航（包括同一目录）都走 `activateConversation`，按目标记录选引擎；不要在渲染层按 cwd 分流到当前引擎的 switchSession。新建会话创建全新的引擎实例，不复用旧 transcript。`PiStatus.sessionKey` 用于侧栏选中，`sessionFile` 保持引擎私有引用。
 - 新增验证：build 后 `npm run test:handoff`；安装本机 CC/Codex 时再运行 `npm run test:handoff -- --native`。只使用隔离 profile 和本地模拟模型，不用用户历史作 fixture。

@@ -16,7 +16,7 @@ esbuild.buildSync({ stdin: { contents: propheySource, loader: 'ts', resolveDir: 
 const { engineCapabilities, engineCommands, isNativeSessionReference } = require(path.join(temp, 'engine.cjs'))
 const { CodexEngine } = require(path.join(temp, 'codex-engine.cjs'))
 const { ClaudeCodeEngine } = require(path.join(temp, 'claude-engine.cjs'))
-const { SessionStore } = require(path.join(temp, 'session-store.cjs'))
+const { SessionStore, toSummary } = require(path.join(temp, 'session-store.cjs'))
 const { JsonRpcProcess } = require(path.join(temp, 'json-rpc-process.cjs'))
 after(() => fs.rmSync(temp, { recursive: true, force: true }))
 const callbacks = (events = []) => ({ onStatus() {}, onEvent(e) { events.push(e) }, onSettled() {} })
@@ -109,6 +109,23 @@ test('session store retains engine identity and opaque native references', async
   const restored = new SessionStore(file); await restored.load()
   assert.deepEqual(restored.list().map(r => r.engine).sort(), ['claude', 'codex'])
 })
+
+test('session engine changes preserve sidebar identity and do not change neighboring sessions', async () => {
+  const file = path.join(temp, 'session-engine-identity.json'), store = new SessionStore(file)
+  const first = await store.upsert({ engine: 'prophey', path: path.join(temp, 'first.jsonl'), cwd: root, title: 'First' })
+  const second = await store.upsert({ engine: 'pi', path: path.join(temp, 'second.jsonl'), cwd: root, title: 'Second' })
+  const key = toSummary(first).path
+  await store.upsert({ id: first.id, engine: 'claude', path: 'claude:switched' }, true)
+  const restored = new SessionStore(file)
+  await restored.load()
+  assert.equal(restored.list().length, 2)
+  assert.equal(toSummary(restored.get(first.id)).path, key)
+  assert.equal(restored.byPath(key).path, 'claude:switched')
+  assert.equal(restored.byPath('claude:switched').id, first.id)
+  assert.equal(toSummary(restored.get(first.id)).engine, 'claude')
+  assert.equal(restored.get(first.id).title, 'First')
+  assert.deepEqual(restored.get(second.id), second)
+})
 test('JSON-RPC requests fail promptly when a process exits', async () => {
   const rpc = new JsonRpcProcess(() => {}, async () => ({}), () => {})
   rpc.start(process.execPath, ['-e', 'process.exit(0)'], temp)
@@ -164,4 +181,68 @@ test('Prophey: stopping cancels the current request before accepting another tur
  await e.abort();assert.equal((await pending).ok,false);assert.equal(e.busy(),false)
  e.streamRoundWithRetry=async()=>({ok:true,message:{role:'assistant',content:[]}})
  assert.equal((await e.prompt('next')).ok,true)
+})
+
+test('Prophey: provider reload preserves an unsaved empty session and refreshes its model', async () => {
+  const { PropheyEngine } = require(path.join(temp, 'prophey-engine.cjs'))
+  const store = { pathFor: id => path.join(temp, id + '.jsonl'), load: async () => undefined }
+  const engine = new PropheyEngine({ ...callbacks(), transcripts: store, sessionId: () => 'empty' })
+  await engine.start(temp)
+  const session = engine.state().sessionFile
+  const oldModel = { id: 'model', provider: 'provider', baseUrl: 'https://old.invalid' }
+  engine.model = oldModel
+  engine.setModel = async (provider, id) => {
+    assert.equal(provider, 'provider')
+    assert.equal(id, 'model')
+    engine.model = { ...oldModel, baseUrl: 'https://new.invalid' }
+  }
+  await engine.start(temp, { session })
+  assert.equal(engine.state().sessionFile, session)
+  assert.deepEqual(await engine.messages(), [])
+  assert.equal(engine.model.baseUrl, 'https://new.invalid')
+  await assert.rejects(engine.start(temp, { session: store.pathFor('missing') }), /会话不存在/)
+})
+
+test('Claude: native tools and configured MCPs survive retired desktop tool settings', async () => {
+  const sdk = path.join(temp, 'claude-tool-policy-sdk.mjs')
+  fs.writeFileSync(sdk, `
+    export function query({ options }) {
+      globalThis.__claudeToolPolicyOptions = options;
+      let close;
+      const closed = new Promise(resolve => { close = resolve });
+      return {
+        supportedModels: async () => [], supportedCommands: async () => [], close,
+        async *[Symbol.asyncIterator]() { await closed }
+      };
+    }
+  `)
+  const source = fs.readFileSync(path.join(root, 'apps/desktop/src/main/agent/claude-engine.ts'), 'utf8')
+    .replaceAll("await import('@anthropic-ai/claude-agent-sdk')", 'await import(' + JSON.stringify(sdk.replaceAll('\\', '/')) + ')')
+  const output = path.join(temp, 'claude-tool-policy.cjs')
+  esbuild.buildSync({ stdin: { contents: source, loader: 'ts', resolveDir: path.join(root, 'apps/desktop/src/main/agent') }, outfile: output, bundle: true, platform: 'node', format: 'cjs', packages: 'external' })
+  const { ClaudeCodeEngine } = require(output)
+  let readRetiredSettings = false
+  const engine = new ClaudeCodeEngine({
+    ...callbacks(), binary: 'unused',
+    disabledTools: () => {
+      readRetiredSettings = true
+      return ['Bash', 'Read', 'Write', 'Edit', 'Task', 'WebSearch', 'WebFetch']
+    }
+  })
+  try {
+    await engine.start(temp)
+    const options = globalThis.__claudeToolPolicyOptions
+    assert.equal(readRetiredSettings, false)
+    assert.equal(options.tools, undefined)
+    assert.equal(options.disallowedTools, undefined)
+    assert.equal(options.mcpServers, undefined, 'do not inject desktop MCP tools')
+    assert.equal(options.strictMcpConfig, undefined, 'do not suppress the user’s MCP configuration')
+    assert.deepEqual(options.settingSources, ['user', 'project', 'local'])
+    assert.equal(typeof options.canUseTool, 'function', 'native approval handling remains intact')
+    assert.equal(engine.capabilities().toolPolicy, 'native')
+    assert.equal(engine.capabilities().mcp, 'native')
+  } finally {
+    engine.stop()
+    delete globalThis.__claudeToolPolicyOptions
+  }
 })
